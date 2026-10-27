@@ -85,8 +85,8 @@ export function VehicleDocumentsModal({
   }
 
   return (
-    <div className="fixed inset-0 z-[3000] bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
-      <div className="w-full max-w-md rounded-3xl bg-slide-paper-ink text-slide-paper p-6 shadow-2xl border border-slide-surface max-h-[90vh] flex flex-col">
+    <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-3">
+      <div className="w-full max-w-sm rounded-3xl bg-slide-paper-ink text-slide-paper p-5 shadow-2xl border border-slide-surface max-h-[85vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between pb-3 border-b border-slide-surface">
           <div>

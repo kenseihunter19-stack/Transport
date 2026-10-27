@@ -293,10 +293,9 @@ export function NativeMobileApp({
   const currentKid = students.find((s) => s.id === selectedKidId) || students[0]!;
 
   return (
-    <div className="min-h-screen bg-slide-bg flex justify-center text-slide-ink antialiased select-none font-sans">
-      <div className="w-full max-w-md min-h-screen bg-slide-paper text-slide-paper-ink flex flex-col relative shadow-2xl overflow-hidden pb-20">
-        {/* Top App Header */}
-        <header className="sticky top-0 z-40 bg-slide-paper-ink text-slide-paper px-4 py-3 flex items-center justify-between shadow-md">
+    <div className="h-full w-full bg-slide-paper text-slide-paper-ink flex flex-col relative overflow-hidden select-none font-sans">
+      {/* Top App Header */}
+      <header className="sticky top-0 z-40 bg-slide-paper-ink text-slide-paper px-4 py-3 flex items-center justify-between shadow-md shrink-0">
           <div className="flex items-center gap-2.5">
             <div className="w-9 h-9 rounded-xl bg-slide-accent text-slide-accent-ink grid place-items-center font-black text-lg shadow">
               T
@@ -344,7 +343,7 @@ export function NativeMobileApp({
         </header>
 
         {/* Multi-Route Corridor Bar */}
-        <div className="bg-slide-paper-ink/95 text-slide-paper px-3 py-2 flex items-center justify-between border-b border-slide-surface text-xs">
+        <div className="bg-slide-paper-ink/95 text-slide-paper px-3 py-2 flex items-center justify-between border-b border-slide-surface text-xs shrink-0 select-none">
           <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
             {Object.values(LUANDA_ROUTES).map((r) => (
               <button
@@ -426,7 +425,7 @@ export function NativeMobileApp({
 
         {/* Dynamic In-App Notification Toast */}
         {toast && (
-          <div className="fixed top-24 left-4 right-4 z-50 max-w-sm mx-auto rounded-2xl bg-slide-paper-ink text-slide-paper p-3.5 text-sm font-semibold shadow-2xl border border-slide-surface animate-in fade-in slide-in-from-top-3">
+          <div className="absolute top-16 left-3 right-3 z-50 max-w-sm mx-auto rounded-2xl bg-slide-paper-ink text-slide-paper p-3.5 text-sm font-semibold shadow-2xl border border-slide-surface animate-in fade-in slide-in-from-top-3">
             <div className="flex items-start gap-2.5">
               <span className="text-base">🔔</span>
               <div className="flex-1">
@@ -438,7 +437,7 @@ export function NativeMobileApp({
         )}
 
         {/* MAIN BODY CONTENT ACCORDING TO ROLE & ACTIVE TAB */}
-        <main className="flex-1 p-4 overflow-y-auto">
+        <main className="flex-1 min-h-0 p-4 overflow-y-auto">
           {/* ================= PARENT INTERFACE ================= */}
           {role === "parent" && (
             <>
@@ -1137,44 +1136,62 @@ export function NativeMobileApp({
         </main>
 
         {/* BOTTOM NAVIGATION BAR */}
-        <nav className="fixed bottom-0 left-0 right-0 max-w-md mx-auto z-40 bg-slide-paper-ink text-slide-paper border-t border-slide-surface/50 px-2 py-2 flex items-center justify-around shadow-2xl">
+        <nav className="shrink-0 w-full z-40 bg-[#0d1117] text-slide-paper border-t border-slide-surface/70 px-1.5 py-1.5 flex items-center justify-around shadow-2xl select-none">
           {role === "parent" && (
             <>
               <button
                 onClick={() => setActiveTab("home")}
-                className={`flex flex-col items-center gap-0.5 py-1 px-2.5 rounded-xl transition cursor-pointer ${
-                  activeTab === "home" ? "text-slide-accent font-bold" : "text-slide-dim hover:text-slide-paper"
+                className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl transition cursor-pointer ${
+                  activeTab === "home" ? "text-slide-accent font-black" : "text-slide-dim hover:text-slide-paper"
                 }`}
+                title="Acompanhar Viagem"
               >
-                <span className="text-base">🗺️</span>
-                <span className="text-[10px]">Acompanhar</span>
+                <span className="text-base leading-none">🗺️</span>
+                <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">Acompanhar</span>
+                {activeTab === "home" && <span className="w-1 h-1 rounded-full bg-slide-accent mt-0.5" />}
               </button>
+
               <button
                 onClick={() => setActiveTab("kids")}
-                className={`flex flex-col items-center gap-0.5 py-1 px-2.5 rounded-xl transition cursor-pointer ${
-                  activeTab === "kids" ? "text-slide-accent font-bold" : "text-slide-dim hover:text-slide-paper"
+                className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl transition cursor-pointer ${
+                  activeTab === "kids" ? "text-slide-accent font-black" : "text-slide-dim hover:text-slide-paper"
                 }`}
+                title="PIN Seguro do Educando"
               >
-                <span className="text-base">🎒</span>
-                <span className="text-[10px]">PIN Seguro</span>
+                <span className="text-base leading-none">🎒</span>
+                <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">PIN Seguro</span>
+                {activeTab === "kids" && <span className="w-1 h-1 rounded-full bg-slide-accent mt-0.5" />}
               </button>
+
               <button
                 onClick={() => setActiveTab("billing")}
-                className={`flex flex-col items-center gap-0.5 py-1 px-2.5 rounded-xl transition cursor-pointer ${
-                  activeTab === "billing" ? "text-slide-accent font-bold" : "text-slide-dim hover:text-slide-paper"
+                className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl transition cursor-pointer ${
+                  activeTab === "billing" ? "text-slide-accent font-black" : "text-slide-dim hover:text-slide-paper"
                 }`}
+                title="Pagamento de Mensalidade"
               >
-                <span className="text-base">💳</span>
-                <span className="text-[10px]">Mensalidade</span>
+                <span className="text-base leading-none">💳</span>
+                <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">Mensalidade</span>
+                {activeTab === "billing" && <span className="w-1 h-1 rounded-full bg-slide-accent mt-0.5" />}
               </button>
+
               <button
                 onClick={() => setActiveTab("alerts")}
-                className={`flex flex-col items-center gap-0.5 py-1 px-2.5 rounded-xl transition cursor-pointer ${
-                  activeTab === "alerts" ? "text-slide-accent font-bold" : "text-slide-dim hover:text-slide-paper"
+                className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl transition cursor-pointer relative ${
+                  activeTab === "alerts" ? "text-slide-accent font-black" : "text-slide-dim hover:text-slide-paper"
                 }`}
+                title="Alertas e Proximidade"
               >
-                <span className="text-base">🔔</span>
-                <span className="text-[10px]">Alertas</span>
+                <div className="relative leading-none">
+                  <span className="text-base">🔔</span>
+                  {notifications.length > 0 && (
+                    <span className="absolute -top-1 -right-1.5 min-w-[14px] h-3.5 px-0.5 rounded-full bg-destructive text-white text-[8px] font-black flex items-center justify-center">
+                      {notifications.length}
+                    </span>
+                  )}
+                </div>
+                <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">Alertas</span>
+                {activeTab === "alerts" && <span className="w-1 h-1 rounded-full bg-slide-accent mt-0.5" />}
               </button>
             </>
           )}
@@ -1183,35 +1200,48 @@ export function NativeMobileApp({
             <>
               <button
                 onClick={() => setActiveTab("home")}
-                className={`flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl transition cursor-pointer ${
-                  activeTab === "home" ? "text-slide-accent font-bold" : "text-slide-dim hover:text-slide-paper"
+                className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl transition cursor-pointer ${
+                  activeTab === "home" ? "text-slide-accent font-black" : "text-slide-dim hover:text-slide-paper"
                 }`}
+                title="Controlo da Viagem"
               >
-                <span className="text-base">🚌</span>
-                <span className="text-[10px]">Viagem</span>
+                <span className="text-base leading-none">🚌</span>
+                <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">Viagem</span>
+                {activeTab === "home" && <span className="w-1 h-1 rounded-full bg-slide-accent mt-0.5" />}
               </button>
+
               <button
                 onClick={() => setActiveTab("stops")}
-                className={`flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl transition cursor-pointer ${
-                  activeTab === "stops" ? "text-slide-accent font-bold" : "text-slide-dim hover:text-slide-paper"
+                className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl transition cursor-pointer ${
+                  activeTab === "stops" ? "text-slide-accent font-black" : "text-slide-dim hover:text-slide-paper"
                 }`}
+                title="Lista de Paragens"
               >
-                <span className="text-base">⏱️</span>
-                <span className="text-[10px]">Paragens</span>
+                <span className="text-base leading-none">⏱️</span>
+                <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">Paragens</span>
+                {activeTab === "stops" && <span className="w-1 h-1 rounded-full bg-slide-accent mt-0.5" />}
               </button>
+
               <button
                 onClick={() => setAttendanceModalOpen(true)}
-                className="flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl text-slide-dim hover:text-slide-paper cursor-pointer"
+                className="flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl text-slide-dim hover:text-slide-paper transition cursor-pointer"
+                title="Pauta Diária de Presenças"
               >
-                <span className="text-base">📋</span>
-                <span className="text-[10px]">Pauta</span>
+                <span className="text-base leading-none">📋</span>
+                <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">Pauta</span>
               </button>
+
               <button
                 onClick={() => setOfflineMode(!offlineMode)}
-                className="flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl text-slide-dim hover:text-slide-paper cursor-pointer"
+                className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl transition cursor-pointer ${
+                  offlineMode ? "text-amber-400 font-bold" : "text-slide-dim hover:text-slide-paper"
+                }`}
+                title="Alternar Modo Offline"
               >
-                <span className="text-base">{offlineMode ? "📡" : "📶"}</span>
-                <span className="text-[10px]">{offlineMode ? "Offline" : "Rede"}</span>
+                <span className="text-base leading-none">{offlineMode ? "📡" : "📶"}</span>
+                <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">
+                  {offlineMode ? "Offline" : "Rede"}
+                </span>
               </button>
             </>
           )}
@@ -1220,41 +1250,50 @@ export function NativeMobileApp({
             <>
               <button
                 onClick={() => setActiveTab("home")}
-                className="flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl text-slide-accent font-bold cursor-pointer"
+                className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl transition cursor-pointer ${
+                  activeTab === "home" ? "text-slide-accent font-black" : "text-slide-dim hover:text-slide-paper"
+                }`}
+                title="Visão Geral da Frota"
               >
-                <span className="text-base">🏢</span>
-                <span className="text-[10px]">Frota</span>
+                <span className="text-base leading-none">🏢</span>
+                <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">Frota</span>
+                {activeTab === "home" && <span className="w-1 h-1 rounded-full bg-slide-accent mt-0.5" />}
               </button>
+
               <button
                 onClick={() => setDocsModalOpen(true)}
-                className="flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl text-slide-dim hover:text-slide-paper cursor-pointer"
+                className="flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl text-slide-dim hover:text-slide-paper transition cursor-pointer"
+                title="Documentos e Seguros DNVT"
               >
-                <span className="text-base">📄</span>
-                <span className="text-[10px]">Documentos</span>
+                <span className="text-base leading-none">📄</span>
+                <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">Docs DNVT</span>
               </button>
+
               <button
                 onClick={() => setAttendanceModalOpen(true)}
-                className="flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl text-slide-dim hover:text-slide-paper cursor-pointer"
+                className="flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl text-slide-dim hover:text-slide-paper transition cursor-pointer"
+                title="Pauta Geral das Escolas"
               >
-                <span className="text-base">📋</span>
-                <span className="text-[10px]">Pauta</span>
+                <span className="text-base leading-none">📋</span>
+                <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">Pauta</span>
               </button>
             </>
           )}
 
-          {/* Universal SOS Button on Bottom Bar */}
+          {/* Universal SOS Emergency Button on Bottom Bar */}
           <button
             onClick={() => setSosOpen(true)}
-            className="flex flex-col items-center gap-0.5 py-1 px-2.5 rounded-xl text-destructive hover:opacity-90 transition cursor-pointer"
+            className="flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl text-destructive hover:opacity-90 active:scale-95 transition cursor-pointer select-none"
+            title="Emergência SOS TransiGo"
           >
-            <span className="text-base">🚨</span>
-            <span className="text-[10px] font-bold">SOS</span>
+            <span className="text-base leading-none animate-pulse">🚨</span>
+            <span className="text-[10px] font-black tracking-tight mt-0.5">SOS</span>
           </button>
         </nav>
 
         {/* QUICK WALKIE-TALKIE DRAWER MODAL */}
         {chatOpen && (
-          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-end justify-center">
+          <div className="absolute inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-end justify-center">
             <div className="w-full max-w-md rounded-t-3xl bg-slide-paper p-5 animate-in slide-in-from-bottom shadow-2xl border-t border-slide-line/40 max-h-[85vh] flex flex-col">
               <div className="flex items-center justify-between pb-3 border-b border-slide-line">
                 <div className="flex items-center gap-2">
@@ -1331,7 +1370,7 @@ export function NativeMobileApp({
 
         {/* MODAL: REPORT ABSENCE (Parent) */}
         {absenceModalOpen && (
-          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="absolute inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
             <div className="w-full max-w-sm rounded-3xl bg-slide-paper p-5 shadow-2xl border border-slide-line">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-lg font-black" style={{ fontFamily: "var(--font-display)" }}>
@@ -1397,7 +1436,7 @@ export function NativeMobileApp({
 
         {/* MODAL: VERIFY PICKUP PIN (Driver) */}
         {pinVerifyModalOpen && verifyingStudent && (
-          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="absolute inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
             <div className="w-full max-w-sm rounded-3xl bg-slide-paper p-5 shadow-2xl border border-slide-line">
               <div className="flex items-center justify-between mb-2">
                 <h3 className="text-lg font-black" style={{ fontFamily: "var(--font-display)" }}>
@@ -1485,7 +1524,7 @@ export function NativeMobileApp({
 
         {/* SOS EMERGENCY MODAL */}
         {sosOpen && (
-          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-end justify-center">
+          <div className="absolute inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-end justify-center">
             <div className="w-full max-w-md rounded-t-3xl bg-slide-paper p-5 animate-in slide-in-from-bottom shadow-2xl border-t border-slide-line/40">
               <div className="flex items-center justify-between mb-2">
                 <div className="text-xl font-bold flex items-center gap-2" style={{ fontFamily: "var(--font-display)" }}>
@@ -1541,6 +1580,5 @@ export function NativeMobileApp({
           </div>
         )}
       </div>
-    </div>
   );
 }

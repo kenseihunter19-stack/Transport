@@ -11,7 +11,7 @@ export function MockupView({ onNavigate }: MockupViewProps) {
 
   return (
     <div className="min-h-screen bg-slide-bg text-slide-ink selection:bg-slide-accent selection:text-slide-accent-ink" style={{ fontFamily: "var(--font-body)" }}>
-      <div className="mx-auto max-w-7xl px-4 sm:px-6 py-8 min-h-screen grid lg:grid-cols-[1.1fr_auto] gap-10 lg:gap-14 items-center">
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 py-4 sm:py-6 min-h-[calc(100vh-4rem)] grid lg:grid-cols-[1.1fr_auto] gap-8 lg:gap-12 items-center">
         {/* Left Side Panel: Role Switcher & Scenario Controls */}
         <div className="space-y-6">
           <div>
@@ -139,14 +139,14 @@ export function MockupView({ onNavigate }: MockupViewProps) {
 
           {/* Outer Titanium Chassis */}
           <div
-            className="w-[395px] h-[820px] rounded-[56px] p-[11px] shadow-[0_25px_70px_-15px_rgba(0,0,0,0.9),0_0_0_1px_rgba(255,255,255,0.12)]"
+            className="w-[385px] sm:w-[395px] h-[740px] sm:h-[780px] max-h-[calc(100vh-5rem)] rounded-[52px] p-[10px] shadow-[0_25px_70px_-15px_rgba(0,0,0,0.9),0_0_0_1px_rgba(255,255,255,0.12)] flex flex-col shrink-0"
             style={{
               background:
                 "linear-gradient(135deg, #2e3239 0%, #17191d 40%, #111317 60%, #2e3239 100%)",
             }}
           >
             {/* Screen Bezel & Display Frame */}
-            <div className="relative h-full w-full rounded-[46px] bg-black text-slide-paper-ink overflow-hidden flex flex-col border-[2px] border-[#0a0a0c]">
+            <div className="relative h-full w-full rounded-[44px] bg-black text-slide-paper-ink overflow-hidden flex flex-col border-[2px] border-[#0a0a0c]">
               {/* Speaker Ear-piece Slit */}
               <div className="w-16 h-1 bg-[#1a1c22] rounded-full mx-auto mt-1 absolute top-0 left-1/2 -translate-x-1/2 z-50 pointer-events-none" />
 
@@ -221,8 +221,8 @@ export function MockupView({ onNavigate }: MockupViewProps) {
               </div>
 
               {/* iOS Home Indicator Bar */}
-              <div className="h-5 bg-slide-paper-ink flex items-center justify-center shrink-0 z-40">
-                <div className="w-36 h-1 bg-white/70 rounded-full" />
+              <div className="h-4 bg-[#0d1117] flex items-center justify-center shrink-0 z-40 pb-1">
+                <div className="w-32 h-1 bg-white/60 rounded-full" />
               </div>
             </div>
           </div>
