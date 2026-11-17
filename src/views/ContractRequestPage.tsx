@@ -241,7 +241,7 @@ Contacto Comercial: comercial@mobuss.ao | +244 923 000 000
                       max={12}
                       value={buses}
                       onChange={(e) => setBuses(Number(e.target.value))}
-                      className="w-full accent-amber-400 cursor-pointer"
+                      className="w-full accent-[#e11d2e] cursor-pointer"
                     />
                     <div className="flex justify-between text-[10px] text-slide-dim mt-1">
                       <span>1 autocarro</span>

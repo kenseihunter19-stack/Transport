@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { Check, FileText, Smartphone, X } from "lucide-react";
 import { downloadDocument } from "@/lib/operations";
 
 interface MulticaixaModalProps {
@@ -103,9 +104,10 @@ Obrigado por confiar no transporte seguro MôBuss!
               </div>
               <button
                 onClick={onClose}
-                className="w-7 h-7 rounded-full bg-slide-surface text-slide-dim hover:text-slide-paper grid place-items-center text-xs font-bold cursor-pointer"
+                className="w-7 h-7 rounded-full bg-slide-surface text-slide-dim hover:text-slide-paper grid place-items-center cursor-pointer"
+                aria-label="Fechar"
               >
-                ✕
+                <X className="w-3.5 h-3.5" />
               </button>
             </div>
 
@@ -130,7 +132,7 @@ Obrigado por confiar no transporte seguro MôBuss!
                   Número de Telemóvel associado ao Multicaixa Express:
                 </label>
                 <div className="flex items-center rounded-xl bg-slide-bg border border-slide-surface px-3 py-2.5">
-                  <span className="text-slide-dim font-bold mr-2 text-sm">🇦🇴 +244</span>
+                  <span className="text-slide-dim font-bold mr-2 text-xs font-mono bg-white/5 px-1.5 py-0.5 rounded">AO +244</span>
                   <input
                     required
                     type="tel"
@@ -167,8 +169,8 @@ Obrigado por confiar no transporte seguro MôBuss!
         {/* Step 2: Waiting for PIN on user phone */}
         {step === "waiting" && (
           <div className="text-center py-4">
-            <div className="w-16 h-16 rounded-3xl bg-orange-600/20 text-orange-500 mx-auto grid place-items-center text-3xl mb-4 animate-bounce">
-              📲
+            <div className="w-16 h-16 rounded-3xl bg-orange-600/20 text-orange-500 mx-auto grid place-items-center mb-4 animate-bounce">
+              <Smartphone className="w-8 h-8" />
             </div>
             <h3 className="text-base font-extrabold mb-1">Verifique o seu Telemóvel</h3>
             <p className="text-xs text-slide-dim max-w-xs mx-auto mb-4">
@@ -196,8 +198,8 @@ Obrigado por confiar no transporte seguro MôBuss!
         {/* Step 3: Success & AGT Receipt */}
         {step === "success" && (
           <div className="text-center py-2">
-            <div className="w-14 h-14 rounded-full bg-slide-ok text-slide-accent-ink mx-auto grid place-items-center text-2xl font-black mb-3 shadow-lg">
-              ✓
+            <div className="w-14 h-14 rounded-full bg-slide-ok text-slide-accent-ink mx-auto grid place-items-center mb-3 shadow-lg">
+              <Check className="w-7 h-7 stroke-[3]" />
             </div>
             <h3 className="text-lg font-black text-slide-paper mb-1">Pagamento Concluído!</h3>
             <p className="text-xs text-slide-ok font-bold mb-4">
@@ -224,7 +226,7 @@ Obrigado por confiar no transporte seguro MôBuss!
                 onClick={handleDownloadReceipt}
                 className="w-full rounded-xl bg-slide-accent text-slide-accent-ink py-2.5 text-xs font-black shadow hover:opacity-95 transition cursor-pointer flex items-center justify-center gap-2"
               >
-                <span>📄</span>
+                <FileText className="w-4 h-4" />
                 <span>Descarregar Factura-Recibo Fiscal (AGT)</span>
               </button>
 

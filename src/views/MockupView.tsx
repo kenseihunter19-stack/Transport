@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Bus, Building2, Check, FileText, Settings, ShieldCheck, User, Users } from "lucide-react";
 import { NativeMobileApp, type Role } from "./NativeMobileApp";
 
 interface MockupViewProps {
@@ -37,32 +38,35 @@ export function MockupView({ onNavigate }: MockupViewProps) {
           {/* SIDE ROLE SWITCHER CARDS */}
           <div className="space-y-3 max-w-lg">
             <div className="text-xs font-extrabold uppercase tracking-wider text-slide-accent flex items-center gap-2">
-              <span>👤</span>
+              <User className="w-3.5 h-3.5" />
               <span>SELECIONE O PERFIL ATIVO NO IPHONE:</span>
             </div>
 
             {(
               [
-                [
-                  "parent",
-                  "👩‍👧 Encarregado de Educação (Pais)",
-                  "Acompanhamento GPS em tempo real, alerta antecipado a 500m da paragem, PIN de entrega segura, reporte de faltas e pagamento Multicaixa Express.",
-                  "Sra. Luísa Domingos · Aluna: Maria",
-                ],
-                [
-                  "driver",
-                  "🧑‍✈️ Motorista Oficial (Condutor)",
-                  "Início/pausa de viagem, chamada digital de alunos a bordo, validação por PIN no desembarque, reporte de trânsito e walkie-talkie rápido.",
-                  "João Mateus · Autocarro 12",
-                ],
-                [
-                  "company",
-                  "🏢 Empresa de Transporte & Colégio",
-                  "Monitorização da frota em Luanda, pauta diária de presenças para a secretaria e gestão de seguros/inspeções DNVT.",
-                  "Central de Operações · Morro Bento",
-                ],
-              ] as const
-            ).map(([r, title, desc, tag]) => {
+                {
+                  r: "parent" as const,
+                  title: "Encarregado de Educação (Pais)",
+                  desc: "Modo Claro (estilo Uber): mapa ao vivo, alerta antecipado a 500m, PIN de entrega segura, reporte de faltas e pagamento Multicaixa Express.",
+                  tag: "Sra. Luísa Domingos · Aluna: Maria",
+                  Icon: Users,
+                },
+                {
+                  r: "driver" as const,
+                  title: "Motorista Oficial (Condutor)",
+                  desc: "Modo Escuro Noturno (estilo Waze): HUD de próxima paragem, chamada digital, validação por PIN, reporte de trânsito e walkie-talkie 1-toque.",
+                  tag: "João Mateus · Autocarro 12",
+                  Icon: ShieldCheck,
+                },
+                {
+                  r: "company" as const,
+                  title: "Empresa de Transporte & Colégio",
+                  desc: "Monitorização da frota em Luanda, pauta diária de presenças para a secretaria e gestão de seguros/inspeções DNVT.",
+                  tag: "Central de Operações · Morro Bento",
+                  Icon: Building2,
+                },
+              ]
+            ).map(({ r, title, desc, tag, Icon }) => {
               const active = selectedRole === r;
               return (
                 <button
@@ -74,16 +78,32 @@ export function MockupView({ onNavigate }: MockupViewProps) {
                       : "border-slide-surface bg-slide-bg/80 hover:border-slide-dim/60 hover:bg-slide-surface/40"
                   }`}
                 >
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="font-extrabold text-sm sm:text-base text-slide-paper">{title}</span>
+                  <div className="flex items-center justify-between gap-2 mb-1.5">
+                    <span className="font-extrabold text-sm sm:text-base text-slide-paper flex items-center gap-2">
+                      <span
+                        className={`w-7 h-7 rounded-lg grid place-items-center shrink-0 ${
+                          active ? "bg-slide-accent text-white" : "bg-white/10 text-zinc-300"
+                        }`}
+                      >
+                        <Icon className="w-4 h-4" />
+                      </span>
+                      <span>{title}</span>
+                    </span>
                     <span
-                      className={`text-[10px] font-black px-2.5 py-0.5 rounded-full transition ${
+                      className={`text-[10px] font-black px-2.5 py-0.5 rounded-full transition flex items-center gap-1 shrink-0 ${
                         active
                           ? "bg-slide-accent text-slide-accent-ink shadow-xs"
                           : "bg-slide-line/40 text-slide-dim"
                       }`}
                     >
-                      {active ? "Aberto no iPhone ✓" : "Mudar Perfil"}
+                      {active ? (
+                        <>
+                          <span>Aberto no iPhone</span>
+                          <Check className="w-3 h-3" />
+                        </>
+                      ) : (
+                        "Mudar Perfil"
+                      )}
                     </span>
                   </div>
 
@@ -104,7 +124,7 @@ export function MockupView({ onNavigate }: MockupViewProps) {
               onClick={() => onNavigate("landing")}
               className="rounded-xl bg-slide-accent text-slide-accent-ink px-4 py-2.5 shadow hover:opacity-95 transition cursor-pointer flex items-center gap-2"
             >
-              <span>📄</span>
+              <FileText className="w-4 h-4" />
               <span>Solicitar Contrato Escolar (Landing Page)</span>
             </button>
 
@@ -112,7 +132,7 @@ export function MockupView({ onNavigate }: MockupViewProps) {
               onClick={() => onNavigate("admin")}
               className="rounded-xl bg-slide-surface text-slide-paper px-4 py-2.5 border border-slide-line/20 hover:bg-slide-surface/80 transition cursor-pointer flex items-center gap-1.5"
             >
-              <span>⚙️</span>
+              <Settings className="w-4 h-4" />
               <span>Painel Admin</span>
             </button>
 
@@ -151,7 +171,7 @@ export function MockupView({ onNavigate }: MockupViewProps) {
               <div className="w-16 h-1 bg-[#1a1c22] rounded-full mx-auto mt-1 absolute top-0 left-1/2 -translate-x-1/2 z-50 pointer-events-none" />
 
               {/* iOS 18 Top Status Bar */}
-              <div className="h-11 bg-slide-paper-ink text-slide-paper px-7 flex items-center justify-between text-xs font-semibold z-40 shrink-0 select-none">
+              <div className="h-11 bg-[#09090b] text-slide-paper px-7 flex items-center justify-between text-xs font-semibold z-40 shrink-0 select-none">
                 {/* Clock */}
                 <span className="font-bold tracking-tight text-xs">9:41</span>
 
@@ -189,7 +209,7 @@ export function MockupView({ onNavigate }: MockupViewProps) {
                 {islandExpanded ? (
                   <div className="w-full flex items-center justify-between text-xs px-1">
                     <div className="flex items-center gap-2">
-                      <span className="text-base animate-pulse">🚌</span>
+                      <Bus className="w-4 h-4 text-[#e11d2e] animate-pulse" />
                       <div>
                         <div className="text-[10px] font-black text-slide-accent leading-none">MôBuss Ao Vivo</div>
                         <div className="text-[9px] opacity-70">Autocarro 12 · Morro Bento</div>
@@ -200,7 +220,7 @@ export function MockupView({ onNavigate }: MockupViewProps) {
                 ) : (
                   <>
                     <div className="flex items-center gap-1">
-                      <span className="text-[11px]">🚌</span>
+                      <Bus className="w-3 h-3 text-[#e11d2e]" />
                       <span className="w-1.5 h-1.5 rounded-full bg-slide-ok animate-pulse" />
                     </div>
 
@@ -221,7 +241,7 @@ export function MockupView({ onNavigate }: MockupViewProps) {
               </div>
 
               {/* iOS Home Indicator Bar */}
-              <div className="h-4 bg-[#0d1117] flex items-center justify-center shrink-0 z-40 pb-1">
+              <div className="h-4 bg-[#09090b] flex items-center justify-center shrink-0 z-40 pb-1">
                 <div className="w-32 h-1 bg-white/60 rounded-full" />
               </div>
             </div>

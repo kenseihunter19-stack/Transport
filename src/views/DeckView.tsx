@@ -227,7 +227,7 @@ const SLIDES: { title: string; render: (n: number) => ReactNode }[] = [
                 className="flex justify-between items-center py-3 border-b border-slide-line text-[17px]"
               >
                 <span className="font-semibold">{name}</span>
-                <span className={`rounded-full px-3 py-1 text-[13px] font-bold ${on ? "bg-slide-ok" : "bg-slide-line"}`}>
+                <span className={`rounded-full px-3 py-1 text-[13px] font-bold ${on ? "bg-slide-ok text-white" : "bg-slide-line"}`}>
                   {on ? "A bordo" : "Registar"}
                 </span>
               </div>
@@ -259,7 +259,7 @@ const SLIDES: { title: string; render: (n: number) => ReactNode }[] = [
           <div className="rounded-[32px] bg-slide-paper text-slide-paper-ink p-10 grid grid-cols-[300px_1fr_520px] gap-8 h-[640px]">
             <div className="space-y-3 text-[22px] font-semibold">
               {["Resumo", "Contratos", "Pedidos", "Frota", "Motoristas", "Rotas"].map((x, i) => (
-                <div key={x} className={`rounded-xl px-5 py-3 ${i === 1 ? "bg-slide-accent" : ""}`}>
+                <div key={x} className={`rounded-xl px-5 py-3 ${i === 1 ? "bg-slide-accent text-slide-accent-ink" : ""}`}>
                   {x}
                 </div>
               ))}

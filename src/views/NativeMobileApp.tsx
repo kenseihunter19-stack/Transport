@@ -1,4 +1,49 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
+import { AnimatePresence, motion } from "motion/react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  Bell,
+  Building2,
+  Bus,
+  CalendarOff,
+  Check,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  ClipboardList,
+  Clock,
+  CloudRain,
+  Compass,
+  Construction,
+  Copy,
+  CreditCard,
+  FileText,
+  Fuel,
+  HelpCircle,
+  KeyRound,
+  Map as MapIcon,
+  MapPin,
+  MessageSquare,
+  Navigation,
+  Pause,
+  Phone,
+  Play,
+  Radio,
+  RotateCcw,
+  Share2,
+  ShieldAlert,
+  ShieldCheck,
+  Siren,
+  Smartphone,
+  Sparkles,
+  Star,
+  User,
+  Users,
+  Wifi,
+  WifiOff,
+  X,
+} from "lucide-react";
 import { LuandaMap } from "@/components/LuandaMap";
 import { LUANDA_ROUTES, type LuandaRouteConfig } from "@/lib/route-luanda";
 import { MulticaixaModal } from "@/components/MulticaixaModal";
@@ -50,11 +95,68 @@ export type QuickMessage = {
 };
 
 const EMERGENCY_TYPES = [
-  "🚑 Problema de saúde súbito de aluno",
-  "💥 Acidente de viação ligeiro",
-  "🔧 Avaria mecânica / Furo de pneu",
-  "🛡️ Segurança pública / Bloqueio na via",
-];
+  { label: "Problema de saúde súbito de aluno", kind: "health" },
+  { label: "Acidente de viação ligeiro", kind: "crash" },
+  { label: "Avaria mecânica / Furo de pneu", kind: "mech" },
+  { label: "Segurança pública / Bloqueio na via", kind: "sec" },
+] as const;
+
+const TUTORIAL_STEPS: Record<
+  Role,
+  Array<{ title: string; body: string; highlight: string }>
+> = {
+  parent: [
+    {
+      title: "Mapa ao Vivo & Corredores",
+      body: "Acompanhe o autocarro em tempo real por Luanda, mude de corredor no topo e receba alertas a 500m antes da paragem.",
+      highlight: "Sem esperas ao sol na paragem",
+    },
+    {
+      title: "PIN de Recolha Segura",
+      body: "O seu código de 4 dígitos aparece no cartão da gaveta e na aba PIN Seguro. O motorista só liberta a criança após validar.",
+      highlight: "Entrega 100% verificada",
+    },
+    {
+      title: "Walkie-Talkie & Multicaixa Express",
+      body: "Envie mensagens pré-definidas com 1 toque, justifique faltas ou pague a mensalidade com recibo fiscal AGT.",
+      highlight: "Tudo num só toque",
+    },
+  ],
+  driver: [
+    {
+      title: "Cockpit Noturno Anti-Encandeamento",
+      body: "Interface escura estilo Waze pensada para condução segura logo pela manhã, com HUD da próxima paragem sempre visível.",
+      highlight: "Leitura rápida sem distrações",
+    },
+    {
+      title: "Embarque & Validação por PIN",
+      body: "Na gaveta inferior, registe os alunos que entraram e confirme o PIN de 4 dígitos dos encarregados no desembarque.",
+      highlight: "Zero esquecimentos a bordo",
+    },
+    {
+      title: "Walkie-Talkie 1-Toque & Pauta Digital",
+      body: "Comunique trânsito ou chegada com 1 toque sem escrever ao volante e gere a Pauta Digital no fim da rota.",
+      highlight: "Segurança ativa em rota",
+    },
+  ],
+  company: [
+    {
+      title: "Monitorização de Frota em Luanda",
+      body: "Visualize todos os corredores escolares ao vivo, troque de rota no mapa e acompanhe os autocarros em operação.",
+      highlight: "Controlo operacional central",
+    },
+    {
+      title: "Documentos DNVT & Inspeções",
+      body: "Aceda rapidamente aos seguros ENSA, inspeção periódica e alvarás com alertas de expiração antes de multas.",
+      highlight: "Frota sempre legalizada",
+    },
+    {
+      title: "Pauta Diária & Novos Contratos",
+      body: "Exporte a pauta diária para a secretaria e abra o Portal de Novos Clientes para receber pedidos de colégios.",
+      highlight: "Gestão escolar integrada",
+    },
+  ],
+};
 
 const NUMBERS = [
   ["Polícia Nacional", "113"],
@@ -78,9 +180,26 @@ export function NativeMobileApp({
   useEffect(() => {
     setRole(initialRole);
     setActiveTab("home");
+    setSheetExpanded(false);
+    setTutorialStep(0);
+    try {
+      const seen = localStorage.getItem(`mobuss_tutorial_seen_${initialRole}`);
+      setTutorialOpen(!seen);
+    } catch {
+      setTutorialOpen(false);
+    }
   }, [initialRole]);
 
   const [activeTab, setActiveTab] = useState<string>("home");
+  const [sheetExpanded, setSheetExpanded] = useState(false);
+  const [tutorialOpen, setTutorialOpen] = useState<boolean>(() => {
+    try {
+      return !localStorage.getItem(`mobuss_tutorial_seen_${initialRole}`);
+    } catch {
+      return true;
+    }
+  });
+  const [tutorialStep, setTutorialStep] = useState(0);
 
   // Multi-route Luanda selector
   const [selectedRouteId, setSelectedRouteId] = useState<string>("route_a");
@@ -94,6 +213,8 @@ export function NativeMobileApp({
   const [emergency, setEmergency] = useState<Emergency>(null);
   const [delay, setDelay] = useState<number | null>(null);
   const [offlineMode, setOfflineMode] = useState(false);
+  const [activeHazard, setActiveHazard] = useState<string | null>(null);
+  const [emptyBusChecked, setEmptyBusChecked] = useState(false);
 
   // Proximity Geofencing Alert state
   const [proximityAlert, setProximityAlert] = useState<{
@@ -111,7 +232,7 @@ export function NativeMobileApp({
   // Selected student for parent view
   const [selectedKidId, setSelectedKidId] = useState<string>("kid-1");
 
-  // Modals
+  // Modals & Safety Share / Rating
   const [absenceModalOpen, setAbsenceModalOpen] = useState(false);
   const [absenceReason, setAbsenceReason] = useState("Motivo de saúde / Consulta médica");
   const [pinVerifyModalOpen, setPinVerifyModalOpen] = useState(false);
@@ -121,6 +242,11 @@ export function NativeMobileApp({
   const [attendanceModalOpen, setAttendanceModalOpen] = useState(false);
   const [docsModalOpen, setDocsModalOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
+  const [shareModalOpen, setShareModalOpen] = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
+  const [tripRating, setTripRating] = useState(0);
+  const [ratingTags, setRatingTags] = useState<string[]>([]);
+  const [ratingSubmitted, setRatingSubmitted] = useState(false);
 
   // Quick Preset Messages between Driver and Parent
   const [messages, setMessages] = useState<QuickMessage[]>([
@@ -128,21 +254,21 @@ export function NativeMobileApp({
       id: "m1",
       sender: "driver",
       senderName: "João Mateus (Motorista)",
-      text: "🚌 Viagem iniciada em Mutamba. A rota segue dentro do horário previsto.",
+      text: "Viagem iniciada em Mutamba. A rota segue dentro do horário previsto.",
       time: "07:35",
     },
     {
       id: "m2",
       sender: "parent",
       senderName: "Sra. Luísa Domingos",
-      text: "👨‍👩‍👧 Bom dia! Já estamos na paragem à espera.",
+      text: "Bom dia! Já estamos na paragem à espera.",
       time: "07:40",
     },
     {
       id: "m3",
       sender: "driver",
       senderName: "João Mateus (Motorista)",
-      text: "✅ A Maria já está a bordo do autocarro. Seguimos para a paragem do Kinaxixi.",
+      text: "A Maria já está a bordo do autocarro. Seguimos para a paragem do Kinaxixi.",
       time: "07:43",
     },
   ]);
@@ -224,14 +350,14 @@ export function NativeMobileApp({
             minutesAway: 2,
           });
           notify(
-            `🔔 APROXIMAÇÃO: O autocarro ${currentRoute.busId} está a 450m de ${currentRoute.stops[1]?.name}!`,
+            `APROXIMAÇÃO: O autocarro ${currentRoute.busId} está a 450m de ${currentRoute.stops[1]?.name}!`,
             "alert"
           );
         }
 
         if (next >= 1) {
           setRunning(false);
-          notify("🏫 O autocarro chegou à escola em segurança!", "success");
+          notify("O autocarro chegou à escola em segurança!", "success");
         }
         return next;
       });
@@ -244,6 +370,15 @@ export function NativeMobileApp({
     const now = new Date().toLocaleTimeString("pt-AO", { hour: "2-digit", minute: "2-digit" });
     setNotifications((prev) => [{ id: String(Date.now()), time: now, text: msg, type }, ...prev]);
     setTimeout(() => setToast(null), 3800);
+  }
+
+  function closeTutorial() {
+    setTutorialOpen(false);
+    try {
+      localStorage.setItem(`mobuss_tutorial_seen_${role}`, "1");
+    } catch {
+      // ignore storage failure
+    }
   }
 
   function sendQuickMessage(text: string) {
@@ -272,7 +407,7 @@ export function NativeMobileApp({
     });
     setRunning(false);
     setSosOpen(false);
-    notify(`🚨 SOS DISPARADO: ${type} transmitido aos serviços de emergência.`, "alert");
+    notify(`SOS DISPARADO: ${type} transmitido aos serviços de emergência.`, "alert");
   }
 
   function handleVerifyPin() {
@@ -281,62 +416,103 @@ export function NativeMobileApp({
       setStudents((all) =>
         all.map((s) => (s.id === verifyingStudent.id ? { ...s, droppedOff: true, onBoard: false } : s))
       );
-      notify(`✅ PIN validado! ${verifyingStudent.name} entregue em segurança.`, "success");
+      notify(`PIN validado! ${verifyingStudent.name} entregue em segurança.`, "success");
       setPinVerifyModalOpen(false);
       setPinInput("");
       setVerifyingStudent(null);
     } else {
-      notify("❌ PIN incorreto! Verifique o código no telemóvel do encarregado.", "alert");
+      notify("PIN incorreto! Verifique o código no telemóvel do encarregado.", "alert");
     }
   }
 
   const currentKid = students.find((s) => s.id === selectedKidId) || students[0]!;
+  const isMapView = activeTab === "home";
+  const isDriverDark = role === "driver";
+  const etaMinutes = Math.max(
+    1,
+    Math.round(((currentRoute.stops[currentKid.stop]?.at || 0.2) - progress) * 60)
+  );
+  const journeyStep = currentKid.droppedOff
+    ? 4
+    : currentKid.onBoard
+    ? 3
+    : running || progress > 0
+    ? 2
+    : 1;
+  const activeTutorial = TUTORIAL_STEPS[role][tutorialStep] || TUTORIAL_STEPS[role][0];
 
   return (
-    <div className="h-full w-full bg-slide-paper text-slide-paper-ink flex flex-col relative overflow-hidden select-none font-sans">
+    <div
+      className={`h-full w-full flex flex-col relative overflow-hidden select-none font-sans transition-colors duration-300 ${
+        isDriverDark ? "bg-[#09090b] text-zinc-50" : "bg-zinc-50 text-zinc-950"
+      }`}
+    >
       {/* Top App Header */}
-      <header className="sticky top-0 z-40 bg-slide-paper-ink text-slide-paper px-4 py-3 flex items-center justify-between shadow-md shrink-0">
-          <div className="flex items-center gap-2.5">
+      <header className="sticky top-0 z-40 bg-[#09090b] text-white px-3.5 py-2.5 flex items-center justify-between border-b border-white/10 shrink-0">
+          <div className="flex items-center gap-2">
             <img
               src="/assets/aistudio/20261117_030824_57b8de0b.jpg"
               alt="MôBuss Logo"
-              className="w-9 h-9 rounded-xl object-cover bg-black border border-white/10 shadow"
+              className="w-8 h-8 rounded-xl object-cover bg-black border border-white/15 shadow"
             />
             <div>
-              <div className="font-extrabold text-base tracking-tight leading-none" style={{ fontFamily: "var(--font-display)" }}>
-                MôBuss
+              <div className="font-extrabold text-sm tracking-tight leading-none flex items-center gap-1.5" style={{ fontFamily: "var(--font-display)" }}>
+                <span>MôBuss</span>
+                {isDriverDark && (
+                  <span className="text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/10 text-zinc-300">
+                    Noturno
+                  </span>
+                )}
               </div>
-              <div className="text-[11px] text-slide-dim font-medium flex items-center gap-1.5 mt-0.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-slide-ok inline-block" />
+              <div className="text-[10px] text-zinc-400 font-medium flex items-center gap-1.5 mt-0.5 tabular-nums">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
                 <span>Autocarro {currentRoute.busId} · {currentRoute.busPlate}</span>
               </div>
             </div>
           </div>
 
           <div className="flex items-center gap-1.5">
+            {/* Interactive Tutorial Trigger */}
+            <button
+              onClick={() => {
+                setTutorialStep(0);
+                setTutorialOpen(true);
+              }}
+              className="p-1.5 rounded-xl bg-zinc-800/90 text-zinc-200 hover:text-white hover:bg-zinc-700 transition cursor-pointer"
+              title="Tutorial Interativo"
+              aria-label="Abrir Tutorial"
+            >
+              <HelpCircle className="w-4 h-4" />
+            </button>
+
             {/* Quick Walkie-Talkie Button */}
             <button
               onClick={() => setChatOpen(true)}
-              className="relative p-1.5 rounded-xl bg-slide-surface text-slide-paper hover:bg-slide-surface/80 transition cursor-pointer"
+              className="relative p-1.5 rounded-xl bg-zinc-800/90 text-white hover:bg-zinc-700 transition cursor-pointer"
               title="Walkie-Talkie / Mensagens Rápidas"
+              aria-label="Abrir Walkie-Talkie"
             >
-              <span className="text-sm">💬</span>
-              <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-slide-accent animate-ping" />
+              <MessageSquare className="w-4 h-4" />
+              <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-[#e11d2e]" />
             </button>
 
-            {/* Profile User Badge (Role is selected from outside the phone) */}
-            <div className="flex items-center gap-1.5 bg-slide-surface/90 px-2.5 py-1 rounded-xl border border-slide-line/20 shadow-xs">
-              <span className="text-xs">
-                {role === "parent" ? "👩‍👧" : role === "driver" ? "🧑‍✈️" : "🏢"}
-              </span>
-              <span className="text-[11px] font-bold text-slide-paper">
+            {/* Profile User Badge */}
+            <div className="flex items-center gap-1 bg-zinc-800/90 px-2 py-1 rounded-xl border border-white/10">
+              {role === "parent" ? (
+                <Users className="w-3 h-3 text-[#e11d2e]" />
+              ) : role === "driver" ? (
+                <Compass className="w-3 h-3 text-[#e11d2e]" />
+              ) : (
+                <Building2 className="w-3 h-3 text-[#e11d2e]" />
+              )}
+              <span className="text-[10px] font-bold text-white">
                 {role === "parent" ? "Sra. Luísa" : role === "driver" ? "João M." : "Empresa"}
               </span>
             </div>
 
             <button
               onClick={() => setSosOpen(true)}
-              className="w-8 h-8 rounded-full bg-destructive text-destructive-foreground font-black text-xs grid place-items-center shadow hover:scale-105 transition cursor-pointer"
+              className="w-7 h-7 rounded-full bg-[#e11d2e] text-white font-black text-[9px] grid place-items-center shadow hover:scale-105 transition cursor-pointer"
               title="Emergência SOS"
             >
               SOS
@@ -344,147 +520,184 @@ export function NativeMobileApp({
           </div>
         </header>
 
-        {/* Multi-Route Corridor Bar */}
-        <div className="bg-slide-paper-ink/95 text-slide-paper px-3 py-2 flex items-center justify-between border-b border-slide-surface text-xs shrink-0 select-none">
-          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
-            {Object.values(LUANDA_ROUTES).map((r) => (
-              <button
-                key={r.id}
-                onClick={() => {
-                  setSelectedRouteId(r.id);
-                  setProgress(0);
-                  notify(`Corredor alterado para ${r.name}`, "info");
-                }}
-                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold whitespace-nowrap transition cursor-pointer ${
-                  selectedRouteId === r.id
-                    ? "bg-slide-accent text-slide-accent-ink shadow-xs"
-                    : "bg-slide-surface text-slide-dim hover:text-slide-paper"
-                }`}
-              >
-                {r.code}
-              </button>
-            ))}
-          </div>
-          <span className="text-[10px] text-slide-dim font-mono ml-2 shrink-0">Luanda AO</span>
-        </div>
-
-        {/* Global Emergency Alert Banner */}
-        {emergency && (
-          <div className="bg-destructive text-destructive-foreground px-4 py-2.5 text-xs font-bold flex items-center justify-between gap-2 shadow-inner">
-            <div className="flex items-center gap-2 truncate">
-              <span className="animate-pulse">🚨</span>
-              <span className="truncate">
-                {emergency.type} · {emergency.from} ({emergency.time})
-              </span>
-            </div>
-            <button
-              onClick={() => {
-                setEmergency(null);
-                notify("✅ Ocorrência de emergência resolvida com sucesso.", "success");
-              }}
-              className="underline shrink-0 cursor-pointer text-white font-extrabold text-[11px]"
+        {/* Dynamic In-App Notification Toast with Spring Micro-Interaction */}
+        <AnimatePresence>
+          {toast && (
+            <motion.div
+              key={toast}
+              initial={{ opacity: 0, y: -14, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -10, scale: 0.96 }}
+              transition={{ type: "spring", stiffness: 420, damping: 28 }}
+              className="absolute top-14 left-3 right-3 z-50 max-w-sm mx-auto rounded-2xl bg-[#09090b]/95 backdrop-blur-md text-white p-3 text-xs font-semibold shadow-2xl border border-white/15"
             >
-              Resolver
-            </button>
-          </div>
-        )}
-
-        {/* Proximity Geofencing Alert Banner (500m away) */}
-        {proximityAlert.visible && (
-          <div className="bg-amber-500 text-slate-950 px-4 py-3 text-xs font-black flex items-start justify-between gap-2 shadow-lg animate-in slide-in-from-top-2 border-b-2 border-amber-600">
-            <div className="flex items-start gap-2">
-              <span className="text-xl animate-bounce">🔔</span>
-              <div>
-                <div className="text-[10px] uppercase tracking-wider opacity-80 font-black">
-                  ALERTA DE PROXIMIDADE (500 METROS)
+              <div className="flex items-start gap-2.5">
+                <div className="w-6 h-6 rounded-lg bg-[#e11d2e]/20 text-[#e11d2e] grid place-items-center shrink-0 mt-0.5">
+                  <Bell className="w-3.5 h-3.5" />
                 </div>
-                <div className="text-sm font-black leading-tight">
-                  O autocarro está a ~{proximityAlert.minutesAway} min de {proximityAlert.stopName}!
-                </div>
-                <div className="text-[11px] font-medium opacity-90 mt-0.5">
-                  Por favor, dirija-se à paragem com o seu educando para embarque seguro.
+                <div className="flex-1">
+                  <div className="text-[10px] text-[#e11d2e] font-bold uppercase tracking-wider">MôBuss Alerta</div>
+                  <div>{toast}</div>
                 </div>
               </div>
-            </div>
-            <button
-              onClick={() => setProximityAlert((p) => ({ ...p, visible: false }))}
-              className="text-xs bg-amber-600/30 hover:bg-amber-600/50 px-2 py-1 rounded-lg cursor-pointer"
-            >
-              ✕
-            </button>
-          </div>
-        )}
-
-        {/* Offline Simulation Indicator */}
-        {offlineMode && (
-          <div className="bg-amber-500 text-black px-4 py-1.5 text-xs font-bold flex items-center justify-between">
-            <span>📡 Modo Offline ativo · Ações guardadas localmente</span>
-            <button onClick={() => setOfflineMode(false)} className="underline text-[10px]">
-              Reconectar
-            </button>
-          </div>
-        )}
-
-        {/* Dynamic In-App Notification Toast */}
-        {toast && (
-          <div className="absolute top-16 left-3 right-3 z-50 max-w-sm mx-auto rounded-2xl bg-slide-paper-ink text-slide-paper p-3.5 text-sm font-semibold shadow-2xl border border-slide-surface animate-in fade-in slide-in-from-top-3">
-            <div className="flex items-start gap-2.5">
-              <span className="text-base">🔔</span>
-              <div className="flex-1">
-                <div className="text-[10px] text-slide-accent font-bold uppercase tracking-wider">MôBuss Alerta</div>
-                <div>{toast}</div>
-              </div>
-            </div>
-          </div>
-        )}
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* MAIN BODY CONTENT ACCORDING TO ROLE & ACTIVE TAB */}
-        <main className="flex-1 min-h-0 p-4 overflow-y-auto">
+        <main className={`flex-1 min-h-0 ${isMapView ? "relative overflow-hidden flex flex-col" : "p-4 overflow-y-auto"}`}>
+          {/* Banners for non-map tabs */}
+          {!isMapView && emergency && (
+            <div className="mb-3 rounded-2xl bg-[#e11d2e] text-white px-3.5 py-2.5 text-xs font-bold flex items-center justify-between shadow-md">
+              <div className="flex items-center gap-2 min-w-0">
+                <ShieldAlert className="w-4 h-4 animate-pulse shrink-0" />
+                <span className="truncate">SOS: {emergency.type} (Autocarro {emergency.busNumber})</span>
+              </div>
+              <button
+                onClick={() => setEmergency(null)}
+                className="underline text-[11px] font-black ml-2 shrink-0 cursor-pointer"
+              >
+                Limpar
+              </button>
+            </div>
+          )}
+
+          {!isMapView && role === "parent" && proximityAlert.visible && (
+            <div className="mb-3 rounded-2xl bg-[#09090b] text-white border border-[#e11d2e]/50 px-3.5 py-2.5 text-xs flex items-center justify-between shadow-md">
+              <div className="min-w-0 pr-2">
+                <div className="text-[10px] font-black text-[#e11d2e] uppercase tracking-wider flex items-center gap-1">
+                  <Bell className="w-3 h-3" />
+                  <span>Aproximação GPS · {proximityAlert.distanceMeters}m</span>
+                </div>
+                <div className="font-semibold truncate">Autocarro {currentRoute.busId} a {proximityAlert.minutesAway} min de {proximityAlert.stopName}</div>
+              </div>
+              <button
+                onClick={() => setProximityAlert((p) => ({ ...p, visible: false }))}
+                className="px-2 py-1 rounded-lg bg-white/10 text-[10px] font-bold shrink-0 cursor-pointer"
+              >
+                OK
+              </button>
+            </div>
+          )}
+
           {/* ================= PARENT INTERFACE ================= */}
           {role === "parent" && (
             <>
               {activeTab === "home" && (
-                <div className="space-y-4">
-                  {/* Child Selector */}
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="text-xs font-semibold opacity-60">Encarregada de Educação · {currentRoute.name}</div>
-                      <h2 className="text-xl font-black" style={{ fontFamily: "var(--font-display)" }}>
-                        {currentKid.name}
-                      </h2>
-                    </div>
-
-                    <div className="flex items-center gap-1.5">
-                      {students.slice(0, 2).map((k) => (
-                        <button
-                          key={k.id}
-                          onClick={() => setSelectedKidId(k.id)}
-                          className={`px-2.5 py-1 rounded-xl text-xs font-bold transition cursor-pointer ${
-                            selectedKidId === k.id
-                              ? "bg-slide-accent text-slide-accent-ink shadow-xs"
-                              : "bg-slide-line/40 text-slide-paper-ink opacity-70"
-                          }`}
-                        >
-                          {k.name.split(" ")[0]}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Live Map with Multi-Route */}
-                  <div className="relative">
+                <div className="relative flex-1 min-h-0 flex flex-col overflow-hidden">
+                  {/* Full-Screen Live Map */}
+                  <div className="absolute inset-0 z-0">
                     <LuandaMap
                       progress={progress}
                       emergency={!!emergency}
                       routeId={selectedRouteId}
-                      className="h-60 shadow-md rounded-2xl"
+                      className="h-full w-full rounded-none"
                     />
-                    <div className="absolute top-2.5 left-2.5 z-10 bg-slide-paper/90 backdrop-blur-xs px-2.5 py-1 rounded-full text-[11px] font-bold shadow-xs flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-slide-ok animate-pulse" />
-                      <span>{currentRoute.code} · GPS ao Vivo</span>
+                  </div>
+
+                  {/* Floating Top Bar: Corridors + Kid Toggle + Live Alerts */}
+                  <div className="relative z-10 px-2.5 pt-2.5 space-y-2 pointer-events-none">
+                    <div className="flex items-center gap-1.5 justify-between pointer-events-auto">
+                      <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5">
+                        {Object.values(LUANDA_ROUTES).map((r) => (
+                          <button
+                            key={r.id}
+                            onClick={() => {
+                              setSelectedRouteId(r.id);
+                              setProgress(0);
+                              setRunning(false);
+                              setProximityAlert((p) => ({ ...p, visible: false }));
+                              notify(`Corredor alterado para ${r.name}`, "info");
+                            }}
+                            className={`px-2.5 py-1 rounded-full text-[10px] font-bold whitespace-nowrap transition cursor-pointer shadow-sm backdrop-blur-md ${
+                              selectedRouteId === r.id
+                                ? "bg-[#09090b] text-white ring-1 ring-white/20"
+                                : "bg-white/90 text-zinc-900 border border-zinc-200/80 hover:bg-white"
+                            }`}
+                          >
+                            {r.code}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="flex items-center gap-1 bg-white/90 backdrop-blur-md p-0.5 rounded-full border border-zinc-200/80 shadow-sm shrink-0">
+                        {students.slice(0, 2).map((k) => (
+                          <button
+                            key={k.id}
+                            onClick={() => setSelectedKidId(k.id)}
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold transition cursor-pointer ${
+                              selectedKidId === k.id
+                                ? "bg-[#e11d2e] text-white shadow-xs"
+                                : "text-zinc-600 hover:text-zinc-950"
+                            }`}
+                          >
+                            {k.name.split(" ")[0]}
+                          </button>
+                        ))}
+                      </div>
                     </div>
 
-                    {/* Geofence Proximity Test Trigger */}
+                    {/* Floating SOS Banner */}
+                    {emergency && (
+                      <div className="pointer-events-auto rounded-2xl bg-[#e11d2e]/95 backdrop-blur-md text-white px-3 py-2 text-xs font-bold flex items-center justify-between shadow-lg border border-white/20">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <ShieldAlert className="w-4 h-4 animate-pulse shrink-0" />
+                          <span className="truncate">SOS: {emergency.type}</span>
+                        </div>
+                        <button
+                          onClick={() => setEmergency(null)}
+                          className="px-2 py-0.5 rounded-lg bg-black/25 text-[10px] font-black ml-2 shrink-0 cursor-pointer"
+                        >
+                          Limpar
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Floating Geofence 500m Proximity Alert */}
+                    {proximityAlert.visible && (
+                      <div className="pointer-events-auto rounded-2xl bg-[#09090b]/92 backdrop-blur-md text-white border border-[#e11d2e]/60 px-3 py-2 text-xs shadow-xl flex items-center justify-between">
+                        <div className="min-w-0 pr-2">
+                          <div className="text-[10px] font-black uppercase tracking-wider text-[#e11d2e] flex items-center gap-1">
+                            <Bell className="w-3 h-3" />
+                            <span>A {proximityAlert.distanceMeters}m da Paragem</span>
+                          </div>
+                          <div className="font-semibold text-[11px] truncate">
+                            Autocarro {currentRoute.busId} chega a {proximityAlert.stopName} em {proximityAlert.minutesAway} min
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => setProximityAlert((p) => ({ ...p, visible: false }))}
+                          className="px-2 py-1 rounded-lg bg-white/15 hover:bg-white/25 text-[10px] font-bold shrink-0 cursor-pointer"
+                        >
+                          OK
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Floating Traffic Delay / Waze Hazard Alert */}
+                    {(delay || activeHazard) && (
+                      <div className="pointer-events-auto rounded-xl bg-red-950/90 backdrop-blur-md text-white border border-[#e11d2e]/50 px-3 py-1.5 text-[11px] font-bold flex items-center gap-2 shadow-md">
+                        <AlertTriangle className="w-3.5 h-3.5 text-[#e11d2e] shrink-0" />
+                        <span className="truncate">
+                          {activeHazard
+                            ? `Alerta na via: ${activeHazard} (+5 min)`
+                            : `Motorista reportou +${delay} min de atraso no corredor.`}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Floating Map Actions: Geofence Test + Safety Share */}
+                  <div className="mt-auto self-end mr-3 mb-2 relative z-10 flex items-center gap-1.5">
+                    <button
+                      onClick={() => setShareModalOpen(true)}
+                      className="bg-white/95 backdrop-blur-md text-zinc-950 px-2.5 py-1.5 rounded-full text-[10px] font-bold shadow-lg border border-zinc-200 hover:bg-white active:scale-95 transition cursor-pointer inline-flex items-center gap-1"
+                      title="Partilhar Viagem ao Vivo com Familiar"
+                    >
+                      <Share2 className="w-3 h-3 text-[#e11d2e]" />
+                      <span>Partilhar</span>
+                    </button>
+
                     <button
                       onClick={() => {
                         setProximityAlert({
@@ -493,159 +706,297 @@ export function NativeMobileApp({
                           distanceMeters: 450,
                           minutesAway: 2,
                         });
-                        notify(`🔔 Teste: Autocarro a 450m da sua paragem!`, "alert");
+                        notify(`Teste: Autocarro a 450m da sua paragem!`, "alert");
                       }}
-                      className="absolute bottom-2.5 right-2.5 z-10 bg-slide-paper-ink text-slide-paper px-2.5 py-1 rounded-full text-[10px] font-bold shadow hover:bg-slide-surface cursor-pointer"
+                      className="bg-[#09090b]/90 backdrop-blur-md text-white px-3 py-1.5 rounded-full text-[10px] font-bold shadow-lg border border-white/15 hover:bg-[#e11d2e] active:scale-95 transition cursor-pointer inline-flex items-center gap-1.5"
                     >
-                      🔔 Testar Geofence
+                      <Bell className="w-3 h-3 text-[#e11d2e]" />
+                      <span>Testar Geofence</span>
                     </button>
                   </div>
 
-                  {/* Traffic delay notification */}
-                  {delay && (
-                    <div className="rounded-xl bg-destructive/15 text-destructive border border-destructive/30 px-3.5 py-2.5 text-xs font-bold flex items-center gap-2">
-                      <span>⚠️</span>
-                      <span>O motorista reportou +{delay} min de atraso devido ao trânsito na via.</span>
-                    </div>
-                  )}
-
-                  {/* Absence notification if marked */}
-                  {currentKid.absent && (
-                    <div className="rounded-xl bg-amber-500/20 border border-amber-500 text-amber-900 px-3.5 py-2.5 text-xs font-bold flex items-center justify-between">
-                      <div>
-                        <div>🚫 Aluno marcado como ausente hoje</div>
-                        <div className="text-[10px] font-normal opacity-80">{currentKid.absenceReason}</div>
-                      </div>
-                      <button
-                        onClick={() => {
-                          setStudents((all) =>
-                            all.map((s) => (s.id === currentKid.id ? { ...s, absent: false } : s))
-                          );
-                          notify(`Ausência cancelada para ${currentKid.name}. O autocarro passará na paragem.`, "info");
-                        }}
-                        className="underline text-xs font-bold cursor-pointer"
-                      >
-                        Desfazer
-                      </button>
-                    </div>
-                  )}
-
-                  {/* Status Card */}
+                  {/* Expandable Uber/Yango Bottom Sheet */}
                   <div
-                    className={`rounded-2xl p-4 flex justify-between items-center shadow-sm ${
-                      emergency
-                        ? "bg-destructive text-destructive-foreground"
-                        : "bg-slide-accent text-slide-accent-ink"
+                    className={`relative z-20 bg-white text-zinc-950 rounded-t-[26px] shadow-[0_-12px_32px_rgba(0,0,0,0.22)] border-t border-zinc-200 flex flex-col transition-all duration-300 ${
+                      sheetExpanded ? "max-h-[78%]" : "max-h-[48%]"
                     }`}
                   >
-                    <div>
-                      <div className="text-[10px] font-black uppercase tracking-wider opacity-80">ESTADO DA ROTA</div>
-                      <div className="text-2xl font-black tracking-tight">
-                        {emergency
-                          ? "Em emergência"
-                          : currentKid.absent
-                          ? "Ausência justificada"
-                          : currentKid.droppedOff
-                          ? "Entregue em segurança"
-                          : !running && progress === 0
-                          ? "Ainda não partiu"
-                          : progress >= 1
-                          ? "Na escola"
-                          : currentKid.onBoard
-                          ? "A bordo do autocarro"
-                          : `Chega em ${Math.max(
-                              1,
-                              Math.round(((currentRoute.stops[currentKid.stop]?.at || 0.2) - progress) * 60)
-                            )} min`}
-                      </div>
-                    </div>
-                    <div className="text-right text-xs font-bold">
-                      <div className="opacity-75">Paragem</div>
-                      <div className="text-sm font-black">
-                        {currentRoute.stops[currentKid.stop]?.name || "Paragem Oficial"}
-                      </div>
-                    </div>
-                  </div>
+                    {/* Drag Handle */}
+                    <button
+                      type="button"
+                      onClick={() => setSheetExpanded((v) => !v)}
+                      className="w-full pt-2.5 pb-1.5 flex flex-col items-center gap-1 shrink-0 cursor-pointer"
+                      aria-label={sheetExpanded ? "Recolher painel" : "Expandir painel"}
+                    >
+                      <span className="w-10 h-1 rounded-full bg-zinc-300" />
+                      <span className="text-[9px] font-bold uppercase tracking-wider text-zinc-400">
+                        {sheetExpanded ? "Toque para recolher" : "Toque para expandir"}
+                      </span>
+                    </button>
 
-                  {/* Secure Pickup PIN Box */}
-                  <div className="rounded-2xl border-2 border-emerald-600/30 bg-emerald-500/10 p-3.5 flex items-center justify-between">
-                    <div>
-                      <div className="text-[10px] uppercase tracking-wider font-extrabold text-emerald-800">
-                        🛡️ PIN DE RECOLHA SEGURA
-                      </div>
-                      <div className="text-xs text-emerald-950 font-medium">Apresente ao motorista para entrega</div>
-                    </div>
-                    <div className="text-2xl font-mono font-black text-emerald-800 bg-white px-3 py-1 rounded-xl shadow-xs border border-emerald-200">
-                      {currentKid.pickupPin}
-                    </div>
-                  </div>
+                    {/* Pinned Peek Summary */}
+                    <div className="px-4 pb-3 border-b border-zinc-100 shrink-0 space-y-2.5">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                            <span
+                              className={`w-1.5 h-1.5 rounded-full ${
+                                emergency ? "bg-[#e11d2e] animate-ping" : running ? "bg-emerald-500 animate-pulse" : "bg-zinc-400"
+                              }`}
+                            />
+                            <span className="truncate">{currentKid.name} · {currentRoute.code}</span>
+                          </div>
+                          <div className="text-xl font-black tracking-tight tabular-nums text-zinc-950 leading-tight mt-0.5">
+                            {emergency
+                              ? "Em emergência"
+                              : currentKid.absent
+                              ? "Ausência justificada"
+                              : currentKid.droppedOff
+                              ? "Entregue em segurança"
+                              : !running && progress === 0
+                              ? "Ainda não partiu"
+                              : progress >= 1
+                              ? "Chegou à escola"
+                              : currentKid.onBoard
+                              ? "A bordo do autocarro"
+                              : `Chega em ${etaMinutes} min`}
+                          </div>
+                          <div className="text-[11px] text-zinc-500 font-medium truncate">
+                            Paragem: <strong className="text-zinc-800">{currentRoute.stops[currentKid.stop]?.name || "Paragem Oficial"}</strong>
+                          </div>
+                        </div>
 
-                  {/* Driver Card & Quick Walkie-Talkie */}
-                  <div className="rounded-2xl border border-slide-line p-3.5 flex items-center gap-3 bg-slide-paper shadow-2xs">
-                    <div className="w-12 h-12 rounded-2xl bg-slide-paper-ink text-slide-paper grid place-items-center font-black text-base shadow">
-                      {currentRoute.driver.split(" ").map((n) => n[0]).join("")}
-                    </div>
-                    <div className="flex-1">
-                      <div className="font-extrabold text-sm">{currentRoute.driver}</div>
-                      <div className="text-[11px] opacity-65 font-medium">
-                        Motorista Oficial · Autocarro {currentRoute.busId}
+                        {/* Compact Secure Pickup PIN Badge */}
+                        <div className="rounded-2xl bg-emerald-50 border border-emerald-200 px-2.5 py-1.5 text-center shrink-0">
+                          <div className="text-[8px] font-black uppercase tracking-wider text-emerald-700">PIN Seguro</div>
+                          <div className="text-base font-mono font-black text-emerald-800 leading-tight tabular-nums">
+                            {currentKid.pickupPin}
+                          </div>
+                        </div>
                       </div>
-                      <div className="text-[10px] font-mono opacity-50">{currentRoute.busPlate}</div>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        onClick={() => setChatOpen(true)}
-                        className="rounded-full bg-slide-line text-slide-paper-ink w-10 h-10 grid place-items-center font-bold text-sm shadow hover:bg-slide-line/70 cursor-pointer"
-                        title="Enviar mensagem rápida ao motorista"
-                      >
-                        💬
-                      </button>
-                      <a
-                        href={`tel:${currentRoute.driverPhone}`}
-                        className="rounded-full bg-slide-ok text-slide-accent-ink w-10 h-10 grid place-items-center font-bold text-base shadow hover:opacity-90 transition"
-                        title="Ligar ao motorista"
-                      >
-                        📞
-                      </a>
-                    </div>
-                  </div>
 
-                  {/* Quick Preset Action Bar */}
-                  <div className="rounded-2xl bg-slide-line/20 p-3 border border-slide-line">
-                    <div className="text-[11px] font-bold text-slide-dim uppercase tracking-wider mb-2">
-                      💬 Walkie-Talkie Rápido para o Motorista
+                      {/* 4-Stage Uber Journey Timeline */}
+                      <div className="grid grid-cols-4 gap-1 pt-0.5">
+                        {[
+                          { step: 1, label: "Partida" },
+                          { step: 2, label: "A caminho" },
+                          { step: 3, label: "A bordo" },
+                          { step: 4, label: "Escola" },
+                        ].map((item) => {
+                          const active = journeyStep >= item.step;
+                          const isCurrent = journeyStep === item.step;
+                          return (
+                            <div key={item.step} className="flex flex-col gap-1">
+                              <div
+                                className={`h-1.5 rounded-full transition-colors ${
+                                  active
+                                    ? journeyStep === 4
+                                      ? "bg-emerald-600"
+                                      : isCurrent
+                                      ? "bg-[#e11d2e]"
+                                      : "bg-zinc-900"
+                                    : "bg-zinc-200"
+                                }`}
+                              />
+                              <span
+                                className={`text-[9px] font-bold text-center truncate ${
+                                  active ? "text-zinc-900" : "text-zinc-400"
+                                }`}
+                              >
+                                {item.label}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Driver Safety Strip */}
+                      <div className="rounded-2xl bg-zinc-50 border border-zinc-200/80 p-2.5 flex items-center gap-2.5">
+                        <div className="w-9 h-9 rounded-xl bg-[#09090b] text-white grid place-items-center font-black text-xs shrink-0">
+                          {currentRoute.driver.split(" ").map((n) => n[0]).join("")}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="font-extrabold text-xs text-zinc-950 truncate">{currentRoute.driver}</div>
+                          <div className="text-[10px] text-zinc-500 font-medium truncate tabular-nums">
+                            Autocarro {currentRoute.busId} · {currentRoute.busPlate}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            onClick={() => setShareModalOpen(true)}
+                            className="rounded-full bg-zinc-200/80 hover:bg-zinc-300 active:scale-95 text-zinc-900 w-8 h-8 grid place-items-center cursor-pointer transition"
+                            title="Kit de Segurança & Partilha de Rota"
+                            aria-label="Partilhar viagem"
+                          >
+                            <Share2 className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={() => setChatOpen(true)}
+                            className="rounded-full bg-zinc-200/80 hover:bg-zinc-300 active:scale-95 text-zinc-900 w-8 h-8 grid place-items-center cursor-pointer transition"
+                            title="Enviar mensagem rápida ao motorista"
+                            aria-label="Mensagem rápida ao motorista"
+                          >
+                            <MessageSquare className="w-4 h-4" />
+                          </button>
+                          <a
+                            href={`tel:${currentRoute.driverPhone}`}
+                            className="rounded-full bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white w-8 h-8 grid place-items-center shadow-xs transition"
+                            title="Ligar ao motorista"
+                            aria-label="Ligar ao motorista"
+                          >
+                            <Phone className="w-4 h-4" />
+                          </a>
+                        </div>
+                      </div>
                     </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      {[
-                        "👨‍👩‍👧 Já estamos na paragem à espera.",
-                        "🏃‍♂️ A descer do prédio agora.",
-                        "✅ Recebemos a criança, obrigado!",
-                      ].map((msg) => (
+
+                    {/* Scrollable Expanded Details */}
+                    <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-2.5">
+                      {/* Post-Trip Rating Card (Uber-style after delivery or school arrival) */}
+                      {(progress >= 1 || currentKid.droppedOff) && (
+                        <div className="rounded-2xl bg-zinc-950 text-white p-3.5 space-y-2.5 shadow-md">
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <div className="text-[9px] font-black uppercase tracking-wider text-[#e11d2e]">
+                                Avaliação da Viagem
+                              </div>
+                              <div className="text-xs font-extrabold">
+                                {ratingSubmitted
+                                  ? "Obrigado pelo seu feedback!"
+                                  : `Como foi a viagem com ${currentRoute.driver}?`}
+                              </div>
+                            </div>
+                            {ratingSubmitted && (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-600/20 text-emerald-400 px-2 py-0.5 text-[10px] font-bold">
+                                <Check className="w-3 h-3" />
+                                <span>{tripRating}/5</span>
+                              </span>
+                            )}
+                          </div>
+
+                          {!ratingSubmitted && (
+                            <>
+                              <div className="flex items-center gap-1.5">
+                                {[1, 2, 3, 4, 5].map((star) => (
+                                  <button
+                                    key={star}
+                                    onClick={() => setTripRating(star)}
+                                    className="p-1 cursor-pointer active:scale-90 transition"
+                                    aria-label={`Avaliar com ${star} estrelas`}
+                                  >
+                                    <Star
+                                      className={`w-5 h-5 transition-colors ${
+                                        star <= tripRating
+                                          ? "fill-amber-400 text-amber-400"
+                                          : "text-zinc-600 hover:text-zinc-400"
+                                      }`}
+                                    />
+                                  </button>
+                                ))}
+                              </div>
+
+                              <div className="flex flex-wrap gap-1.5">
+                                {["Pontual", "Condução Suave", "Simpatia", "PIN Ágil"].map((tag) => {
+                                  const picked = ratingTags.includes(tag);
+                                  return (
+                                    <button
+                                      key={tag}
+                                      onClick={() =>
+                                        setRatingTags((prev) =>
+                                          picked ? prev.filter((x) => x !== tag) : [...prev, tag]
+                                        )
+                                      }
+                                      className={`px-2 py-1 rounded-lg text-[10px] font-bold cursor-pointer transition ${
+                                        picked
+                                          ? "bg-[#e11d2e] text-white"
+                                          : "bg-white/10 text-zinc-300 hover:bg-white/15"
+                                      }`}
+                                    >
+                                      {tag}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+
+                              <button
+                                disabled={tripRating === 0}
+                                onClick={() => {
+                                  setRatingSubmitted(true);
+                                  notify(`Avaliação de ${tripRating} estrelas registada para ${currentRoute.driver}!`, "success");
+                                }}
+                                className="w-full py-2 rounded-xl bg-white text-zinc-950 text-xs font-black disabled:opacity-40 cursor-pointer active:scale-[0.98] transition"
+                              >
+                                Enviar Avaliação
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      )}
+
+                      {currentKid.absent && (
+                        <div className="rounded-xl bg-red-50 border border-[#e11d2e]/30 text-zinc-900 px-3 py-2 text-xs font-bold flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5 text-[#e11d2e]">
+                              <CalendarOff className="w-3.5 h-3.5 shrink-0" />
+                              <span>Aluno marcado como ausente hoje</span>
+                            </div>
+                            <div className="text-[10px] font-normal text-zinc-600 truncate">{currentKid.absenceReason}</div>
+                          </div>
+                          <button
+                            onClick={() => {
+                              setStudents((all) =>
+                                all.map((s) => (s.id === currentKid.id ? { ...s, absent: false } : s))
+                              );
+                              notify(`Ausência cancelada para ${currentKid.name}. O autocarro passará na paragem.`, "info");
+                            }}
+                            className="underline text-xs font-bold text-[#e11d2e] cursor-pointer shrink-0"
+                          >
+                            Desfazer
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Quick Preset Action Bar */}
+                      <div className="rounded-2xl bg-zinc-50 p-2.5 border border-zinc-200">
+                        <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
+                          <Radio className="w-3 h-3 text-[#e11d2e]" />
+                          <span>Walkie-Talkie Rápido para o Motorista</span>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {[
+                            "Já estamos na paragem à espera.",
+                            "A descer do prédio agora.",
+                            "Recebemos a criança, obrigado!",
+                          ].map((msg) => (
+                            <button
+                              key={msg}
+                              onClick={() => sendQuickMessage(msg)}
+                              className="px-2.5 py-1.5 rounded-xl bg-white border border-zinc-200 text-[11px] font-semibold text-zinc-900 hover:bg-[#e11d2e] hover:text-white hover:border-[#e11d2e] active:scale-95 transition cursor-pointer shadow-2xs"
+                            >
+                              {msg}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Action Buttons */}
+                      <div className="grid grid-cols-2 gap-2">
                         <button
-                          key={msg}
-                          onClick={() => sendQuickMessage(msg)}
-                          className="px-2.5 py-1.5 rounded-xl bg-slide-paper border border-slide-line text-[11px] font-semibold text-slide-paper-ink hover:bg-slide-accent hover:text-slide-accent-ink transition cursor-pointer shadow-2xs"
+                          onClick={() => setAbsenceModalOpen(true)}
+                          className="rounded-xl border border-zinc-200 bg-white py-2.5 px-3 text-xs font-bold text-zinc-900 shadow-2xs hover:bg-zinc-50 active:scale-[0.98] transition cursor-pointer inline-flex items-center justify-center gap-1.5"
                         >
-                          {msg}
+                          <CalendarOff className="w-3.5 h-3.5 text-[#e11d2e]" />
+                          <span>Reportar Ausência</span>
                         </button>
-                      ))}
+                        <button
+                          onClick={() => setActiveTab("billing")}
+                          className="rounded-xl bg-[#09090b] py-2.5 px-3 text-xs font-bold text-white shadow-2xs hover:bg-zinc-800 active:scale-[0.98] transition cursor-pointer inline-flex items-center justify-center gap-1.5"
+                        >
+                          <CreditCard className="w-3.5 h-3.5" />
+                          <span>Mensalidade (MCX)</span>
+                        </button>
+                      </div>
                     </div>
-                  </div>
-
-                  {/* Action Buttons */}
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      onClick={() => setAbsenceModalOpen(true)}
-                      className="rounded-xl border border-slide-line bg-slide-paper py-2.5 px-3 text-xs font-bold text-slide-paper-ink shadow-2xs hover:bg-slide-line/30 transition cursor-pointer"
-                    >
-                      📅 Reportar Ausência
-                    </button>
-                    <button
-                      onClick={() => setActiveTab("billing")}
-                      className="rounded-xl border border-slide-line bg-slide-paper py-2.5 px-3 text-xs font-bold text-slide-paper-ink shadow-2xs hover:bg-slide-line/30 transition cursor-pointer"
-                    >
-                      💳 Pagar Mensalidade (MCX)
-                    </button>
                   </div>
                 </div>
               )}
@@ -657,26 +1008,30 @@ export function NativeMobileApp({
                     Segurança & Crianças
                   </h2>
 
-                  <div className="rounded-2xl bg-slide-accent/20 border border-slide-accent p-4">
+                  <div className="rounded-2xl bg-red-50 border border-[#e11d2e]/30 p-4">
                     <div className="flex justify-between items-start mb-2">
                       <div>
-                        <div className="text-xs text-slide-accent-ink/70 font-bold">ALUNA ATIVA</div>
-                        <div className="text-lg font-black">{currentKid.name}</div>
-                        <div className="text-xs opacity-75">{currentKid.school}</div>
+                        <div className="text-xs text-[#e11d2e] font-bold flex items-center gap-1">
+                          <User className="w-3.5 h-3.5" />
+                          <span>ALUNA ATIVA</span>
+                        </div>
+                        <div className="text-lg font-black text-zinc-950">{currentKid.name}</div>
+                        <div className="text-xs text-zinc-600">{currentKid.school}</div>
                       </div>
-                      <span className="text-xs font-mono font-bold bg-slide-paper px-2 py-1 rounded-lg">
+                      <span className="text-xs font-mono font-bold bg-slide-paper px-2 py-1 rounded-lg border border-zinc-200">
                         Paragem {currentKid.stop + 1}
                       </span>
                     </div>
 
                     <div className="mt-4 p-4 rounded-xl bg-slide-paper text-center border border-slide-line">
-                      <div className="text-xs text-slide-dim font-bold uppercase tracking-wider mb-1">
-                        Código de Entrega Segura
+                      <div className="text-xs text-zinc-500 font-bold uppercase tracking-wider mb-1 inline-flex items-center gap-1.5">
+                        <KeyRound className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>Código de Entrega Segura</span>
                       </div>
-                      <div className="text-4xl font-mono font-black text-slide-paper-ink tracking-widest my-2">
+                      <div className="text-4xl font-mono font-black text-slide-paper-ink tracking-widest my-2 tabular-nums">
                         {currentKid.pickupPin}
                       </div>
-                      <p className="text-[11px] text-slide-dim max-w-xs mx-auto">
+                      <p className="text-[11px] text-zinc-500 max-w-xs mx-auto">
                         O motorista só pode libertar a criança na paragem após introduzir este código de 4 dígitos.
                       </p>
                     </div>
@@ -690,22 +1045,27 @@ export function NativeMobileApp({
                           );
                           notify("Novo PIN de recolha gerado com sucesso!", "success");
                         }}
-                        className="flex-1 py-2 text-xs font-bold bg-slide-paper-ink text-slide-paper rounded-xl shadow cursor-pointer"
+                        className="flex-1 py-2 text-xs font-bold bg-slide-paper-ink text-slide-paper rounded-xl shadow cursor-pointer inline-flex items-center justify-center gap-1.5"
                       >
-                        🔄 Gerar Novo PIN
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>Gerar Novo PIN</span>
                       </button>
                       <button
                         onClick={() => setAbsenceModalOpen(true)}
-                        className="flex-1 py-2 text-xs font-bold bg-slide-line text-slide-paper-ink rounded-xl cursor-pointer"
+                        className="flex-1 py-2 text-xs font-bold bg-slide-line text-slide-paper-ink rounded-xl cursor-pointer inline-flex items-center justify-center gap-1.5"
                       >
-                        {currentKid.absent ? "Editar Ausência" : "Marcar Falta"}
+                        <CalendarOff className="w-3.5 h-3.5" />
+                        <span>{currentKid.absent ? "Editar Ausência" : "Marcar Falta"}</span>
                       </button>
                     </div>
                   </div>
 
                   <div className="rounded-2xl border border-slide-line p-3.5 bg-slide-paper">
-                    <div className="font-bold text-sm mb-1">Protocolo de Segurança em Luanda</div>
-                    <p className="text-xs text-slide-dim leading-relaxed">
+                    <div className="font-bold text-sm mb-1 flex items-center gap-1.5">
+                      <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                      <span>Protocolo de Segurança em Luanda</span>
+                    </div>
+                    <p className="text-xs text-zinc-500 leading-relaxed">
                       Para garantir a máxima proteção do seu educando, o motorista não fará entrega sem a validação prévia do PIN ou autorização expressa pelo encarregado de educação.
                     </p>
                   </div>
@@ -723,7 +1083,7 @@ export function NativeMobileApp({
                     <div className="flex justify-between items-start">
                       <div>
                         <div className="text-xs text-slide-dim font-bold uppercase tracking-wider">MÊS CORRENTE</div>
-                        <div className="text-3xl font-black text-slide-accent mt-1">45 000 Kz</div>
+                        <div className="text-3xl font-black text-slide-accent mt-1 tabular-nums">45 000 Kz</div>
                       </div>
                       <div className="w-10 h-10 rounded-xl bg-orange-600 text-white font-black grid place-items-center text-xs shadow">
                         MCX
@@ -735,7 +1095,7 @@ export function NativeMobileApp({
                         onClick={() => setMulticaixaModalOpen(true)}
                         className="w-full rounded-xl bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-500 hover:to-amber-500 py-3 text-xs font-black text-white shadow-lg cursor-pointer transition flex items-center justify-center gap-2"
                       >
-                        <span>📲</span>
+                        <Smartphone className="w-4 h-4" />
                         <span>Pagar com Multicaixa Express (Instantâneo)</span>
                       </button>
 
@@ -757,11 +1117,14 @@ export function NativeMobileApp({
                       >
                         <div>
                           <div className="font-bold text-xs">{m}</div>
-                          <div className="text-[10px] text-slide-dim font-mono">{cert}</div>
+                          <div className="text-[10px] text-zinc-500 font-mono">{cert}</div>
                         </div>
                         <div className="text-right">
-                          <div className="font-mono text-xs font-bold">{val}</div>
-                          <span className="text-[10px] font-bold text-slide-ok">{st} ✓</span>
+                          <div className="font-mono text-xs font-bold tabular-nums">{val}</div>
+                          <span className="text-[10px] font-bold text-slide-ok inline-flex items-center gap-1 justify-end">
+                            <span>{st}</span>
+                            <CheckCircle2 className="w-3 h-3" />
+                          </span>
                         </div>
                       </div>
                     ))}
@@ -801,207 +1164,421 @@ export function NativeMobileApp({
             </>
           )}
 
-          {/* ================= DRIVER INTERFACE ================= */}
+          {/* ================= DRIVER INTERFACE (WAZE DARK MODE) ================= */}
           {role === "driver" && (
             <>
               {activeTab === "home" && (
-                <div className="space-y-3.5">
-                  <div className="flex justify-between items-center">
-                    <div>
-                      <div className="text-xs font-semibold opacity-60">{currentRoute.name}</div>
-                      <h2 className="text-xl font-black" style={{ fontFamily: "var(--font-display)" }}>
-                        Painel do Motorista
-                      </h2>
-                    </div>
-                    <div className="flex items-center gap-1.5">
+                <div className="relative flex-1 min-h-0 flex flex-col overflow-hidden">
+                  {/* Full-Screen Waze-Style Dark Route Map */}
+                  <div className="absolute inset-0 z-0">
+                    <LuandaMap
+                      progress={progress}
+                      emergency={!!emergency}
+                      routeId={selectedRouteId}
+                      darkMode={true}
+                      className="h-full w-full rounded-none"
+                    />
+                  </div>
+
+                  {/* Floating Top Bar: Corridors + Pauta + Carbon Next-Stop HUD */}
+                  <div className="relative z-10 px-2.5 pt-2.5 space-y-2 pointer-events-none">
+                    <div className="flex items-center justify-between gap-1.5 pointer-events-auto">
+                      <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5">
+                        {Object.values(LUANDA_ROUTES).map((r) => (
+                          <button
+                            key={r.id}
+                            onClick={() => {
+                              setSelectedRouteId(r.id);
+                              setProgress(0);
+                              setRunning(false);
+                              notify(`Corredor alterado para ${r.name}`, "info");
+                            }}
+                            className={`px-2.5 py-1 rounded-full text-[10px] font-bold whitespace-nowrap transition cursor-pointer shadow-sm backdrop-blur-md ${
+                              selectedRouteId === r.id
+                                ? "bg-[#e11d2e] text-white ring-1 ring-white/25"
+                                : "bg-[#09090b]/85 text-zinc-200 border border-white/15 hover:bg-[#14151a]"
+                            }`}
+                          >
+                            {r.code}
+                          </button>
+                        ))}
+                      </div>
+
                       <button
                         onClick={() => setAttendanceModalOpen(true)}
-                        className="bg-slide-accent text-slide-accent-ink px-2.5 py-1 rounded-lg text-xs font-bold cursor-pointer hover:opacity-90 shadow-2xs"
+                        className="bg-[#e11d2e] text-white px-2.5 py-1 rounded-full text-[10px] font-bold cursor-pointer hover:opacity-90 shadow-md shrink-0 inline-flex items-center gap-1"
                       >
-                        📋 Pauta
+                        <ClipboardList className="w-3 h-3" />
+                        <span>Pauta</span>
                       </button>
                     </div>
-                  </div>
 
-                  {/* Route Map */}
-                  <LuandaMap
-                    progress={progress}
-                    emergency={!!emergency}
-                    routeId={selectedRouteId}
-                    className="h-52 shadow-md rounded-2xl"
-                  />
-
-                  {/* Drive controls */}
-                  <div className="flex gap-2">
-                    {progress >= 1 ? (
-                      <button
-                        onClick={() => {
-                          setProgress(0);
-                          setStudents((s) => s.map((x) => ({ ...x, onBoard: false, droppedOff: false })));
-                          setDelay(null);
-                          setEmergency(null);
-                          notify("🔄 Rota reiniciada com sucesso para nova viagem.", "info");
-                        }}
-                        className="flex-1 rounded-2xl bg-slide-paper-ink text-slide-paper py-3 font-extrabold text-sm shadow cursor-pointer hover:opacity-90 transition"
-                      >
-                        Recomeçar rota
-                      </button>
-                    ) : (
-                      <button
-                        disabled={!!emergency}
-                        onClick={() => {
-                          setRunning(!running);
-                          if (!running)
-                            notify(
-                              `🚌 Viagem iniciada por ${currentRoute.driver} — encarregados notificados.`,
-                              "info"
-                            );
-                        }}
-                        className={`flex-1 rounded-2xl py-3.5 font-black text-sm shadow cursor-pointer transition ${
-                          running ? "bg-slide-line text-slide-paper-ink" : "bg-slide-ok text-slide-accent-ink"
-                        }`}
-                      >
-                        {running ? "⏸ Pausar Viagem" : progress > 0 ? "▶ Continuar Rota" : "▶ Iniciar Viagem"}
-                      </button>
-                    )}
-
-                    <button
-                      onClick={() => {
-                        const newDelay = delay ? null : 10;
-                        setDelay(newDelay);
-                        if (newDelay) {
-                          sendQuickMessage("🚦 Trânsito congestionado na via (+10 min de atraso).");
-                          notify("⚠️ Atraso de 10 min comunicado aos encarregados.", "alert");
-                        } else {
-                          notify("Atraso removido.", "info");
-                        }
-                      }}
-                      className={`rounded-2xl px-4 py-3.5 font-bold text-sm cursor-pointer shadow transition ${
-                        delay ? "bg-destructive text-destructive-foreground" : "bg-slide-line text-slide-paper-ink"
-                      }`}
-                    >
-                      {delay ? "+10m Ativo" : "+10m Atraso"}
-                    </button>
-                  </div>
-
-                  {/* Driver 1-Tap Walkie-Talkie Bar */}
-                  <div className="rounded-2xl bg-slide-line/20 p-2.5 border border-slide-line">
-                    <div className="text-[10px] font-bold text-slide-dim uppercase tracking-wider mb-1.5 flex justify-between items-center">
-                      <span>📢 Walkie-Talkie Rápido para Encarregados</span>
-                      <button onClick={() => setChatOpen(true)} className="text-slide-accent underline text-[10px]">
-                        Ver Histórico ({messages.length})
-                      </button>
-                    </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      {[
-                        "🚌 Já cheguei à paragem.",
-                        "⏳ Aguardando 2 minutos.",
-                        "🚦 Trânsito intenso (+5 min).",
-                      ].map((msg) => (
-                        <button
-                          key={msg}
-                          onClick={() => sendQuickMessage(msg)}
-                          className="px-2.5 py-1 rounded-xl bg-slide-paper border border-slide-line text-[11px] font-semibold hover:bg-slide-accent hover:text-slide-accent-ink transition cursor-pointer shadow-2xs"
-                        >
-                          {msg}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Next stop indicator */}
-                  <div className="rounded-xl bg-slide-paper-ink text-slide-paper p-3 flex items-center justify-between shadow">
-                    <div>
-                      <div className="text-[10px] text-slide-dim uppercase tracking-wider font-bold">PRÓXIMA PARAGEM</div>
-                      <div className="font-black text-sm text-slide-accent">
-                        {currentRoute.stops.find((s) => s.at > progress)?.name || currentRoute.school}
-                      </div>
-                    </div>
-                    <div className="text-right text-xs font-bold text-slide-dim font-mono">
-                      ~{Math.max(1, Math.round((0.5 - progress) * 60))} min
-                    </div>
-                  </div>
-
-                  {/* Student Boarding & PIN Checklist */}
-                  <div className="rounded-2xl border border-slide-line p-3.5 bg-slide-paper shadow-2xs space-y-2.5">
-                    <div className="flex items-center justify-between">
-                      <div className="text-xs font-bold opacity-80">
-                        PASSAGEIROS (
-                        {students.filter((s) => s.onBoard).length} a bordo / {students.length})
-                      </div>
-                      <div className="text-[11px] text-slide-dim">Toque para registar</div>
-                    </div>
-
-                    <div className="divide-y divide-slide-line">
-                      {students.map((s) => (
-                        <div key={s.id} className="py-2.5 flex items-center justify-between">
-                          <div>
-                            <div className="font-bold text-xs flex items-center gap-1.5">
-                              <span>{s.name}</span>
-                              {s.absent && (
-                                <span className="bg-amber-100 text-amber-800 text-[9px] px-1.5 py-0.5 rounded-sm font-bold">
-                                  Ausente
-                                </span>
-                              )}
-                            </div>
-                            <div className="text-[11px] opacity-55">
-                              {currentRoute.stops[s.stop]?.name || "Paragem Oficial"}
-                            </div>
+                    {/* Floating Carbon Next-Stop HUD */}
+                    <div className="pointer-events-auto rounded-2xl bg-[#09090b]/92 backdrop-blur-md text-white px-3.5 py-2.5 flex items-center justify-between shadow-xl border border-white/15">
+                      <div className="flex items-center gap-2.5 min-w-0 pr-2">
+                        <div className="w-8 h-8 rounded-xl bg-[#e11d2e]/20 text-[#e11d2e] border border-[#e11d2e]/30 grid place-items-center shrink-0">
+                          <Navigation className="w-4 h-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-[9px] text-zinc-400 uppercase tracking-wider font-bold flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-[#e11d2e] animate-pulse" />
+                            <span>PRÓXIMA PARAGEM · {currentRoute.code}</span>
                           </div>
-
-                          <div className="flex items-center gap-1.5">
-                            {/* Board button */}
-                            <button
-                              disabled={s.absent || s.droppedOff}
-                              onClick={() => {
-                                setStudents((all) =>
-                                  all.map((x) => (x.id === s.id ? { ...x, onBoard: !x.onBoard } : x))
-                                );
-                                if (!s.onBoard)
-                                  notify(`✅ ${s.name.split(" ")[0]} registado(a) a bordo.`, "success");
-                              }}
-                              className={`rounded-full px-3 py-1 text-xs font-bold cursor-pointer transition ${
-                                s.onBoard ? "bg-slide-ok text-slide-accent-ink" : "bg-slide-line text-slide-paper-ink"
-                              }`}
-                            >
-                              {s.onBoard ? "A bordo ✓" : "Entrou"}
-                            </button>
-
-                            {/* Drop off with PIN button */}
-                            <button
-                              disabled={s.absent || s.droppedOff || !s.onBoard}
-                              onClick={() => {
-                                setVerifyingStudent(s);
-                                setPinVerifyModalOpen(true);
-                              }}
-                              className={`rounded-full px-2.5 py-1 text-xs font-bold cursor-pointer transition ${
-                                s.droppedOff
-                                  ? "bg-emerald-600 text-white"
-                                  : "border border-slide-line text-slide-paper-ink hover:bg-slide-line/40"
-                              }`}
-                            >
-                              {s.droppedOff ? "Entregue ✓" : "Validar PIN"}
-                            </button>
+                          <div className="font-black text-sm text-white truncate mt-0.5">
+                            {currentRoute.stops.find((s) => s.at > progress)?.name || currentRoute.school}
                           </div>
                         </div>
-                      ))}
+                      </div>
+                      <div className="text-right shrink-0">
+                        <div className="text-[9px] text-zinc-400 uppercase font-bold">Chegada</div>
+                        <div className="text-sm font-black text-[#e11d2e] font-mono tabular-nums">
+                          ~{Math.max(1, Math.round((0.5 - progress) * 60))} min
+                        </div>
+                      </div>
+                    </div>
+
+                    {emergency && (
+                      <div className="pointer-events-auto rounded-2xl bg-[#e11d2e]/95 backdrop-blur-md text-white px-3 py-2 text-xs font-bold flex items-center justify-between shadow-lg">
+                        <span className="truncate flex items-center gap-1.5">
+                          <ShieldAlert className="w-4 h-4 shrink-0" />
+                          <span className="truncate">SOS: {emergency.type}</span>
+                        </span>
+                        <button
+                          onClick={() => setEmergency(null)}
+                          className="px-2 py-0.5 rounded-lg bg-black/25 text-[10px] font-black ml-2 cursor-pointer"
+                        >
+                          Limpar
+                        </button>
+                      </div>
+                    )}
+
+                    {offlineMode && (
+                      <div className="pointer-events-auto rounded-xl bg-amber-500/95 backdrop-blur-md text-zinc-950 px-3 py-1.5 text-[11px] font-bold flex items-center justify-between shadow-md">
+                        <span className="flex items-center gap-1.5">
+                          <WifiOff className="w-3.5 h-3.5 shrink-0" />
+                          <span>Modo Offline Ativo — fila local</span>
+                        </span>
+                        <button onClick={() => setOfflineMode(false)} className="underline text-[10px] font-black cursor-pointer">
+                          Reconectar
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Expandable Driver Dark-Mode Bottom Sheet */}
+                  <div
+                    className={`mt-auto relative z-20 bg-[#111318] text-zinc-50 rounded-t-[26px] shadow-[0_-12px_36px_rgba(0,0,0,0.65)] border-t border-white/10 flex flex-col transition-all duration-300 ${
+                      sheetExpanded ? "max-h-[78%]" : "max-h-[50%]"
+                    }`}
+                  >
+                    {/* Drag Handle */}
+                    <button
+                      type="button"
+                      onClick={() => setSheetExpanded((v) => !v)}
+                      className="w-full pt-2.5 pb-1.5 flex flex-col items-center gap-1 shrink-0 cursor-pointer"
+                      aria-label={sheetExpanded ? "Recolher painel do motorista" : "Expandir painel do motorista"}
+                    >
+                      <span className="w-10 h-1 rounded-full bg-zinc-600" />
+                      <span className="text-[9px] font-bold uppercase tracking-wider text-zinc-400">
+                        {sheetExpanded ? "Toque para recolher" : "Lista de alunos e walkie-talkie"}
+                      </span>
+                    </button>
+
+                    {/* Pinned Thumb-Zone Drive Controls */}
+                    <div className="px-4 pb-3 border-b border-white/10 shrink-0 space-y-2.5">
+                      {/* Anti-Forgetting Empty Bus Sweep Check at End of Route */}
+                      {progress >= 1 && (
+                        <button
+                          onClick={() => {
+                            const next = !emptyBusChecked;
+                            setEmptyBusChecked(next);
+                            if (next) {
+                              notify("Verificação anti-esquecimento concluída: 0 alunos no autocarro.", "success");
+                            }
+                          }}
+                          className={`w-full rounded-2xl px-3 py-2.5 text-left border transition cursor-pointer flex items-center justify-between gap-2 active:scale-[0.98] ${
+                            emptyBusChecked
+                              ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                              : "bg-[#e11d2e]/15 border-[#e11d2e]/40 text-white"
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <div className="text-[10px] font-black uppercase tracking-wider">
+                              {emptyBusChecked ? "Verificação Concluída" : "Inspeção Obrigatória de Segurança"}
+                            </div>
+                            <div className="text-[11px] font-semibold truncate">
+                              {emptyBusChecked
+                                ? "Fila do fundo verificada · Autocarro vazio"
+                                : "Toque após confirmar a fila do fundo vazia"}
+                            </div>
+                          </div>
+                          <div
+                            className={`w-6 h-6 rounded-full grid place-items-center shrink-0 ${
+                              emptyBusChecked ? "bg-emerald-500 text-white" : "bg-[#e11d2e] text-white"
+                            }`}
+                          >
+                            {emptyBusChecked ? <Check className="w-3.5 h-3.5" /> : <ShieldCheck className="w-3.5 h-3.5" />}
+                          </div>
+                        </button>
+                      )}
+
+                      <div className="flex gap-2">
+                        {progress >= 1 ? (
+                          <button
+                            disabled={!emptyBusChecked}
+                            onClick={() => {
+                              setProgress(0);
+                              setStudents((s) => s.map((x) => ({ ...x, onBoard: false, droppedOff: false })));
+                              setDelay(null);
+                              setActiveHazard(null);
+                              setEmergency(null);
+                              setEmptyBusChecked(false);
+                              setRatingSubmitted(false);
+                              setTripRating(0);
+                              setRatingTags([]);
+                              notify("Rota reiniciada com sucesso para nova viagem.", "info");
+                            }}
+                            className="flex-1 rounded-2xl bg-white text-zinc-950 py-3 font-extrabold text-sm shadow cursor-pointer hover:opacity-90 disabled:opacity-40 active:scale-[0.98] transition inline-flex items-center justify-center gap-2"
+                          >
+                            <RotateCcw className="w-4 h-4" />
+                            <span>{emptyBusChecked ? "Recomeçar rota" : "Confirme acima"}</span>
+                          </button>
+                        ) : (
+                          <button
+                            disabled={!!emergency}
+                            onClick={() => {
+                              setRunning(!running);
+                              if (!running)
+                                notify(
+                                  `Viagem iniciada por ${currentRoute.driver} — encarregados notificados.`,
+                                  "info"
+                                );
+                            }}
+                            className={`flex-1 rounded-2xl py-3 font-black text-sm shadow cursor-pointer active:scale-[0.98] transition inline-flex items-center justify-center gap-2 ${
+                              running
+                                ? "bg-zinc-800 text-zinc-100 border border-white/15"
+                                : "bg-[#16a34a] text-white"
+                            }`}
+                          >
+                            {running ? (
+                              <>
+                                <Pause className="w-4 h-4" />
+                                <span>Pausar Viagem</span>
+                              </>
+                            ) : progress > 0 ? (
+                              <>
+                                <Play className="w-4 h-4 fill-current" />
+                                <span>Continuar Rota</span>
+                              </>
+                            ) : (
+                              <>
+                                <Play className="w-4 h-4 fill-current" />
+                                <span>Iniciar Viagem</span>
+                              </>
+                            )}
+                          </button>
+                        )}
+
+                        <button
+                          onClick={() => {
+                            const newDelay = delay ? null : 10;
+                            setDelay(newDelay);
+                            if (newDelay) {
+                              sendQuickMessage("Trânsito congestionado na via (+10 min de atraso).");
+                              notify("Atraso de 10 min comunicado aos encarregados.", "alert");
+                            } else {
+                              notify("Atraso removido.", "info");
+                            }
+                          }}
+                          className={`rounded-2xl px-3.5 py-3 font-bold text-xs cursor-pointer shadow active:scale-[0.98] transition inline-flex items-center gap-1.5 ${
+                            delay
+                              ? "bg-[#e11d2e] text-white"
+                              : "bg-zinc-800/90 text-zinc-100 border border-white/10 hover:bg-zinc-800"
+                          }`}
+                        >
+                          <Clock className="w-3.5 h-3.5" />
+                          <span>{delay ? "+10m Ativo" : "+10m Atraso"}</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Scrollable Body: Waze Hazard Bar + Walkie-Talkie + Passenger Boarding Checklist */}
+                    <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3">
+                      {/* Waze-Style 1-Tap Hazard Reporting */}
+                      <div className="rounded-2xl bg-[#181a20] p-2.5 border border-white/10">
+                        <div className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider mb-1.5 flex items-center justify-between">
+                          <span className="flex items-center gap-1.5">
+                            <AlertTriangle className="w-3 h-3 text-amber-400" />
+                            <span>Reportar na Via (estilo Waze)</span>
+                          </span>
+                          {activeHazard && (
+                            <button
+                              onClick={() => {
+                                setActiveHazard(null);
+                                notify("Alerta de via removido.", "info");
+                              }}
+                              className="text-[10px] text-zinc-300 underline cursor-pointer"
+                            >
+                              Limpar
+                            </button>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-3 gap-1.5">
+                          {[
+                            { label: "Engarrafamento", Icon: Siren },
+                            { label: "Chuva Forte", Icon: CloudRain },
+                            { label: "Obras na Via", Icon: Construction },
+                          ].map(({ label, Icon }) => {
+                            const active = activeHazard === label;
+                            return (
+                              <button
+                                key={label}
+                                onClick={() => {
+                                  const next = active ? null : label;
+                                  setActiveHazard(next);
+                                  if (next) {
+                                    sendQuickMessage(`Alerta na via: ${label} no corredor ${currentRoute.code}.`);
+                                    notify(`Alerta Waze publicado: ${label}`, "alert");
+                                  }
+                                }}
+                                className={`px-2 py-1.5 rounded-xl border text-[10px] font-bold flex flex-col items-center gap-1 cursor-pointer active:scale-95 transition ${
+                                  active
+                                    ? "bg-[#e11d2e] border-[#e11d2e] text-white"
+                                    : "bg-[#09090b] border-white/10 text-zinc-200 hover:border-white/25"
+                                }`}
+                              >
+                                <Icon className="w-3.5 h-3.5" />
+                                <span className="truncate max-w-full">{label}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Driver 1-Tap Walkie-Talkie Bar */}
+                      <div className="rounded-2xl bg-[#181a20] p-2.5 border border-white/10">
+                        <div className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider mb-1.5 flex justify-between items-center">
+                          <span className="flex items-center gap-1.5">
+                            <Radio className="w-3 h-3 text-[#e11d2e]" />
+                            <span>Walkie-Talkie Rápido</span>
+                          </span>
+                          <button onClick={() => setChatOpen(true)} className="text-[#e11d2e] font-bold underline text-[10px] cursor-pointer">
+                            Histórico ({messages.length})
+                          </button>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {[
+                            "Já cheguei à paragem.",
+                            "Aguardando 2 minutos.",
+                            "Trânsito intenso (+5 min).",
+                          ].map((msg) => (
+                            <button
+                              key={msg}
+                              onClick={() => sendQuickMessage(msg)}
+                              className="px-2.5 py-1 rounded-xl bg-[#09090b] border border-white/15 text-[11px] font-semibold text-zinc-100 hover:bg-[#e11d2e] hover:text-white hover:border-[#e11d2e] active:scale-95 transition cursor-pointer"
+                            >
+                              {msg}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Student Boarding & PIN Checklist */}
+                      <div className="rounded-2xl border border-white/10 p-3 bg-[#181a20] space-y-2">
+                        <div className="flex items-center justify-between">
+                          <div className="text-xs font-bold text-zinc-100">
+                            PASSAGEIROS ({students.filter((s) => s.onBoard).length} a bordo / {students.length})
+                          </div>
+                          <div className="text-[10px] text-zinc-400">Toque para registar</div>
+                        </div>
+
+                        <div className="divide-y divide-white/10">
+                          {students.map((s) => (
+                            <div key={s.id} className="py-2 flex items-center justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="font-bold text-xs flex items-center gap-1.5 text-white">
+                                  <span className="truncate">{s.name}</span>
+                                  {s.absent && (
+                                    <span className="bg-[#e11d2e]/20 text-[#ff6b78] border border-[#e11d2e]/30 text-[9px] px-1.5 py-0.5 rounded-sm font-bold shrink-0">
+                                      Ausente
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[10px] text-zinc-400 truncate">
+                                  {currentRoute.stops[s.stop]?.name || "Paragem Oficial"}
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <button
+                                  disabled={s.absent || s.droppedOff}
+                                  onClick={() => {
+                                    setStudents((all) =>
+                                      all.map((x) => (x.id === s.id ? { ...x, onBoard: !x.onBoard } : x))
+                                    );
+                                    if (!s.onBoard)
+                                      notify(`${s.name.split(" ")[0]} registado(a) a bordo.`, "success");
+                                  }}
+                                  className={`rounded-full px-2.5 py-1 text-[11px] font-bold cursor-pointer transition inline-flex items-center gap-1 ${
+                                    s.onBoard
+                                      ? "bg-[#16a34a] text-white"
+                                      : "bg-zinc-800 text-zinc-200 border border-white/15"
+                                  }`}
+                                >
+                                  {s.onBoard ? (
+                                    <>
+                                      <span>A bordo</span>
+                                      <Check className="w-3 h-3" />
+                                    </>
+                                  ) : (
+                                    "Entrou"
+                                  )}
+                                </button>
+
+                                <button
+                                  disabled={s.absent || s.droppedOff || !s.onBoard}
+                                  onClick={() => {
+                                    setVerifyingStudent(s);
+                                    setPinVerifyModalOpen(true);
+                                  }}
+                                  className={`rounded-full px-2.5 py-1 text-[11px] font-bold cursor-pointer transition inline-flex items-center gap-1 ${
+                                    s.droppedOff
+                                      ? "bg-emerald-600 text-white"
+                                      : "border border-white/20 text-zinc-200 hover:bg-zinc-800 disabled:opacity-35"
+                                  }`}
+                                >
+                                  {s.droppedOff ? (
+                                    <>
+                                      <span>Entregue</span>
+                                      <Check className="w-3 h-3" />
+                                    </>
+                                  ) : (
+                                    "Validar PIN"
+                                  )}
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
               )}
 
-              {/* Tab: Driver Stops & Documents */}
+              {/* Tab: Driver Stops & Documents (DARK MODE) */}
               {activeTab === "stops" && (
-                <div className="space-y-3.5">
-                  <div className="flex justify-between items-center">
-                    <h2 className="text-xl font-black" style={{ fontFamily: "var(--font-display)" }}>
-                      Paragens · {currentRoute.name}
+                <div className="space-y-3.5 text-zinc-50">
+                  <div className="flex justify-between items-center gap-2">
+                    <h2 className="text-lg font-black truncate" style={{ fontFamily: "var(--font-display)" }}>
+                      Paragens · {currentRoute.code}
                     </h2>
                     <button
                       onClick={() => setDocsModalOpen(true)}
-                      className="px-2.5 py-1 rounded-xl bg-slide-line text-slide-paper-ink text-xs font-bold cursor-pointer"
+                      className="px-2.5 py-1.5 rounded-xl bg-[#181a20] border border-white/15 text-zinc-100 text-xs font-bold cursor-pointer inline-flex items-center gap-1.5 shrink-0 hover:bg-zinc-800"
                     >
-                      📄 Documentos Autocarro
+                      <FileText className="w-3.5 h-3.5 text-[#e11d2e]" />
+                      <span>Documentos</span>
                     </button>
                   </div>
 
@@ -1009,15 +1586,15 @@ export function NativeMobileApp({
                     {currentRoute.stops.map((st, i) => (
                       <div
                         key={st.id}
-                        className="rounded-2xl border border-slide-line p-3 bg-slide-paper flex items-center justify-between"
+                        className="rounded-2xl border border-white/10 p-3 bg-[#14151a] flex items-center justify-between"
                       >
-                        <div className="flex items-center gap-3">
-                          <div className="w-8 h-8 rounded-full bg-slide-paper-ink text-slide-paper grid place-items-center font-bold text-xs">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="w-8 h-8 rounded-full bg-[#e11d2e] text-white grid place-items-center font-bold text-xs shrink-0">
                             {i + 1}
                           </div>
-                          <div>
-                            <div className="font-bold text-xs">{st.name}</div>
-                            <div className="text-[10px] text-slide-dim">
+                          <div className="min-w-0">
+                            <div className="font-bold text-xs text-white truncate">{st.name}</div>
+                            <div className="text-[10px] text-zinc-400">
                               {i === 0
                                 ? "Partida Inicial · 07:30"
                                 : i === currentRoute.stops.length - 1
@@ -1026,7 +1603,7 @@ export function NativeMobileApp({
                             </div>
                           </div>
                         </div>
-                        <span className="text-[11px] font-bold text-slide-accent-ink bg-slide-accent px-2 py-0.5 rounded-lg">
+                        <span className="text-[11px] font-bold text-white bg-white/10 border border-white/10 px-2 py-0.5 rounded-lg shrink-0">
                           {students.filter((s) => s.stop === i).length} alunos
                         </span>
                       </div>
@@ -1034,17 +1611,20 @@ export function NativeMobileApp({
                   </div>
 
                   {/* Fuel Quick-Log Card */}
-                  <div className="rounded-2xl bg-slide-line/30 p-3.5 border border-slide-line">
-                    <div className="text-xs font-bold mb-1">⛽ Registo de Abastecimento (Luanda)</div>
-                    <div className="text-[11px] opacity-70 mb-2">Autocarro {currentRoute.busId} · Posto Pumangol</div>
+                  <div className="rounded-2xl bg-[#14151a] p-3.5 border border-white/10">
+                    <div className="text-xs font-bold mb-1 flex items-center gap-1.5 text-white">
+                      <Fuel className="w-4 h-4 text-[#e11d2e]" />
+                      <span>Registo de Abastecimento (Luanda)</span>
+                    </div>
+                    <div className="text-[11px] text-zinc-400 mb-2">Autocarro {currentRoute.busId} · Posto Pumangol</div>
                     <div className="flex gap-2">
                       <input
                         placeholder="Litros (ex: 45L)"
-                        className="flex-1 rounded-xl bg-slide-paper px-3 py-2 text-xs border border-slide-line outline-none"
+                        className="flex-1 rounded-xl bg-[#09090b] text-white placeholder:text-zinc-500 px-3 py-2 text-xs border border-white/15 outline-none focus:border-[#e11d2e]"
                       />
                       <button
                         onClick={() => notify("Registo de combustível guardado no sistema.", "success")}
-                        className="px-4 py-2 bg-slide-paper-ink text-slide-paper rounded-xl text-xs font-bold cursor-pointer"
+                        className="px-4 py-2 bg-[#e11d2e] text-white rounded-xl text-xs font-bold cursor-pointer hover:opacity-90"
                       >
                         Guardar
                       </button>
@@ -1057,79 +1637,144 @@ export function NativeMobileApp({
 
           {/* ================= COMPANY / SCHOOL INTERFACE ================= */}
           {role === "company" && (
-            <div className="space-y-4">
-              <div className="flex justify-between items-center">
-                <div>
-                  <div className="text-xs font-semibold opacity-60">MôBuss Empresas & Colégios</div>
-                  <h2 className="text-xl font-black" style={{ fontFamily: "var(--font-display)" }}>
-                    Gestão Operacional
-                  </h2>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    onClick={() => setDocsModalOpen(true)}
-                    className="bg-slide-surface text-slide-paper px-2.5 py-1.5 rounded-xl text-xs font-bold shadow cursor-pointer hover:opacity-90"
-                  >
-                    📄 DNVT / Docs
-                  </button>
-                  <button
-                    onClick={() => setAttendanceModalOpen(true)}
-                    className="bg-slide-accent text-slide-accent-ink px-2.5 py-1.5 rounded-xl text-xs font-bold shadow cursor-pointer hover:opacity-90"
-                  >
-                    📋 Pauta Diária
-                  </button>
-                </div>
-              </div>
-
-              {/* KPI Cards */}
-              <div className="grid grid-cols-2 gap-2.5">
-                <div className="rounded-2xl bg-slide-paper-ink text-slide-paper p-3.5 shadow">
-                  <div className="text-2xl font-black text-slide-accent">4</div>
-                  <div className="text-xs opacity-75 font-semibold">Contratos Ativos</div>
-                </div>
-                <div className="rounded-2xl bg-slide-accent text-slide-accent-ink p-3.5 shadow">
-                  <div className="text-2xl font-black">{running ? 1 : 0}/6</div>
-                  <div className="text-xs font-bold opacity-80">Autocarros em Rota</div>
-                </div>
-              </div>
-
-              {/* Live Map Preview with Route Switcher */}
-              <div className="rounded-2xl border border-slide-line p-3 bg-slide-paper shadow-2xs">
-                <div className="flex justify-between items-center mb-2">
-                  <div className="text-xs font-bold opacity-80">MONITORIZAÇÃO DA FROTA AO VIVO</div>
-                  <span className="text-[10px] font-mono text-slide-dim">{currentRoute.name}</span>
-                </div>
+            <div className="relative flex-1 min-h-0 flex flex-col overflow-hidden">
+              {/* Full-Screen Fleet Map */}
+              <div className="absolute inset-0 z-0">
                 <LuandaMap
                   progress={progress}
                   emergency={!!emergency}
                   routeId={selectedRouteId}
-                  className="h-44 rounded-xl"
+                  className="h-full w-full rounded-none"
                 />
               </div>
 
-              {/* Contracts section & Action to open Landing page */}
-              <div className="space-y-2.5">
-                <div className="flex justify-between items-center">
-                  <span className="text-xs font-bold opacity-80">CONTRATOS ESCOLARES</span>
-                  {onOpenContractLanding && (
+              {/* Floating Top Bar: Corridors + DNVT / Pauta Quick Actions */}
+              <div className="relative z-10 px-2.5 pt-2.5 space-y-2 pointer-events-none">
+                <div className="flex items-center justify-between gap-1.5 pointer-events-auto">
+                  <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5">
+                    {Object.values(LUANDA_ROUTES).map((r) => (
+                      <button
+                        key={r.id}
+                        onClick={() => {
+                          setSelectedRouteId(r.id);
+                          setProgress(0);
+                          setRunning(false);
+                          notify(`Corredor alterado para ${r.name}`, "info");
+                        }}
+                        className={`px-2.5 py-1 rounded-full text-[10px] font-bold whitespace-nowrap transition cursor-pointer shadow-sm backdrop-blur-md ${
+                          selectedRouteId === r.id
+                            ? "bg-[#09090b] text-white ring-1 ring-white/20"
+                            : "bg-white/90 text-zinc-900 border border-zinc-200/80 hover:bg-white"
+                        }`}
+                      >
+                        {r.code}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex items-center gap-1 shrink-0">
                     <button
-                      onClick={onOpenContractLanding}
-                      className="text-xs font-bold text-slide-accent underline cursor-pointer"
+                      onClick={() => setDocsModalOpen(true)}
+                      className="bg-[#09090b]/90 text-white backdrop-blur-md px-2.5 py-1 rounded-full text-[10px] font-bold shadow-md border border-white/15 cursor-pointer hover:bg-[#09090b] inline-flex items-center gap-1"
                     >
-                      Abrir Portal de Novos Clientes →
+                      <FileText className="w-3 h-3" />
+                      <span>DNVT</span>
                     </button>
-                  )}
+                    <button
+                      onClick={() => setAttendanceModalOpen(true)}
+                      className="bg-[#e11d2e] text-white px-2.5 py-1 rounded-full text-[10px] font-bold shadow-md cursor-pointer hover:opacity-90 inline-flex items-center gap-1"
+                    >
+                      <ClipboardList className="w-3 h-3" />
+                      <span>Pauta</span>
+                    </button>
+                  </div>
                 </div>
 
-                <div className="rounded-2xl border border-slide-line p-3.5 bg-slide-paper shadow-2xs space-y-2">
-                  <div className="flex justify-between items-center text-xs">
-                    <span className="font-bold">Colégio São Francisco de Assis</span>
-                    <span className="bg-slide-accent text-slide-accent-ink font-bold px-2 py-0.5 rounded-full text-[10px]">
-                      Novo Pedido
+                {emergency && (
+                  <div className="pointer-events-auto rounded-2xl bg-[#e11d2e]/95 backdrop-blur-md text-white px-3 py-2 text-xs font-bold flex items-center justify-between shadow-lg">
+                    <span className="truncate flex items-center gap-1.5">
+                      <ShieldAlert className="w-4 h-4 shrink-0" />
+                      <span className="truncate">SOS: {emergency.type}</span>
                     </span>
+                    <button
+                      onClick={() => setEmergency(null)}
+                      className="px-2 py-0.5 rounded-lg bg-black/25 text-[10px] font-black ml-2 cursor-pointer"
+                    >
+                      Limpar
+                    </button>
                   </div>
-                  <div className="text-[11px] opacity-70">
-                    3 autocarros dedicados · 75 alunos · 1 050 000 Kz/mês · Talatona
+                )}
+              </div>
+
+              {/* Expandable Company Bottom Sheet */}
+              <div
+                className={`mt-auto relative z-20 bg-white text-zinc-950 rounded-t-[26px] shadow-[0_-12px_32px_rgba(0,0,0,0.22)] border-t border-zinc-200 flex flex-col transition-all duration-300 ${
+                  sheetExpanded ? "max-h-[78%]" : "max-h-[46%]"
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={() => setSheetExpanded((v) => !v)}
+                  className="w-full pt-2.5 pb-1.5 flex flex-col items-center gap-1 shrink-0 cursor-pointer"
+                  aria-label={sheetExpanded ? "Recolher painel da frota" : "Expandir painel da frota"}
+                >
+                  <span className="w-10 h-1 rounded-full bg-zinc-300" />
+                  <span className="text-[9px] font-bold uppercase tracking-wider text-zinc-400">
+                    {sheetExpanded ? "Toque para recolher" : "Frota e contratos escolares"}
+                  </span>
+                </button>
+
+                {/* Pinned Fleet KPI Row */}
+                <div className="px-4 pb-3 border-b border-zinc-100 shrink-0">
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div className="rounded-2xl bg-[#09090b] text-white p-3 shadow-sm">
+                      <div className="text-xl font-black text-white tabular-nums">4</div>
+                      <div className="text-[11px] text-zinc-400 font-semibold">Contratos Ativos</div>
+                    </div>
+                    <div className="rounded-2xl bg-[#e11d2e] text-white p-3 shadow-sm">
+                      <div className="text-xl font-black tabular-nums">{running ? 1 : 0}/6</div>
+                      <div className="text-[11px] font-bold text-white/90">Autocarros em Rota</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Scrollable Body: Contracts & New Client Portal */}
+                <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-2.5">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[11px] font-bold text-zinc-500 uppercase tracking-wider">CONTRATOS ESCOLARES</span>
+                    {onOpenContractLanding && (
+                      <button
+                        onClick={onOpenContractLanding}
+                        className="text-[11px] font-bold text-[#e11d2e] underline cursor-pointer inline-flex items-center gap-1"
+                      >
+                        <span>Portal Novos Clientes</span>
+                        <ArrowRight className="w-3 h-3" />
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="rounded-2xl border border-zinc-200 p-3 bg-zinc-50 space-y-1.5">
+                    <div className="flex justify-between items-center text-xs">
+                      <span className="font-bold text-zinc-950">Colégio São Francisco de Assis</span>
+                      <span className="bg-[#e11d2e] text-white font-bold px-2 py-0.5 rounded-full text-[10px]">
+                        Novo Pedido
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-zinc-600">
+                      3 autocarros dedicados · 75 alunos · 1 050 000 Kz/mês · Talatona
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-zinc-200 p-3 bg-white space-y-1.5">
+                    <div className="flex justify-between items-center text-xs">
+                      <span className="font-bold text-zinc-950">{currentRoute.school}</span>
+                      <span className="bg-emerald-600 text-white font-bold px-2 py-0.5 rounded-full text-[10px]">
+                        Em operação
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-zinc-600">
+                      {currentRoute.name} · Motorista: {currentRoute.driver} ({currentRoute.busPlate})
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1138,54 +1783,66 @@ export function NativeMobileApp({
         </main>
 
         {/* BOTTOM NAVIGATION BAR */}
-        <nav className="shrink-0 w-full z-40 bg-[#0d1117] text-slide-paper border-t border-slide-surface/70 px-1.5 py-1.5 flex items-center justify-around shadow-2xl select-none">
+        <nav className="shrink-0 w-full z-40 bg-[#09090b] text-white border-t border-white/10 px-1.5 py-1.5 flex items-center justify-around shadow-2xl select-none">
           {role === "parent" && (
             <>
               <button
-                onClick={() => setActiveTab("home")}
+                onClick={() => {
+                  setActiveTab("home");
+                  setSheetExpanded(false);
+                }}
                 className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl transition cursor-pointer ${
                   activeTab === "home" ? "text-slide-accent font-black" : "text-slide-dim hover:text-slide-paper"
                 }`}
                 title="Acompanhar Viagem"
               >
-                <span className="text-base leading-none">🗺️</span>
+                <MapIcon className="w-[18px] h-[18px]" />
                 <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">Acompanhar</span>
                 {activeTab === "home" && <span className="w-1 h-1 rounded-full bg-slide-accent mt-0.5" />}
               </button>
 
               <button
-                onClick={() => setActiveTab("kids")}
+                onClick={() => {
+                  setActiveTab("kids");
+                  setSheetExpanded(false);
+                }}
                 className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl transition cursor-pointer ${
                   activeTab === "kids" ? "text-slide-accent font-black" : "text-slide-dim hover:text-slide-paper"
                 }`}
                 title="PIN Seguro do Educando"
               >
-                <span className="text-base leading-none">🎒</span>
+                <ShieldCheck className="w-[18px] h-[18px]" />
                 <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">PIN Seguro</span>
                 {activeTab === "kids" && <span className="w-1 h-1 rounded-full bg-slide-accent mt-0.5" />}
               </button>
 
               <button
-                onClick={() => setActiveTab("billing")}
+                onClick={() => {
+                  setActiveTab("billing");
+                  setSheetExpanded(false);
+                }}
                 className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl transition cursor-pointer ${
                   activeTab === "billing" ? "text-slide-accent font-black" : "text-slide-dim hover:text-slide-paper"
                 }`}
                 title="Pagamento de Mensalidade"
               >
-                <span className="text-base leading-none">💳</span>
+                <CreditCard className="w-[18px] h-[18px]" />
                 <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">Mensalidade</span>
                 {activeTab === "billing" && <span className="w-1 h-1 rounded-full bg-slide-accent mt-0.5" />}
               </button>
 
               <button
-                onClick={() => setActiveTab("alerts")}
+                onClick={() => {
+                  setActiveTab("alerts");
+                  setSheetExpanded(false);
+                }}
                 className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl transition cursor-pointer relative ${
                   activeTab === "alerts" ? "text-slide-accent font-black" : "text-slide-dim hover:text-slide-paper"
                 }`}
                 title="Alertas e Proximidade"
               >
                 <div className="relative leading-none">
-                  <span className="text-base">🔔</span>
+                  <Bell className="w-[18px] h-[18px]" />
                   {notifications.length > 0 && (
                     <span className="absolute -top-1 -right-1.5 min-w-[14px] h-3.5 px-0.5 rounded-full bg-destructive text-white text-[8px] font-black flex items-center justify-center">
                       {notifications.length}
@@ -1201,25 +1858,31 @@ export function NativeMobileApp({
           {role === "driver" && (
             <>
               <button
-                onClick={() => setActiveTab("home")}
+                onClick={() => {
+                  setActiveTab("home");
+                  setSheetExpanded(false);
+                }}
                 className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl transition cursor-pointer ${
                   activeTab === "home" ? "text-slide-accent font-black" : "text-slide-dim hover:text-slide-paper"
                 }`}
                 title="Controlo da Viagem"
               >
-                <span className="text-base leading-none">🚌</span>
+                <Bus className="w-[18px] h-[18px]" />
                 <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">Viagem</span>
                 {activeTab === "home" && <span className="w-1 h-1 rounded-full bg-slide-accent mt-0.5" />}
               </button>
 
               <button
-                onClick={() => setActiveTab("stops")}
+                onClick={() => {
+                  setActiveTab("stops");
+                  setSheetExpanded(false);
+                }}
                 className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl transition cursor-pointer ${
                   activeTab === "stops" ? "text-slide-accent font-black" : "text-slide-dim hover:text-slide-paper"
                 }`}
                 title="Lista de Paragens"
               >
-                <span className="text-base leading-none">⏱️</span>
+                <MapPin className="w-[18px] h-[18px]" />
                 <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">Paragens</span>
                 {activeTab === "stops" && <span className="w-1 h-1 rounded-full bg-slide-accent mt-0.5" />}
               </button>
@@ -1229,7 +1892,7 @@ export function NativeMobileApp({
                 className="flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl text-slide-dim hover:text-slide-paper transition cursor-pointer"
                 title="Pauta Diária de Presenças"
               >
-                <span className="text-base leading-none">📋</span>
+                <ClipboardList className="w-[18px] h-[18px]" />
                 <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">Pauta</span>
               </button>
 
@@ -1240,7 +1903,7 @@ export function NativeMobileApp({
                 }`}
                 title="Alternar Modo Offline"
               >
-                <span className="text-base leading-none">{offlineMode ? "📡" : "📶"}</span>
+                {offlineMode ? <WifiOff className="w-[18px] h-[18px]" /> : <Wifi className="w-[18px] h-[18px]" />}
                 <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">
                   {offlineMode ? "Offline" : "Rede"}
                 </span>
@@ -1251,13 +1914,16 @@ export function NativeMobileApp({
           {role === "company" && (
             <>
               <button
-                onClick={() => setActiveTab("home")}
+                onClick={() => {
+                  setActiveTab("home");
+                  setSheetExpanded(false);
+                }}
                 className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl transition cursor-pointer ${
                   activeTab === "home" ? "text-slide-accent font-black" : "text-slide-dim hover:text-slide-paper"
                 }`}
                 title="Visão Geral da Frota"
               >
-                <span className="text-base leading-none">🏢</span>
+                <Building2 className="w-[18px] h-[18px]" />
                 <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">Frota</span>
                 {activeTab === "home" && <span className="w-1 h-1 rounded-full bg-slide-accent mt-0.5" />}
               </button>
@@ -1267,7 +1933,7 @@ export function NativeMobileApp({
                 className="flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl text-slide-dim hover:text-slide-paper transition cursor-pointer"
                 title="Documentos e Seguros DNVT"
               >
-                <span className="text-base leading-none">📄</span>
+                <FileText className="w-[18px] h-[18px]" />
                 <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">Docs DNVT</span>
               </button>
 
@@ -1276,7 +1942,7 @@ export function NativeMobileApp({
                 className="flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl text-slide-dim hover:text-slide-paper transition cursor-pointer"
                 title="Pauta Geral das Escolas"
               >
-                <span className="text-base leading-none">📋</span>
+                <ClipboardList className="w-[18px] h-[18px]" />
                 <span className="text-[10px] font-bold tracking-tight mt-0.5 truncate max-w-full">Pauta</span>
               </button>
             </>
@@ -1288,30 +1954,157 @@ export function NativeMobileApp({
             className="flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl text-destructive hover:opacity-90 active:scale-95 transition cursor-pointer select-none"
             title="Emergência SOS MôBuss"
           >
-            <span className="text-base leading-none animate-pulse">🚨</span>
+            <ShieldAlert className="w-[18px] h-[18px] animate-pulse" />
             <span className="text-[10px] font-black tracking-tight mt-0.5">SOS</span>
           </button>
         </nav>
 
+        {/* INTERACTIVE ROLE TUTORIAL MODAL */}
+        {tutorialOpen && activeTutorial && (
+          <div className="absolute inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+            <div
+              className={`w-full max-w-sm rounded-3xl p-5 shadow-2xl border animate-in fade-in zoom-in-95 ${
+                isDriverDark
+                  ? "bg-[#14151a] text-zinc-50 border-white/15"
+                  : "bg-white text-zinc-950 border-zinc-200"
+              }`}
+            >
+              <div className="flex items-center justify-between mb-3">
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#e11d2e]/15 text-[#e11d2e] text-[10px] font-black uppercase tracking-wider">
+                  <Sparkles className="w-3 h-3" />
+                  <span>
+                    Guia · {role === "parent" ? "Encarregado" : role === "driver" ? "Motorista" : "Empresa"}
+                  </span>
+                </div>
+                <button
+                  onClick={closeTutorial}
+                  className={`w-7 h-7 rounded-full grid place-items-center cursor-pointer ${
+                    isDriverDark ? "bg-white/10 text-zinc-300 hover:text-white" : "bg-zinc-100 text-zinc-600"
+                  }`}
+                  aria-label="Fechar tutorial"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              <div className="space-y-2 mb-4">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 tabular-nums">
+                  Passo {tutorialStep + 1} de {TUTORIAL_STEPS[role].length}
+                </div>
+                <h3 className="text-lg font-black leading-tight" style={{ fontFamily: "var(--font-display)" }}>
+                  {activeTutorial.title}
+                </h3>
+                <p className={`text-xs leading-relaxed ${isDriverDark ? "text-zinc-300" : "text-zinc-600"}`}>
+                  {activeTutorial.body}
+                </p>
+                <div
+                  className={`rounded-xl px-3 py-2 text-[11px] font-bold inline-flex items-center gap-1.5 ${
+                    isDriverDark
+                      ? "bg-[#09090b] text-emerald-400 border border-white/10"
+                      : "bg-emerald-50 text-emerald-800 border border-emerald-200"
+                  }`}
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                  <span>{activeTutorial.highlight}</span>
+                </div>
+              </div>
+
+              {/* Step Indicator Dots */}
+              <div className="flex items-center gap-1.5 mb-4">
+                {TUTORIAL_STEPS[role].map((_, idx) => (
+                  <button
+                    key={idx}
+                    onClick={() => setTutorialStep(idx)}
+                    className={`h-1.5 rounded-full transition-all cursor-pointer ${
+                      idx === tutorialStep
+                        ? "w-6 bg-[#e11d2e]"
+                        : isDriverDark
+                        ? "w-2 bg-zinc-700"
+                        : "w-2 bg-zinc-200"
+                    }`}
+                    aria-label={`Ir para passo ${idx + 1}`}
+                  />
+                ))}
+              </div>
+
+              <div className="flex items-center gap-2">
+                {tutorialStep > 0 ? (
+                  <button
+                    onClick={() => setTutorialStep((s) => Math.max(0, s - 1))}
+                    className={`px-3 py-2.5 rounded-xl text-xs font-bold cursor-pointer inline-flex items-center gap-1 ${
+                      isDriverDark ? "bg-white/10 text-zinc-200" : "bg-zinc-100 text-zinc-700"
+                    }`}
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                    <span>Anterior</span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={closeTutorial}
+                    className={`px-3 py-2.5 rounded-xl text-xs font-bold cursor-pointer ${
+                      isDriverDark ? "text-zinc-400 hover:text-zinc-200" : "text-zinc-500 hover:text-zinc-800"
+                    }`}
+                  >
+                    Saltar
+                  </button>
+                )}
+
+                {tutorialStep < TUTORIAL_STEPS[role].length - 1 ? (
+                  <button
+                    onClick={() => setTutorialStep((s) => s + 1)}
+                    className="flex-1 py-2.5 rounded-xl bg-[#e11d2e] text-white text-xs font-black cursor-pointer inline-flex items-center justify-center gap-1.5 shadow hover:opacity-95"
+                  >
+                    <span>Seguinte</span>
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                ) : (
+                  <button
+                    onClick={closeTutorial}
+                    className="flex-1 py-2.5 rounded-xl bg-[#16a34a] text-white text-xs font-black cursor-pointer inline-flex items-center justify-center gap-1.5 shadow hover:opacity-95"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Começar a Usar</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* QUICK WALKIE-TALKIE DRAWER MODAL */}
         {chatOpen && (
           <div className="absolute inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-end justify-center">
-            <div className="w-full max-w-md rounded-t-3xl bg-slide-paper p-5 animate-in slide-in-from-bottom shadow-2xl border-t border-slide-line/40 max-h-[85vh] flex flex-col">
-              <div className="flex items-center justify-between pb-3 border-b border-slide-line">
-                <div className="flex items-center gap-2">
-                  <span className="text-xl">💬</span>
+            <div
+              className={`w-full max-w-md rounded-t-3xl p-5 animate-in slide-in-from-bottom shadow-2xl border-t max-h-[85vh] flex flex-col ${
+                isDriverDark
+                  ? "bg-[#14151a] text-zinc-50 border-white/15"
+                  : "bg-slide-paper text-zinc-950 border-slide-line/40"
+              }`}
+            >
+              <div
+                className={`flex items-center justify-between pb-3 border-b ${
+                  isDriverDark ? "border-white/10" : "border-slide-line"
+                }`}
+              >
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-[#e11d2e]/15 text-[#e11d2e] grid place-items-center">
+                    <Radio className="w-4 h-4" />
+                  </div>
                   <div>
                     <h3 className="font-extrabold text-base leading-tight">Walkie-Talkie MôBuss</h3>
-                    <p className="text-[11px] text-slide-dim">
+                    <p className={`text-[11px] ${isDriverDark ? "text-zinc-400" : "text-zinc-500"}`}>
                       {role === "driver" ? "Canal com os Encarregados" : `Canal com ${currentRoute.driver} (Motorista)`}
                     </p>
                   </div>
                 </div>
                 <button
                   onClick={() => setChatOpen(false)}
-                  className="w-7 h-7 rounded-full bg-slide-line text-xs font-bold grid place-items-center cursor-pointer"
+                  className={`w-7 h-7 rounded-full grid place-items-center cursor-pointer ${
+                    isDriverDark ? "bg-white/10 text-zinc-200" : "bg-slide-line text-zinc-700"
+                  }`}
+                  aria-label="Fechar Walkie-Talkie"
                 >
-                  ✕
+                  <X className="w-3.5 h-3.5" />
                 </button>
               </div>
 
@@ -1321,11 +2114,15 @@ export function NativeMobileApp({
                   const isMe = (role === "driver" && m.sender === "driver") || (role === "parent" && m.sender === "parent");
                   return (
                     <div key={m.id} className={`flex flex-col ${isMe ? "items-end" : "items-start"}`}>
-                      <div className="text-[10px] text-slide-dim mb-0.5">{m.senderName} · {m.time}</div>
+                      <div className={`text-[10px] mb-0.5 ${isDriverDark ? "text-zinc-400" : "text-zinc-500"}`}>
+                        {m.senderName} · {m.time}
+                      </div>
                       <div
                         className={`rounded-2xl px-3.5 py-2 text-xs max-w-[85%] font-medium shadow-2xs ${
                           isMe
-                            ? "bg-slide-paper-ink text-slide-paper rounded-br-xs"
+                            ? "bg-[#e11d2e] text-white rounded-br-xs"
+                            : isDriverDark
+                            ? "bg-[#09090b] text-zinc-100 border border-white/10 rounded-bl-xs"
                             : "bg-slide-line/60 text-slide-paper-ink rounded-bl-xs"
                         }`}
                       >
@@ -1337,23 +2134,23 @@ export function NativeMobileApp({
               </div>
 
               {/* 1-Tap Preset Messages Bar */}
-              <div className="pt-2 border-t border-slide-line space-y-2">
-                <div className="text-[10px] font-bold text-slide-dim uppercase tracking-wider">
+              <div className={`pt-2 border-t space-y-2 ${isDriverDark ? "border-white/10" : "border-slide-line"}`}>
+                <div className={`text-[10px] font-bold uppercase tracking-wider ${isDriverDark ? "text-zinc-400" : "text-zinc-500"}`}>
                   Enviar Mensagem Pré-definida com 1 Toque:
                 </div>
                 <div className="flex flex-wrap gap-1.5">
                   {(role === "driver"
                     ? [
-                        "🚌 Já cheguei à paragem.",
-                        "⏳ Aguardando 2 minutos.",
-                        "🚦 Trânsito congestionado na via (+5 min).",
-                        "🏫 Chegámos à escola em segurança.",
+                        "Já cheguei à paragem.",
+                        "Aguardando 2 minutos.",
+                        "Trânsito congestionado na via (+5 min).",
+                        "Chegámos à escola em segurança.",
                       ]
                     : [
-                        "👨‍👩‍👧 Já estamos na paragem à espera.",
-                        "🏃‍♂️ A descer do prédio agora.",
-                        "✅ Recebemos a criança, obrigado!",
-                        "⚠️ O educando vai com a tia hoje.",
+                        "Já estamos na paragem à espera.",
+                        "A descer do prédio agora.",
+                        "Recebemos a criança, obrigado!",
+                        "O educando vai com a tia hoje.",
                       ]
                   ).map((preset) => (
                     <button
@@ -1375,14 +2172,16 @@ export function NativeMobileApp({
           <div className="absolute inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
             <div className="w-full max-w-sm rounded-3xl bg-slide-paper p-5 shadow-2xl border border-slide-line">
               <div className="flex items-center justify-between mb-3">
-                <h3 className="text-lg font-black" style={{ fontFamily: "var(--font-display)" }}>
-                  📅 Reportar Ausência
+                <h3 className="text-lg font-black flex items-center gap-2" style={{ fontFamily: "var(--font-display)" }}>
+                  <CalendarOff className="w-5 h-5 text-[#e11d2e]" />
+                  <span>Reportar Ausência</span>
                 </h3>
                 <button
                   onClick={() => setAbsenceModalOpen(false)}
-                  className="w-7 h-7 rounded-full bg-slide-line text-xs font-bold grid place-items-center cursor-pointer"
+                  className="w-7 h-7 rounded-full bg-slide-line grid place-items-center cursor-pointer"
+                  aria-label="Fechar"
                 >
-                  ✕
+                  <X className="w-3.5 h-3.5" />
                 </button>
               </div>
 
@@ -1403,7 +2202,7 @@ export function NativeMobileApp({
                     onClick={() => setAbsenceReason(reason)}
                     className={`w-full text-left p-2.5 rounded-xl text-xs font-medium border transition cursor-pointer ${
                       absenceReason === reason
-                        ? "border-slide-accent bg-slide-accent/20 font-bold"
+                        ? "border-[#e11d2e] bg-red-50 text-zinc-950 font-bold"
                         : "border-slide-line bg-slide-paper hover:bg-slide-line/30"
                     }`}
                   >
@@ -1439,23 +2238,33 @@ export function NativeMobileApp({
         {/* MODAL: VERIFY PICKUP PIN (Driver) */}
         {pinVerifyModalOpen && verifyingStudent && (
           <div className="absolute inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
-            <div className="w-full max-w-sm rounded-3xl bg-slide-paper p-5 shadow-2xl border border-slide-line">
+            <div
+              className={`w-full max-w-sm rounded-3xl p-5 shadow-2xl border ${
+                isDriverDark
+                  ? "bg-[#14151a] text-zinc-50 border-white/15"
+                  : "bg-slide-paper text-zinc-950 border-slide-line"
+              }`}
+            >
               <div className="flex items-center justify-between mb-2">
-                <h3 className="text-lg font-black" style={{ fontFamily: "var(--font-display)" }}>
-                  🛡️ Validar PIN de Entrega
+                <h3 className="text-lg font-black flex items-center gap-2" style={{ fontFamily: "var(--font-display)" }}>
+                  <ShieldCheck className="w-5 h-5 text-emerald-500" />
+                  <span>Validar PIN de Entrega</span>
                 </h3>
                 <button
                   onClick={() => {
                     setPinVerifyModalOpen(false);
                     setPinInput("");
                   }}
-                  className="w-7 h-7 rounded-full bg-slide-line text-xs font-bold grid place-items-center cursor-pointer"
+                  className={`w-7 h-7 rounded-full grid place-items-center cursor-pointer ${
+                    isDriverDark ? "bg-white/10 text-zinc-200" : "bg-slide-line text-zinc-700"
+                  }`}
+                  aria-label="Fechar"
                 >
-                  ✕
+                  <X className="w-3.5 h-3.5" />
                 </button>
               </div>
 
-              <p className="text-xs text-slide-paper-ink/70 mb-3">
+              <p className={`text-xs mb-3 ${isDriverDark ? "text-zinc-300" : "text-slide-paper-ink/70"}`}>
                 Solicite o PIN de 4 dígitos ao encarregado na paragem para entregar o(a) aluno(a) <strong>{verifyingStudent.name}</strong>.
               </p>
 
@@ -1467,9 +2276,13 @@ export function NativeMobileApp({
                   value={pinInput}
                   onChange={(e) => setPinInput(e.target.value.replace(/\D/g, ""))}
                   placeholder="Introduza os 4 dígitos"
-                  className="w-full text-center text-3xl font-mono font-black tracking-widest rounded-2xl bg-slide-line/40 py-3 border border-slide-line outline-none focus:ring-2 ring-slide-accent"
+                  className={`w-full text-center text-3xl font-mono font-black tracking-widest rounded-2xl py-3 border outline-none focus:ring-2 ring-slide-accent ${
+                    isDriverDark
+                      ? "bg-[#09090b] text-white border-white/15"
+                      : "bg-slide-line/40 text-zinc-950 border-slide-line"
+                  }`}
                 />
-                <div className="text-center text-[11px] text-slide-dim mt-1.5">
+                <div className={`text-center text-[11px] mt-1.5 ${isDriverDark ? "text-zinc-400" : "text-zinc-500"}`}>
                   (Dica do protótipo: o PIN desta criança é <strong>{verifyingStudent.pickupPin}</strong>)
                 </div>
               </div>
@@ -1487,7 +2300,9 @@ export function NativeMobileApp({
                     setPinVerifyModalOpen(false);
                     setPinInput("");
                   }}
-                  className="rounded-xl bg-slide-line px-3 py-2.5 font-bold text-xs cursor-pointer"
+                  className={`rounded-xl px-3 py-2.5 font-bold text-xs cursor-pointer ${
+                    isDriverDark ? "bg-white/10 text-zinc-200" : "bg-slide-line text-zinc-800"
+                  }`}
                 >
                   Cancelar
                 </button>
@@ -1527,36 +2342,46 @@ export function NativeMobileApp({
         {/* SOS EMERGENCY MODAL */}
         {sosOpen && (
           <div className="absolute inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-end justify-center">
-            <div className="w-full max-w-md rounded-t-3xl bg-slide-paper p-5 animate-in slide-in-from-bottom shadow-2xl border-t border-slide-line/40">
+            <div
+              className={`w-full max-w-md rounded-t-3xl p-5 animate-in slide-in-from-bottom shadow-2xl border-t ${
+                isDriverDark
+                  ? "bg-[#14151a] text-zinc-50 border-white/15"
+                  : "bg-slide-paper text-zinc-950 border-slide-line/40"
+              }`}
+            >
               <div className="flex items-center justify-between mb-2">
                 <div className="text-xl font-bold flex items-center gap-2" style={{ fontFamily: "var(--font-display)" }}>
-                  <span>🚨</span>
+                  <ShieldAlert className="w-5 h-5 text-[#e11d2e]" />
                   <span>Emergência Escolar</span>
                 </div>
                 <button
                   onClick={() => setSosOpen(false)}
-                  className="w-7 h-7 rounded-full bg-slide-line text-sm font-bold grid place-items-center cursor-pointer"
+                  className={`w-7 h-7 rounded-full grid place-items-center cursor-pointer ${
+                    isDriverDark ? "bg-white/10 text-zinc-200" : "bg-slide-line text-zinc-700"
+                  }`}
+                  aria-label="Fechar emergência"
                 >
-                  ✕
+                  <X className="w-3.5 h-3.5" />
                 </button>
               </div>
-              <p className="text-xs text-slide-paper-ink/70 mb-4 leading-relaxed">
+              <p className={`text-xs mb-4 leading-relaxed ${isDriverDark ? "text-zinc-300" : "text-slide-paper-ink/70"}`}>
                 Ao selecionar o tipo de ocorrência, a localização GPS ao vivo do autocarro em Luanda é enviada imediatamente à central escolar, à empresa e aos encarregados.
               </p>
 
               <div className="grid grid-cols-2 gap-2.5 mb-4">
                 {EMERGENCY_TYPES.map((t) => (
                   <button
-                    key={t}
-                    onClick={() => sendSos(t)}
-                    className="rounded-2xl bg-destructive/10 text-destructive font-bold text-xs p-3 hover:bg-destructive/20 cursor-pointer transition text-left"
+                    key={t.label}
+                    onClick={() => sendSos(t.label)}
+                    className="rounded-2xl bg-[#e11d2e]/15 border border-[#e11d2e]/30 text-[#e11d2e] font-bold text-xs p-3 hover:bg-[#e11d2e]/25 cursor-pointer transition text-left flex items-start gap-2"
                   >
-                    {t}
+                    <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>{t.label}</span>
                   </button>
                 ))}
               </div>
 
-              <div className="text-[11px] font-bold text-slide-paper-ink/60 uppercase tracking-wider mb-2">
+              <div className={`text-[11px] font-bold uppercase tracking-wider mb-2 ${isDriverDark ? "text-zinc-400" : "text-slide-paper-ink/60"}`}>
                 Linhas Diretas de Emergência (Angola)
               </div>
               <div className="grid grid-cols-3 gap-2 mb-4">
@@ -1564,21 +2389,117 @@ export function NativeMobileApp({
                   <a
                     key={num}
                     href={`tel:${num}`}
-                    className="rounded-xl border border-slide-line p-2 text-center hover:bg-slide-line/40 transition"
+                    className={`rounded-xl border p-2 text-center transition ${
+                      isDriverDark
+                        ? "border-white/15 bg-[#09090b] hover:bg-white/10"
+                        : "border-slide-line hover:bg-slide-line/40"
+                    }`}
                   >
-                    <div className="font-black text-sm text-slide-paper-ink">{num}</div>
-                    <div className="text-[10px] text-slide-paper-ink/60 truncate">{n}</div>
+                    <div className={`font-black text-sm ${isDriverDark ? "text-white" : "text-slide-paper-ink"}`}>{num}</div>
+                    <div className={`text-[10px] truncate ${isDriverDark ? "text-zinc-400" : "text-slide-paper-ink/60"}`}>{n}</div>
                   </a>
                 ))}
               </div>
 
               <button
                 onClick={() => setSosOpen(false)}
-                className="w-full rounded-xl bg-slide-line py-3 font-bold text-sm cursor-pointer hover:bg-slide-line/80 transition"
+                className={`w-full rounded-xl py-3 font-bold text-sm cursor-pointer transition ${
+                  isDriverDark ? "bg-white/10 text-white hover:bg-white/15" : "bg-slide-line text-zinc-950 hover:bg-slide-line/80"
+                }`}
               >
                 Voltar à viagem
               </button>
             </div>
+          </div>
+        )}
+
+        {/* MODAL: SAFETY TOOLKIT & LIVE TRIP SHARE (Parent) */}
+        {shareModalOpen && (
+          <div className="absolute inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-end justify-center">
+            <motion.div
+              initial={{ y: 40, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              transition={{ type: "spring", stiffness: 360, damping: 28 }}
+              className="w-full max-w-md rounded-t-3xl bg-white text-zinc-950 p-5 shadow-2xl border-t border-zinc-200 space-y-4"
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-xl bg-[#e11d2e]/15 text-[#e11d2e] grid place-items-center">
+                    <Share2 className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-black leading-tight" style={{ fontFamily: "var(--font-display)" }}>
+                      Kit de Segurança · Partilhar Viagem
+                    </h3>
+                    <p className="text-[11px] text-zinc-500">Link temporário válido até à chegada à escola</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    setShareModalOpen(false);
+                    setLinkCopied(false);
+                  }}
+                  className="w-7 h-7 rounded-full bg-zinc-100 text-zinc-700 grid place-items-center cursor-pointer"
+                  aria-label="Fechar partilha"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              <div className="rounded-2xl bg-zinc-50 border border-zinc-200 p-3 flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                    Link ao Vivo · {currentKid.name}
+                  </div>
+                  <div className="text-xs font-mono font-bold text-zinc-900 truncate">
+                    https://mobuss.ao/track/LD-{currentRoute.busId}-{currentKid.pickupPin}
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    try {
+                      navigator.clipboard?.writeText(
+                        `https://mobuss.ao/track/LD-${currentRoute.busId}-${currentKid.pickupPin}`
+                      );
+                    } catch {
+                      // ignore clipboard restrictions inside iframe
+                    }
+                    setLinkCopied(true);
+                    notify("Link de rastreio ao vivo copiado para partilhar!", "success");
+                  }}
+                  className={`px-3 py-2 rounded-xl text-xs font-bold shrink-0 cursor-pointer inline-flex items-center gap-1.5 transition active:scale-95 ${
+                    linkCopied ? "bg-emerald-600 text-white" : "bg-[#09090b] text-white"
+                  }`}
+                >
+                  {linkCopied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{linkCopied ? "Copiado" : "Copiar"}</span>
+                </button>
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                  Enviar Acesso Rápido a Familiar Autorizado:
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    { name: "Sr. Domingos (Pai)", phone: "923 110 220" },
+                    { name: "Tia Rosa (Recolha)", phone: "912 440 880" },
+                  ].map((contact) => (
+                    <button
+                      key={contact.name}
+                      onClick={() => {
+                        setShareModalOpen(false);
+                        notify(`Localização ao vivo enviada para ${contact.name}.`, "success");
+                      }}
+                      className="rounded-2xl border border-zinc-200 p-2.5 text-left hover:border-[#e11d2e] hover:bg-red-50/40 active:scale-[0.98] transition cursor-pointer"
+                    >
+                      <div className="font-bold text-xs text-zinc-950 truncate">{contact.name}</div>
+                      <div className="text-[10px] text-zinc-500 font-mono">{contact.phone}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </motion.div>
           </div>
         )}
       </div>

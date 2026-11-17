@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { AlertTriangle, Check, X } from "lucide-react";
 
 export interface VehicleDoc {
   id: string;
@@ -100,9 +101,10 @@ export function VehicleDocumentsModal({
           </div>
           <button
             onClick={onClose}
-            className="w-8 h-8 rounded-full bg-slide-surface text-slide-dim hover:text-slide-paper grid place-items-center text-sm font-bold cursor-pointer"
+            className="w-8 h-8 rounded-full bg-slide-surface text-slide-dim hover:text-slide-paper grid place-items-center cursor-pointer"
+            aria-label="Fechar"
           >
-            ✕
+            <X className="w-4 h-4" />
           </button>
         </div>
 
@@ -114,7 +116,7 @@ export function VehicleDocumentsModal({
 
         {/* Warning banner */}
         <div className="mt-4 rounded-2xl bg-amber-500/15 border border-amber-500/40 p-3 text-xs flex items-center gap-2.5 text-amber-200">
-          <span className="text-base">⚠️</span>
+          <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
           <span>
             Existem <strong>2 documentos a expirar</strong> em menos de 30 dias. Renove para evitar multas policiais em Luanda.
           </span>
@@ -139,7 +141,7 @@ export function VehicleDocumentsModal({
                   <div className="text-[10px] text-slide-dim">{doc.issuer}</div>
                 </div>
                 <span
-                  className={`rounded-full px-2.5 py-0.5 text-[10px] font-black shrink-0 ${
+                  className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-black shrink-0 ${
                     doc.status === "warning"
                       ? "bg-amber-400 text-black animate-pulse"
                       : doc.status === "expired"
@@ -147,11 +149,16 @@ export function VehicleDocumentsModal({
                       : "bg-slide-ok text-slide-accent-ink"
                   }`}
                 >
-                  {doc.status === "warning"
-                    ? `Expira em ${doc.daysRemaining}d`
-                    : doc.status === "expired"
-                    ? "Expirado"
-                    : "Em Dia ✓"}
+                  {doc.status === "warning" ? (
+                    `Expira em ${doc.daysRemaining}d`
+                  ) : doc.status === "expired" ? (
+                    "Expirado"
+                  ) : (
+                    <>
+                      <span>Em Dia</span>
+                      <Check className="w-3 h-3" />
+                    </>
+                  )}
                 </span>
               </div>
 

@@ -1,3 +1,4 @@
+import { Check, FileSpreadsheet, FileText, X } from "lucide-react";
 import { downloadCsv, downloadDocument } from "@/lib/operations";
 import type { Student } from "@/views/NativeMobileApp";
 
@@ -114,9 +115,10 @@ João Mateus                          Data: ____/____/2026
           </div>
           <button
             onClick={onClose}
-            className="w-8 h-8 rounded-full bg-slide-surface text-slide-dim hover:text-slide-paper grid place-items-center text-sm font-bold cursor-pointer"
+            className="w-8 h-8 rounded-full bg-slide-surface text-slide-dim hover:text-slide-paper grid place-items-center cursor-pointer"
+            aria-label="Fechar"
           >
-            ✕
+            <X className="w-4 h-4" />
           </button>
         </div>
 
@@ -163,8 +165,9 @@ João Mateus                          Data: ____/____/2026
                         Ausente
                       </span>
                     ) : s.droppedOff ? (
-                      <span className="rounded-full bg-emerald-500/20 text-emerald-400 px-2 py-0.5 text-[10px] font-bold">
-                        Entregue ✓
+                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/20 text-emerald-400 px-2 py-0.5 text-[10px] font-bold">
+                        <span>Entregue</span>
+                        <Check className="w-3 h-3" />
                       </span>
                     ) : s.onBoard ? (
                       <span className="rounded-full bg-slide-accent/20 text-slide-accent px-2 py-0.5 text-[10px] font-bold">
@@ -188,7 +191,7 @@ João Mateus                          Data: ____/____/2026
             onClick={handleExportCsv}
             className="flex-1 rounded-xl bg-slide-accent text-slide-accent-ink py-2.5 text-xs font-black shadow hover:opacity-95 transition cursor-pointer flex items-center justify-center gap-1.5"
           >
-            <span>📊</span>
+            <FileSpreadsheet className="w-4 h-4" />
             <span>Exportar Folha Excel (CSV)</span>
           </button>
 
@@ -196,7 +199,7 @@ João Mateus                          Data: ____/____/2026
             onClick={handleExportDocument}
             className="flex-1 rounded-xl bg-slide-surface text-slide-paper py-2.5 text-xs font-bold hover:bg-slide-surface/80 transition cursor-pointer flex items-center justify-center gap-1.5"
           >
-            <span>📄</span>
+            <FileText className="w-4 h-4" />
             <span>Relatório Oficial Assinado</span>
           </button>
         </div>
