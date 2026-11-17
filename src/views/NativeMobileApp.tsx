@@ -297,12 +297,14 @@ export function NativeMobileApp({
       {/* Top App Header */}
       <header className="sticky top-0 z-40 bg-slide-paper-ink text-slide-paper px-4 py-3 flex items-center justify-between shadow-md shrink-0">
           <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-slide-accent text-slide-accent-ink grid place-items-center font-black text-lg shadow">
-              T
-            </div>
+            <img
+              src="/assets/aistudio/20261117_030824_57b8de0b.jpg"
+              alt="MôBuss Logo"
+              className="w-9 h-9 rounded-xl object-cover bg-black border border-white/10 shadow"
+            />
             <div>
               <div className="font-extrabold text-base tracking-tight leading-none" style={{ fontFamily: "var(--font-display)" }}>
-                TransiGo
+                MôBuss
               </div>
               <div className="text-[11px] text-slide-dim font-medium flex items-center gap-1.5 mt-0.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-slide-ok inline-block" />
@@ -429,7 +431,7 @@ export function NativeMobileApp({
             <div className="flex items-start gap-2.5">
               <span className="text-base">🔔</span>
               <div className="flex-1">
-                <div className="text-[10px] text-slide-accent font-bold uppercase tracking-wider">TransiGo Alerta</div>
+                <div className="text-[10px] text-slide-accent font-bold uppercase tracking-wider">MôBuss Alerta</div>
                 <div>{toast}</div>
               </div>
             </div>
@@ -787,7 +789,7 @@ export function NativeMobileApp({
                         }`}
                       >
                         <div className="flex justify-between items-center text-[10px] opacity-60 mb-1">
-                          <span className="font-bold uppercase">TransiGo Angola</span>
+                          <span className="font-bold uppercase">MôBuss Angola</span>
                           <span className="font-mono">{n.time}</span>
                         </div>
                         <div className="text-xs font-semibold">{n.text}</div>
@@ -1058,7 +1060,7 @@ export function NativeMobileApp({
             <div className="space-y-4">
               <div className="flex justify-between items-center">
                 <div>
-                  <div className="text-xs font-semibold opacity-60">TransiGo Empresas & Colégios</div>
+                  <div className="text-xs font-semibold opacity-60">MôBuss Empresas & Colégios</div>
                   <h2 className="text-xl font-black" style={{ fontFamily: "var(--font-display)" }}>
                     Gestão Operacional
                   </h2>
@@ -1284,7 +1286,7 @@ export function NativeMobileApp({
           <button
             onClick={() => setSosOpen(true)}
             className="flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl text-destructive hover:opacity-90 active:scale-95 transition cursor-pointer select-none"
-            title="Emergência SOS TransiGo"
+            title="Emergência SOS MôBuss"
           >
             <span className="text-base leading-none animate-pulse">🚨</span>
             <span className="text-[10px] font-black tracking-tight mt-0.5">SOS</span>
@@ -1299,7 +1301,7 @@ export function NativeMobileApp({
                 <div className="flex items-center gap-2">
                   <span className="text-xl">💬</span>
                   <div>
-                    <h3 className="font-extrabold text-base leading-tight">Walkie-Talkie TransiGo</h3>
+                    <h3 className="font-extrabold text-base leading-tight">Walkie-Talkie MôBuss</h3>
                     <p className="text-[11px] text-slide-dim">
                       {role === "driver" ? "Canal com os Encarregados" : `Canal com ${currentRoute.driver} (Motorista)`}
                     </p>

@@ -303,7 +303,7 @@ interface McxPayment {
 const MCX_PAYMENTS_INITIAL: McxPayment[] = [
   {
     id: "pay-1",
-    invoice: "FT-TRANSIGO-2026/8192",
+    invoice: "FT-MOBUSS-2026/8192",
     student: "Maria Domingos",
     guardian: "Sra. Luísa Domingos",
     phone: "+244 923 456 789",
@@ -316,7 +316,7 @@ const MCX_PAYMENTS_INITIAL: McxPayment[] = [
   },
   {
     id: "pay-2",
-    invoice: "FT-TRANSIGO-2026/8193",
+    invoice: "FT-MOBUSS-2026/8193",
     student: "Edson Manuel",
     guardian: "Sr. Manuel Neto",
     phone: "+244 912 345 678",
@@ -329,7 +329,7 @@ const MCX_PAYMENTS_INITIAL: McxPayment[] = [
   },
   {
     id: "pay-3",
-    invoice: "FT-TRANSIGO-2026/8194",
+    invoice: "FT-MOBUSS-2026/8194",
     student: "Sofia Pedro",
     guardian: "Sra. Isabel Pedro",
     phone: "+244 923 888 777",
@@ -342,7 +342,7 @@ const MCX_PAYMENTS_INITIAL: McxPayment[] = [
   },
   {
     id: "pay-4",
-    invoice: "FT-TRANSIGO-2026/8195",
+    invoice: "FT-MOBUSS-2026/8195",
     student: "Bruno Neto",
     guardian: "Sr. Carlos Neto",
     phone: "+244 945 678 901",
@@ -541,7 +541,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
 
   function handleDownloadReport(name: string) {
     if (name === "Relatório mensal de viagens") {
-      downloadCsv("transigo-viagens-mensal.csv", [
+      downloadCsv("mobuss-viagens-mensal.csv", [
         ["Data", "Autocarro", "Matrícula", "Motorista", "Corredor", "Alunos", "Estado", "Pontualidade"],
         ["2026-10-27", "12", "LD-24-61-AB", "João Mateus", "Rota A · Morro Bento", 18, "Concluída", "98%"],
         ["2026-10-27", "7", "LD-31-02-CK", "Paulo Cassoma", "Rota B · Talatona Express", 22, "Concluída", "94%"],
@@ -550,7 +550,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
         ["2026-10-27", "3", "LD-18-77-FE", "Rosa Tchissola", "Reserva Central", 0, "Disponível", "100%"],
       ]);
     } else if (name === "Livro de Faturas Multicaixa Express (AGT)") {
-      downloadCsv("transigo-faturas-mcx-agt.csv", [
+      downloadCsv("mobuss-faturas-mcx-agt.csv", [
         ["Nº Factura", "Aluno", "Encarregado", "Telemóvel MCX", "Valor (Kz)", "Data", "Referência EMIS", "Certificação AGT", "Estado"],
         ...payments.map((p) => [
           p.invoice,
@@ -565,12 +565,12 @@ export function AdminView({ onNavigate }: AdminViewProps) {
         ]),
       ]);
     } else if (name === "Pauta Diária de Presenças e Desembarque") {
-      downloadCsv("transigo-pauta-presencas-oficial.csv", [
+      downloadCsv("mobuss-pauta-presencas-oficial.csv", [
         ["Aluno", "Instituição Escolar", "Corredor", "Paragem Oficial", "Encarregado", "PIN Validação", "Estado Hoje"],
         ...students.map((s) => [s.name, s.school, s.corridor, s.stop, s.guardian, s.pin, s.status]),
       ]);
     } else if (name === "Relatório de folha de salários (Motoristas)") {
-      downloadCsv("transigo-folha-salarios.csv", [
+      downloadCsv("mobuss-folha-salarios.csv", [
         ["Motorista", "Categoria", "Avaliação Pais", "Autocarro", "Viagens Mês", "Salário Bruto", "Segurança Social (3%)", "Líquido"],
         ["João Mateus", "Cat. D", "4.9", "Autocarro 12", 44, "220 000 Kz", "6 600 Kz", "213 400 Kz"],
         ["Paulo Cassoma", "Cat. D", "4.8", "Autocarro 7", 42, "210 000 Kz", "6 300 Kz", "203 700 Kz"],
@@ -581,8 +581,8 @@ export function AdminView({ onNavigate }: AdminViewProps) {
       ]);
     } else {
       downloadDocument(
-        "Relatório de Emergências e Ocorrências SOS TransiGo",
-        `TRANSIGO LUANDA — AUDITORIA DE SEGURANÇA E OCORRÊNCIAS\n` +
+        "Relatório de Emergências e Ocorrências SOS MôBuss",
+        `MÔBUSS LUANDA — AUDITORIA DE SEGURANÇA E OCORRÊNCIAS\n` +
           `Data de Emissão: ${new Date().toLocaleDateString("pt-AO", { day: "2-digit", month: "long", year: "numeric" })}\n\n` +
           alerts
             .map(
@@ -641,12 +641,14 @@ export function AdminView({ onNavigate }: AdminViewProps) {
         <div>
           {/* Logo & Header */}
           <div className="flex items-center gap-3 mb-6 pb-4 border-b border-slide-surface/80">
-            <div className="w-10 h-10 rounded-2xl bg-slide-accent text-slide-accent-ink grid place-items-center font-black text-xl shadow">
-              T
-            </div>
+            <img
+              src="/assets/aistudio/20261117_030824_57b8de0b.jpg"
+              alt="MôBuss Logo"
+              className="w-10 h-10 rounded-xl object-cover bg-black border border-white/10 shadow"
+            />
             <div>
               <div className="font-extrabold text-base tracking-tight leading-none" style={{ fontFamily: "var(--font-display)" }}>
-                TransiGo
+                MôBuss
               </div>
               <div className="text-[11px] text-slide-dim font-medium mt-1 flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-slide-ok inline-block" />
@@ -970,7 +972,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
         {tab === "Frota" && (
           <div className="space-y-4">
             <div className="flex justify-between items-center text-xs text-slide-dim">
-              <span>Frota oficial TransiGo autorizada pela Direção Nacional de Viação e Trânsito (DNVT)</span>
+              <span>Frota oficial MôBuss autorizada pela Direção Nacional de Viação e Trânsito (DNVT)</span>
               <span>Total: {buses.length} autocarros</span>
             </div>
 
@@ -1300,7 +1302,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                   format: "CSV",
                 },
                 {
-                  title: "Relatório de Emergências e Ocorrências SOS TransiGo",
+                  title: "Relatório de Emergências e Ocorrências SOS MôBuss",
                   desc: "Auditoria de segurança, avarias, tempos de resposta e resolução técnica.",
                   format: "TXT",
                 },

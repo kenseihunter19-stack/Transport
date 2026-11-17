@@ -11,11 +11,11 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
-        includeAssets: ['apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png', 'transigo.png'],
+        includeAssets: ['assets/aistudio/20261117_030824_57b8de0b.jpg', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png'],
         manifest: {
           id: '/',
-          name: 'TransiGo — Transporte Escolar',
-          short_name: 'TransiGo',
+          name: 'MôBuss — Transporte Escolar',
+          short_name: 'MôBuss',
           description: 'Transporte escolar inteligente e seguro em Luanda, Angola.',
           theme_color: '#1b2540',
           background_color: '#131a2e',

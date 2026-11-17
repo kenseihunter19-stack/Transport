@@ -19,7 +19,7 @@ export function MulticaixaModal({
   const [phone, setPhone] = useState("923 456 789");
   const [step, setStep] = useState<"input" | "waiting" | "success">("input");
   const [countdown, setCountdown] = useState(60);
-  const [receiptNumber] = useState(() => `FT-TRANSIGO-2026/${Math.floor(1000 + Math.random() * 9000)}`);
+  const [receiptNumber] = useState(() => `FT-MOBUSS-2026/${Math.floor(1000 + Math.random() * 9000)}`);
   const [transactionRef] = useState(() => `MCX-${Math.floor(100000 + Math.random() * 900000)}-EMIS`);
 
   useEffect(() => {
@@ -54,7 +54,7 @@ export function MulticaixaModal({
     });
 
     const receiptContent = `=====================================================
-TRANSIGO ANGOLA — FACTURA / RECIBO DE TRANSPORTE
+MÔBUSS ANGOLA — FACTURA / RECIBO DE TRANSPORTE
 Documento Fiscal emitido ao abrigo do regime da AGT
 =====================================================
 Nº Factura: ${receiptNumber}
@@ -77,12 +77,12 @@ DETALHE DO SERVIÇO:
 -----------------------------------------------------
 TOTAL PAGO: ${amount}
 -----------------------------------------------------
-Certificação de Software: AGT-CERT/2026/TRANSIGO
+Certificação de Software: AGT-CERT/2026/MOBUSS
 Hash Fiscal: e7a9-90b1-4f12-88ca
-Obrigado por confiar no transporte seguro TransiGo!
+Obrigado por confiar no transporte seguro MôBuss!
 =====================================================`;
 
-    downloadDocument(`Recibo-TransiGo-${studentName.replace(/\s+/g, "_")}`, receiptContent);
+    downloadDocument(`Recibo-MoBuss-${studentName.replace(/\s+/g, "_")}`, receiptContent);
   }
 
   return (

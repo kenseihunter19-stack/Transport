@@ -17,7 +17,7 @@ export function MockupView({ onNavigate }: MockupViewProps) {
           <div>
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slide-surface text-slide-accent text-xs font-black tracking-wider uppercase mb-3 border border-slide-line/20 shadow-xs">
               <span className="w-2 h-2 rounded-full bg-slide-ok animate-pulse" />
-              <span>Simulador iPhone 16 Pro · TransiGo Luanda</span>
+              <span>Simulador iPhone 16 Pro · MôBuss Luanda</span>
             </div>
 
             <h1
@@ -191,7 +191,7 @@ export function MockupView({ onNavigate }: MockupViewProps) {
                     <div className="flex items-center gap-2">
                       <span className="text-base animate-pulse">🚌</span>
                       <div>
-                        <div className="text-[10px] font-black text-slide-accent leading-none">TransiGo Ao Vivo</div>
+                        <div className="text-[10px] font-black text-slide-accent leading-none">MôBuss Ao Vivo</div>
                         <div className="text-[9px] opacity-70">Autocarro 12 · Morro Bento</div>
                       </div>
                     </div>

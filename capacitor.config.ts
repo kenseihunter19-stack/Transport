@@ -1,8 +1,8 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'ao.transigo.app',
-  appName: 'TransiGo',
+  appId: 'ao.mobuss.app',
+  appName: 'MôBuss',
   webDir: 'dist',
   server: {
     androidScheme: 'https',

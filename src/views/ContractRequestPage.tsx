@@ -58,8 +58,8 @@ export function ContractRequestPage({ onBackToApp, onSubmitContract }: ContractR
     });
 
     const quoteContent = `=====================================================
-PROPOSTA DE TRANSPORTE ESCOLAR INTEGRADO — TRANSIGO
-TransiGo Angola Lda. · Luanda, Angola
+PROPOSTA DE TRANSPORTE ESCOLAR INTEGRADO — MÔBUSS
+MôBuss Angola Lda. · Luanda, Angola
 =====================================================
 Data da Proposta: ${today}
 Instituição Solicitante: ${schoolName}
@@ -85,10 +85,10 @@ VALOR TOTAL MENSAL: ${estimatedTotal.toLocaleString("pt-AO")} Kz / mês
 Custo médio estimado por aluno: ${pricePerStudent.toLocaleString("pt-AO")} Kz / mês
 -----------------------------------------------------
 Validade da Proposta: 30 dias
-Contacto Comercial: comercial@transigo.ao | +244 923 000 000
+Contacto Comercial: comercial@mobuss.ao | +244 923 000 000
 =====================================================`;
 
-    downloadDocument(`Proposta_TransiGo_${schoolName.replace(/\s+/g, "_")}`, quoteContent);
+    downloadDocument(`Proposta_MoBuss_${schoolName.replace(/\s+/g, "_")}`, quoteContent);
   }
 
   return (
@@ -96,12 +96,14 @@ Contacto Comercial: comercial@transigo.ao | +244 923 000 000
       {/* Header bar */}
       <header className="border-b border-slide-surface bg-slide-paper-ink/90 backdrop-blur px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-2xl bg-slide-accent text-slide-accent-ink grid place-items-center font-black text-xl shadow">
-            T
-          </div>
+          <img
+            src="/assets/aistudio/20261117_030824_57b8de0b.jpg"
+            alt="MôBuss Logo"
+            className="w-10 h-10 rounded-xl object-cover bg-black border border-white/10 shadow"
+          />
           <div>
             <span className="font-extrabold text-xl text-slide-paper" style={{ fontFamily: "var(--font-display)" }}>
-              TransiGo Institucional
+              MôBuss Institucional
             </span>
             <span className="text-xs text-slide-dim block">Parcerias com Escolas & Colégios em Luanda</span>
           </div>
@@ -141,7 +143,7 @@ Contacto Comercial: comercial@transigo.ao | +244 923 000 000
               Pedido Submetido com Sucesso!
             </h2>
             <p className="text-sm text-slide-dim mb-6">
-              A equipa de operações da <strong>TransiGo Angola</strong> irá analisar o corredor viário para o colégio <strong>{schoolName}</strong> e entrar em contacto com <strong>{contactName}</strong> nas próximas 24 horas.
+              A equipa de operações da <strong>MôBuss Angola</strong> irá analisar o corredor viário para o colégio <strong>{schoolName}</strong> e entrar em contacto com <strong>{contactName}</strong> nas próximas 24 horas.
             </p>
 
             <div className="rounded-2xl bg-slide-bg p-4 text-left text-xs space-y-2 mb-6 font-mono">

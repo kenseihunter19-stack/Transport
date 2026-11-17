@@ -24,7 +24,7 @@ export function PWAInstallButton() {
           }
         }}
         className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 px-3 py-1.5 text-xs font-bold text-white shadow hover:opacity-95 transition cursor-pointer"
-        title="Instalar TransiGo no seu dispositivo Android / Telemóvel"
+        title="Instalar MôBuss no seu dispositivo Android / Telemóvel"
       >
         <span className="text-sm">⬇️</span>
         <span className="hidden sm:inline">Instalar App (APK)</span>
@@ -36,11 +36,13 @@ export function PWAInstallButton() {
         <div className="fixed inset-0 z-[2000] flex items-center justify-center bg-black/70 p-4 backdrop-blur-xs">
           <div className="w-full max-w-md rounded-3xl bg-slide-paper-ink text-slide-paper p-6 shadow-2xl border border-slide-surface">
             <div className="flex items-center gap-3 mb-4">
-              <div className="w-12 h-12 rounded-2xl bg-slide-accent text-slide-accent-ink grid place-items-center font-bold text-xl">
-                T
-              </div>
+              <img
+                src="/assets/aistudio/20261117_030824_57b8de0b.jpg"
+                alt="MôBuss Logo"
+                className="w-12 h-12 rounded-2xl object-cover bg-black border border-white/10 shadow"
+              />
               <div>
-                <h3 className="text-lg font-bold">Instalar TransiGo no Telemóvel</h3>
+                <h3 className="text-lg font-bold">Instalar MôBuss no Telemóvel</h3>
                 <p className="text-xs text-slide-dim">Opções para ter a app no ecrã principal</p>
               </div>
             </div>
@@ -63,7 +65,7 @@ export function PWAInstallButton() {
                   📦 2. Gerar ficheiro .APK independente
                 </div>
                 <p className="text-xs">
-                  O repositório já está configurado com <strong>Capacitor</strong> e <strong>GitHub Actions</strong> para compilar o ficheiro <code>TransiGo-debug.apk</code>.
+                  O repositório já está configurado com <strong>Capacitor</strong> e <strong>GitHub Actions</strong> para compilar o ficheiro <code>MoBuss-debug.apk</code>.
                 </p>
               </div>
             </div>

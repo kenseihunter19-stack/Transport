@@ -34,7 +34,7 @@ export function AttendanceReportModal({
 
   function handleExportCsv() {
     const rows = [
-      ["PAUTA DE PRESENÇAS E EMBARQUE ESCOLAR — TRANSIGO ANGOLA"],
+      ["PAUTA DE PRESENÇAS E EMBARQUE ESCOLAR — MÔBUSS ANGOLA"],
       ["Data", todayStr],
       ["Escola", schoolName],
       ["Rota", routeName],
@@ -62,7 +62,7 @@ export function AttendanceReportModal({
 
   function handleExportDocument() {
     const content = `=====================================================
-TRANSIGO ANGOLA — PAUTA DIGITAL DE TRANSPORTE ESCOLAR
+MÔBUSS ANGOLA — PAUTA DIGITAL DE TRANSPORTE ESCOLAR
 Relatório Oficial de Embarque e Desembarque
 =====================================================
 Data da Viagem: ${todayStr}

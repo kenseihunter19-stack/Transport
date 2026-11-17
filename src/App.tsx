@@ -53,12 +53,14 @@ export default function App() {
             onClick={() => navigateTo("mockup")}
             className="flex items-center gap-2.5 text-left cursor-pointer hover:opacity-90 transition"
           >
-            <div className="w-8 h-8 rounded-xl bg-slide-accent text-slide-accent-ink grid place-items-center font-black text-base shadow">
-              T
-            </div>
+            <img
+              src="/assets/aistudio/20261117_030824_57b8de0b.jpg"
+              alt="MôBuss Logo"
+              className="w-9 h-9 rounded-xl object-cover bg-black border border-white/10 shadow"
+            />
             <div>
               <span className="font-extrabold tracking-tight text-slide-paper text-base" style={{ fontFamily: "var(--font-display)" }}>
-                TransiGo
+                MôBuss
               </span>
               <span className="hidden sm:inline-block ml-2 text-[10px] font-bold px-2 py-0.5 rounded-full bg-slide-accent text-slide-accent-ink">
                 Luanda · AO
