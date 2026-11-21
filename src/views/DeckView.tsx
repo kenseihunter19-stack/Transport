@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { Bus, CheckCircle2, Monitor, Phone as PhoneIcon, Smartphone } from "lucide-react";
 
 interface DeckViewProps {
   onNavigate: (view: "mockup" | "admin" | "deck") => void;
@@ -45,8 +46,8 @@ function MapBox({ className = "" }: { className?: string }) {
           strokeLinecap="round"
         />
       </svg>
-      <div className="absolute left-[46%] top-[44%] w-12 h-12 rounded-full bg-slide-accent border-4 border-slide-paper grid place-items-center text-xl">
-        🚌
+      <div className="absolute left-[46%] top-[44%] w-12 h-12 rounded-full bg-slide-accent text-white border-4 border-slide-paper grid place-items-center">
+        <Bus className="w-6 h-6" />
       </div>
       <div className="absolute right-[10%] top-[8%] w-8 h-8 rounded-full bg-slide-paper-ink border-4 border-slide-paper" />
     </div>
@@ -194,9 +195,12 @@ const SLIDES: { title: string; render: (n: number) => ReactNode }[] = [
                 <div className="font-bold text-[16px]">João Mateus</div>
                 <div className="text-[13px] opacity-60">Motorista · Autocarro 12 · LD-24-61-AB</div>
               </div>
-              <div className="text-[20px]">📞</div>
+              <PhoneIcon className="w-5 h-5 text-slide-paper-ink shrink-0" />
             </div>
-            <div className="mt-3 text-[13px] rounded-xl bg-slide-line/60 p-3">✅ A Maria entrou às 07:42</div>
+            <div className="mt-3 text-[13px] rounded-xl bg-slide-line/60 p-3 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-slide-ok shrink-0" />
+              <span>A Maria entrou às 07:42</span>
+            </div>
           </Phone>
         </div>
       </Frame>
@@ -396,15 +400,17 @@ export function DeckView({ onNavigate, initialSlide = 1 }: DeckViewProps) {
         <div className="flex items-center gap-3">
           <button
             onClick={() => onNavigate("mockup")}
-            className="px-3 py-1 rounded-lg bg-slide-surface text-slide-ink hover:bg-slide-dim hover:text-slide-paper-ink transition cursor-pointer font-semibold"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slide-surface text-slide-ink hover:bg-white/10 transition cursor-pointer font-semibold whitespace-nowrap shrink-0"
           >
-            📱 Abrir Simulador Telemóvel
+            <Smartphone className="w-3.5 h-3.5" />
+            <span>Abrir Simulador Telemóvel</span>
           </button>
           <button
             onClick={() => onNavigate("admin")}
-            className="px-3 py-1 rounded-lg bg-slide-accent text-slide-accent-ink hover:opacity-90 transition cursor-pointer font-semibold"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slide-accent text-slide-accent-ink hover:opacity-90 transition cursor-pointer font-semibold whitespace-nowrap shrink-0"
           >
-            🖥️ Abrir Painel Admin
+            <Monitor className="w-3.5 h-3.5" />
+            <span>Abrir Painel Admin</span>
           </button>
         </div>
       </header>

@@ -1,5 +1,7 @@
 import { useState } from "react";
-import { Bus, Building2, Check, FileText, Settings, ShieldCheck, User, Users } from "lucide-react";
+import { Bus, Building2, Check, FileText, Play, Pause, Radio, RotateCcw, Settings, ShieldCheck, User, Users } from "lucide-react";
+import { useAuth } from "@/contexts/AuthContext";
+import { useTelemetrySocket } from "@/hooks/useTelemetrySocket";
 import { NativeMobileApp, type Role } from "./NativeMobileApp";
 
 interface MockupViewProps {
@@ -7,8 +9,39 @@ interface MockupViewProps {
 }
 
 export function MockupView({ onNavigate }: MockupViewProps) {
+  const { isAuthenticated, capabilities, apiFetch } = useAuth();
   const [selectedRole, setSelectedRole] = useState<Role>("parent");
   const [islandExpanded, setIslandExpanded] = useState(false);
+  const [simInfo, setSimInfo] = useState<string | null>(null);
+  const [simRunning, setSimRunning] = useState(false);
+
+  const { connected: wsConnected } = useTelemetrySocket((event) => {
+    if (event.type === "simulation:status") {
+      setSimRunning(Boolean(event.payload.running));
+      setSimInfo(
+        `PostgreSQL WS: ${String(event.payload.routeCode)} · ${Math.round(Number(event.payload.progress ?? 0) * 100)}% (${String(event.payload.nearestStopName ?? "—")})`
+      );
+    } else if (event.type === "geofence:approach_500m") {
+      setSimInfo(
+        `Alerta 500m: ${String(event.payload.routeCode)} a ${String(event.payload.distanceMeters)}m de ${String(event.payload.stopName)}`
+      );
+    }
+  });
+
+  async function triggerSimulation(action: "start" | "pause" | "reset") {
+    try {
+      const res = await apiFetch<{ simulation: { running: boolean; routeCode: string; progress: number; nearestStopName: string } }>(
+        `/api/v1/simulation/${action}`,
+        { method: "POST", body: JSON.stringify({ routeCode: "ROTA-A" }) }
+      );
+      setSimRunning(res.simulation.running);
+      setSimInfo(
+        `PostgreSQL: ${res.simulation.routeCode} · ${Math.round(res.simulation.progress * 100)}% (${res.simulation.nearestStopName})`
+      );
+    } catch (err) {
+      setSimInfo(err instanceof Error ? err.message : "Erro ao controlar simulação.");
+    }
+  }
 
   return (
     <div className="min-h-screen bg-slide-bg text-slide-ink selection:bg-slide-accent selection:text-slide-accent-ink" style={{ fontFamily: "var(--font-body)" }}>
@@ -60,9 +93,9 @@ export function MockupView({ onNavigate }: MockupViewProps) {
                 },
                 {
                   r: "company" as const,
-                  title: "Empresa de Transporte & Colégio",
-                  desc: "Monitorização da frota em Luanda, pauta diária de presenças para a secretaria e gestão de seguros/inspeções DNVT.",
-                  tag: "Central de Operações · Morro Bento",
+                  title: "Operações Móveis MôBuss",
+                  desc: "Consola móvel para coordenadores e equipa central da MôBuss: monitorização da frota em Luanda, pauta operacional e gestão de seguros/inspeções DNVT.",
+                  tag: "Central de Operações MôBuss · Morro Bento",
                   Icon: Building2,
                 },
               ]
@@ -143,6 +176,37 @@ export function MockupView({ onNavigate }: MockupViewProps) {
               Ver Slides de Apresentação →
             </button>
           </div>
+
+          {isAuthenticated && capabilities.canAccessAdmin && (
+            <div className="max-w-lg rounded-2xl bg-slide-surface border border-white/10 p-4 space-y-2.5 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-bold text-white flex items-center gap-1.5">
+                  <Radio className={`w-3.5 h-3.5 ${wsConnected ? "text-slide-ok" : "text-amber-300"}`} />
+                  <span>Simulação Real PostgreSQL + WebSocket</span>
+                </span>
+                <span className="text-[10px] font-mono text-slide-dim">
+                  {wsConnected ? "WS Conectado" : "Offline"}
+                </span>
+              </div>
+              {simInfo && <div className="text-[11px] font-mono text-emerald-300">{simInfo}</div>}
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => void triggerSimulation(simRunning ? "pause" : "start")}
+                  className="rounded-xl bg-slide-ok text-white px-3 py-1.5 font-bold cursor-pointer inline-flex items-center gap-1.5"
+                >
+                  {simRunning ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+                  <span>{simRunning ? "Pausar PostgreSQL" : "Simular Viagem Real"}</span>
+                </button>
+                <button
+                  onClick={() => void triggerSimulation("reset")}
+                  className="rounded-xl bg-slide-bg border border-white/15 text-white px-3 py-1.5 font-semibold cursor-pointer inline-flex items-center gap-1.5"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Reiniciar ROTA-A</span>
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* ================= TRUE IPHONE 16 PRO HARDWARE FRAME ================= */}

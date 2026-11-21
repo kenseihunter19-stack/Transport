@@ -81,15 +81,48 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "revision": "1872c500de691dce40960bb85481de07"
   }, {
     "url": "index.html",
-    "revision": "1d66b59fc7117c7d56dacee13f5094bc"
+    "revision": "e4cbe9aa0f95cf0dec5215641c5a5df0"
   }, {
-    "url": "assets/leaflet-src-D3LaF27l.js",
+    "url": "assets/web-w3LekBH0.js",
     "revision": null
   }, {
-    "url": "assets/index-BPDIVq2m.css",
+    "url": "assets/web-3i_PcZjY.js",
     "revision": null
   }, {
-    "url": "assets/index-BC9K04TD.js",
+    "url": "assets/rolldown-runtime-BWaJ3C7D.js",
+    "revision": null
+  }, {
+    "url": "assets/plus-Bime9_k7.js",
+    "revision": null
+  }, {
+    "url": "assets/leaflet-src-Dyou-yFy.js",
+    "revision": null
+  }, {
+    "url": "assets/index-EHpAX_4v.css",
+    "revision": null
+  }, {
+    "url": "assets/index-B--17reh.js",
+    "revision": null
+  }, {
+    "url": "assets/dist-CMedSjkm.js",
+    "revision": null
+  }, {
+    "url": "assets/createLucideIcon-Bdr3QCoh.js",
+    "revision": null
+  }, {
+    "url": "assets/SchoolPortalView-nT7gXz5G.js",
+    "revision": null
+  }, {
+    "url": "assets/MockupView-DCQ3Xo_3.js",
+    "revision": null
+  }, {
+    "url": "assets/DeckView-6ajUDSX2.js",
+    "revision": null
+  }, {
+    "url": "assets/ContractRequestPage-C-wKqz88.js",
+    "revision": null
+  }, {
+    "url": "assets/AdminView-BuX22m8z.js",
     "revision": null
   }, {
     "url": "apple-touch-icon.png",
@@ -104,13 +137,15 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "url": "pwa-maskable-512x512.png",
     "revision": "ec759a0709718dc5c37f1fa2f4406fac"
   }, {
-    "url": "transigo.png",
-    "revision": "b499338813061a6f92b5b7e130174139"
+    "url": "assets/aistudio/20261117_030824_57b8de0b.jpg",
+    "revision": "8b3691cc1dd889d79a58975eed8224ec"
   }, {
     "url": "manifest.webmanifest",
-    "revision": "1711dae8f1d85c01844ef03cd54d58c6"
+    "revision": "5edb1c646164b9854e989b2169605806"
   }], {});
   workbox.cleanupOutdatedCaches();
-  workbox.registerRoute(new workbox.NavigationRoute(workbox.createHandlerBoundToURL("index.html")));
+  workbox.registerRoute(new workbox.NavigationRoute(workbox.createHandlerBoundToURL("index.html"), {
+    denylist: [/^\/api\//, /^\/ws\//]
+  }));
 
 }));

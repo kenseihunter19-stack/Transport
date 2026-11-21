@@ -1,7 +1,68 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { AnimatePresence, motion } from "motion/react";
+import {
+  AlertTriangle,
+  BarChart3,
+  Bell,
+  Building2,
+  Bus,
+  Check,
+  CheckCircle2,
+  ClipboardList,
+  CloudRain,
+  Construction,
+  CreditCard,
+  Database,
+  Download,
+  FileSignature,
+  FileSpreadsheet,
+  FileText,
+  GraduationCap,
+  HeartPulse,
+  KeyRound,
+  LayoutDashboard,
+  Lock,
+  LogOut,
+  Minus,
+  Pencil,
+  Phone,
+  Plus,
+  Presentation,
+  Radio,
+  RefreshCw,
+  RotateCcw,
+  Save,
+  Search,
+  ShieldAlert,
+  ShieldCheck,
+  Siren,
+  SlidersHorizontal,
+  Smartphone,
+  Star,
+  Trash2,
+  UserCheck,
+  Users,
+  Wrench,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 import { LuandaMap } from "@/components/LuandaMap";
+import { AuthGatePanel } from "@/components/AuthGatePanel";
+import { ROLE_LABELS, useAuth, type MoBussRole } from "@/contexts/AuthContext";
+import { useTelemetrySocket } from "@/hooks/useTelemetrySocket";
 import { downloadCsv, downloadDocument } from "@/lib/operations";
-import { LUANDA_ROUTES, type LuandaRouteConfig } from "@/lib/route-luanda";
+import { LUANDA_ROUTES } from "@/lib/route-luanda";
+import {
+  clearHazardForBus,
+  DEFAULT_PRICING,
+  exportAgtReceipt,
+  formatAOA,
+  readMoBussSync,
+  subscribeMoBussSync,
+  updatePricingConfig,
+  type MoBussSyncState,
+  type SyncedPricingConfig,
+} from "@/lib/mobuss-sync";
 
 export type AdminTab =
   | "Painel"
@@ -12,679 +73,982 @@ export type AdminTab =
   | "Finanças"
   | "DNVT"
   | "Emergências"
-  | "Relatórios";
+  | "Relatórios"
+  | "Sistema & Acessos";
 
-const ADMIN_TABS: [AdminTab, string, string][] = [
-  ["Painel", "📊", "Visão Geral das Operações"],
-  ["Contratos", "📄", "Acordos Escolares & Parcerias"],
-  ["Frota", "🚌", "Autocarros & Telemetria"],
-  ["Motoristas", "🧑‍✈️", "Equipa & Folha Salarial"],
-  ["Alunos", "🎒", "Diretório de Alunos & PIN"],
-  ["Finanças", "💳", "Multicaixa Express & AGT"],
-  ["DNVT", "🛡️", "Inspeções & Licenças Oficiais"],
-  ["Emergências", "🚨", "Ocorrências SOS & Suporte"],
-  ["Relatórios", "📈", "Auditoria & Exportação"],
+const ADMIN_TABS: Array<{ id: AdminTab; Icon: LucideIcon; desc: string }> = [
+  { id: "Painel", Icon: LayoutDashboard, desc: "Visão Geral das Operações" },
+  { id: "Contratos", Icon: FileSignature, desc: "Pedidos, Escolas & Contratos" },
+  { id: "Frota", Icon: Bus, desc: "Proprietários, Autocarros & Alocação" },
+  { id: "Motoristas", Icon: UserCheck, desc: "Equipa & Verificação" },
+  { id: "Alunos", Icon: GraduationCap, desc: "Diretório & Segurança PIN" },
+  { id: "Finanças", Icon: CreditCard, desc: "Tarifário, Faturas & Parceiros" },
+  { id: "DNVT", Icon: ShieldCheck, desc: "Inspeções & Anti-Esquecimento" },
+  { id: "Emergências", Icon: Siren, desc: "Ocorrências SOS & Via" },
+  { id: "Relatórios", Icon: BarChart3, desc: "Auditoria & Exportação" },
+  { id: "Sistema & Acessos", Icon: KeyRound, desc: "RBAC & Registos de Auditoria" },
 ];
 
-interface BusInfo {
-  id: number;
-  plate: string;
-  driver: string;
-  routeId: string;
-  routeName: string;
-  status: "Na estrada" | "Parado" | "Manutenção" | "Reserva";
-  students: number;
-  capacity: number;
-  fuel: string;
-  inspection: string;
-  insurance: string;
+interface AdminOverviewData {
+  schools: Array<{
+    id: number;
+    name: string;
+    municipality: string;
+    contactName: string;
+    contactPhone: string;
+    status: string;
+  }>;
+  contracts: Array<{
+    id: number;
+    contractNumber: string;
+    schoolId: number;
+    schoolName: string;
+    municipality: string;
+    contactName: string;
+    contactPhone: string;
+    payerModel: "school" | "parent" | "mixed";
+    pinPolicy: string;
+    busesAllocated: number;
+    studentsCovered: number;
+    monthlyValueAoa: number;
+    shiftRegime: string;
+    status: string;
+  }>;
+  contractRequests: Array<{
+    id: number;
+    referenceCode: string;
+    schoolName: string;
+    municipality: string;
+    shiftRegime: string;
+    busesRequested: number;
+    studentsEstimate: number;
+    estimatedMonthlyAoa: number;
+    payerPreference: string;
+    contactName: string;
+    contactPhone: string;
+    contactEmail: string | null;
+    status: string;
+    createdAt: string;
+  }>;
+  vehicleOwners: Array<{
+    id: number;
+    fullName: string;
+    ownerType: string;
+    nif: string | null;
+    phone: string;
+    settlementModel: string;
+    monthlySettlementAoa: number;
+    verificationStatus: string;
+  }>;
+  vehicles: Array<{
+    id: number;
+    fleetNumber: number;
+    plate: string;
+    ownerId: number;
+    ownerName: string;
+    assignedDriverId: number | null;
+    driverName: string;
+    routeCode: string;
+    capacity: number;
+    dnvtStatus: string;
+    dnvtExpiresAt: string;
+    insuranceProvider: string;
+    insuranceStatus: string;
+    verificationStatus: string;
+    status: string;
+  }>;
+  drivers: Array<{
+    id: number;
+    fullName: string;
+    phone: string;
+    licenseCategory: string;
+    verificationStatus: string;
+    rating: string;
+    status: string;
+    monthlySalaryAoa: number;
+    tripsCompletedMonth: number;
+  }>;
+  students: Array<{
+    id: number;
+    fullName: string;
+    schoolId: number;
+    schoolName: string;
+    routeCode: string;
+    stopName: string;
+    shift?: string;
+    enrollmentStatus: string;
+    currentJourneyState: string;
+    pinPolicy: string;
+    maskedPin: string;
+    guardianName: string;
+    guardianPhone: string;
+  }>;
+  trips: Array<{
+    id: number;
+    tripCode: string;
+    routeCode: string;
+    routeName: string;
+    legType: string;
+    state: string;
+    gpsStatus: string;
+    emptyBusSweepVerified: boolean;
+  }>;
+  incidents: Array<{
+    id: number;
+    tripId: number | null;
+    busNumber: number | null;
+    routeCode: string | null;
+    category: string;
+    severity: string;
+    description: string;
+    reporterName: string;
+    reporterRole: string;
+    status: string;
+    assignedToName: string | null;
+    resolutionNotes: string | null;
+    createdAt: string;
+  }>;
+  invoices: Array<{
+    id: number;
+    invoiceNumber: string;
+    studentName: string;
+    guardianName: string;
+    payerType: string;
+    phone: string;
+    amountAoa: number;
+    paymentMethod: string;
+    paymentEntity?: string | null;
+    paymentReferencePin?: string | null;
+    status: string;
+    providerReference: string | null;
+    fiscalStatus: string;
+    issuedAt: string;
+    confirmedAt: string | null;
+  }>;
+  pricing: {
+    id: number;
+    studentMonthlyFeeAoa: number;
+    schoolBusSingleShiftAoa: number;
+    schoolBusDoubleShiftAoa: number;
+    ivaPercent: number;
+    companyName: string;
+    companyNif: string;
+    multicaixaEntityCode?: string;
+    fiscalIntegrationStatus: string;
+  } | null;
+  transportChangeRequests: Array<{
+    id: number;
+    schoolId: number;
+    schoolName: string;
+    requestedByName: string;
+    requestType: string;
+    title: string;
+    details: string;
+    status: string;
+    createdAt: string;
+  }>;
+  auditLogs: Array<{
+    id: number;
+    actorEmail: string | null;
+    actorRole: string;
+    action: string;
+    targetEntity: string;
+    targetId: string | null;
+    summary: string;
+    createdAt: string;
+  }>;
+  staffUsers: Array<{
+    id: number;
+    uid: string;
+    username?: string | null;
+    email: string;
+    fullName: string;
+    phone?: string | null;
+    primaryRole: MoBussRole;
+    schoolId: number | null;
+    active: boolean;
+  }>;
 }
 
-const BUSES_INITIAL: BusInfo[] = [
-  {
-    id: 12,
-    plate: "LD-24-61-AB",
-    driver: "João Mateus",
-    routeId: "route_a",
-    routeName: "Rota A · Mutamba → Morro Bento",
-    status: "Na estrada",
-    students: 18,
-    capacity: 22,
-    fuel: "78%",
-    inspection: "Válida (DNVT Mar 2027)",
-    insurance: "ENSA Angola (Válido)",
-  },
-  {
-    id: 7,
-    plate: "LD-31-02-CK",
-    driver: "Paulo Cassoma",
-    routeId: "route_b",
-    routeName: "Rota B · Talatona Express",
-    status: "Na estrada",
-    students: 22,
-    capacity: 25,
-    fuel: "64%",
-    inspection: "Válida (DNVT Jul 2027)",
-    insurance: "Fidelidade Angola (Válido)",
-  },
-  {
-    id: 9,
-    plate: "LD-05-49-HM",
-    driver: "Adão Bento",
-    routeId: "route_c",
-    routeName: "Rota C · Viana Sul",
-    status: "Na estrada",
-    students: 20,
-    capacity: 25,
-    fuel: "42%",
-    inspection: "A renovar (DNVT 18 dias)",
-    insurance: "ENSA Angola (Válido)",
-  },
-  {
-    id: 4,
-    plate: "LD-22-88-PL",
-    driver: "Teresa Lunda",
-    routeId: "route_d",
-    routeName: "Rota D · Baixa & Miramar",
-    status: "Na estrada",
-    students: 16,
-    capacity: 20,
-    fuel: "82%",
-    inspection: "Válida (DNVT Ago 2027)",
-    insurance: "Nossa Seguros (Válido)",
-  },
-  {
-    id: 3,
-    plate: "LD-18-77-FE",
-    driver: "Rosa Tchissola",
-    routeId: "route_a",
-    routeName: "Reserva Central · Morro Bento",
-    status: "Reserva",
-    students: 0,
-    capacity: 22,
-    fuel: "95%",
-    inspection: "Válida (DNVT Jan 2027)",
-    insurance: "ENSA Angola (Válido)",
-  },
-  {
-    id: 15,
-    plate: "LD-40-13-QZ",
-    driver: "—",
-    routeId: "route_c",
-    routeName: "Oficina Central · Viana",
-    status: "Manutenção",
-    students: 0,
-    capacity: 22,
-    fuel: "15%",
-    inspection: "Revisão Mecânica Preventiva",
-    insurance: "ENSA Angola (Válido)",
-  },
-];
-
-interface DriverInfo {
-  name: string;
-  phone: string;
-  category: string;
-  rating: string;
-  bus: string;
-  status: "Em serviço" | "Disponível" | "De folga";
-  trips: number;
-  salary: string;
-  checkInTime: string;
-}
-
-const DRIVERS_INITIAL: DriverInfo[] = [
-  {
-    name: "João Mateus",
-    phone: "+244 923 112 233",
-    category: "Pesados Profissional D",
-    rating: "4,9",
-    bus: "Autocarro 12",
-    status: "Em serviço",
-    trips: 44,
-    salary: "220 000 Kz",
-    checkInTime: "06:45",
-  },
-  {
-    name: "Paulo Cassoma",
-    phone: "+244 912 334 455",
-    category: "Pesados Profissional D",
-    rating: "4,8",
-    bus: "Autocarro 7",
-    status: "Em serviço",
-    trips: 42,
-    salary: "210 000 Kz",
-    checkInTime: "06:50",
-  },
-  {
-    name: "Teresa Lunda",
-    phone: "+244 945 667 788",
-    category: "Pesados Profissional D",
-    rating: "4,9",
-    bus: "Autocarro 4",
-    status: "Em serviço",
-    trips: 45,
-    salary: "225 000 Kz",
-    checkInTime: "06:40",
-  },
-  {
-    name: "Adão Bento",
-    phone: "+244 934 889 900",
-    category: "Pesados Profissional D",
-    rating: "4,7",
-    bus: "Autocarro 9",
-    status: "Em serviço",
-    trips: 40,
-    salary: "200 000 Kz",
-    checkInTime: "06:55",
-  },
-  {
-    name: "Rosa Tchissola",
-    phone: "+244 928 445 566",
-    category: "Pesados Profissional D",
-    rating: "4,8",
-    bus: "Autocarro 3 (Reserva)",
-    status: "Disponível",
-    trips: 38,
-    salary: "190 000 Kz",
-    checkInTime: "07:00",
-  },
-  {
-    name: "Manuel Kiala",
-    phone: "+244 918 223 344",
-    category: "Pesados Profissional D",
-    rating: "4,6",
-    bus: "—",
-    status: "De folga",
-    trips: 20,
-    salary: "100 000 Kz",
-    checkInTime: "—",
-  },
-];
-
-interface StudentInfo {
-  name: string;
-  school: string;
-  corridor: string;
-  stop: string;
-  guardian: string;
-  phone: string;
-  pin: string;
-  status: "A bordo" | "Entregue" | "À espera" | "Ausente";
-}
-
-const STUDENTS_INITIAL: StudentInfo[] = [
-  {
-    name: "Maria Domingos",
-    school: "Escola Primária do Morro Bento",
-    corridor: "Rota A",
-    stop: "Largo do Kinaxixi",
-    guardian: "Sra. Luísa Domingos",
-    phone: "+244 923 456 789",
-    pin: "4821",
-    status: "A bordo",
-  },
-  {
-    name: "Edson Manuel",
-    school: "Escola Primária do Morro Bento",
-    corridor: "Rota A",
-    stop: "Largo do Kinaxixi",
-    guardian: "Sr. Manuel Neto",
-    phone: "+244 912 345 678",
-    pin: "3170",
-    status: "A bordo",
-  },
-  {
-    name: "Ana Kiala",
-    school: "Escola Primária do Morro Bento",
-    corridor: "Rota A",
-    stop: "Maianga (Cruzamento)",
-    guardian: "Sra. Joana Kiala",
-    phone: "+244 934 567 890",
-    pin: "5541",
-    status: "À espera",
-  },
-  {
-    name: "Bruno Neto",
-    school: "Escola Primária do Morro Bento",
-    corridor: "Rota A",
-    stop: "Alvalade (Av. Revolução)",
-    guardian: "Sr. Carlos Neto",
-    phone: "+244 945 678 901",
-    pin: "9024",
-    status: "À espera",
-  },
-  {
-    name: "Sofia Pedro",
-    school: "Colégio São Francisco de Assis",
-    corridor: "Rota B",
-    stop: "Belas Shopping",
-    guardian: "Sra. Isabel Pedro",
-    phone: "+244 923 888 777",
-    pin: "1983",
-    status: "A bordo",
-  },
-  {
-    name: "Hélder Cunha",
-    school: "Complexo Escolar do Kilamba",
-    corridor: "Rota C",
-    stop: "Viana Vila",
-    guardian: "Sr. Rui Cunha",
-    phone: "+244 919 444 333",
-    pin: "7721",
-    status: "Ausente",
-  },
-  {
-    name: "Beatriz Cassoma",
-    school: "Colégio São Paulo",
-    corridor: "Rota D",
-    stop: "Miramar (Rotunda)",
-    guardian: "Sra. Teresa Cassoma",
-    phone: "+244 924 555 666",
-    pin: "6412",
-    status: "Entregue",
-  },
-];
-
-interface McxPayment {
-  id: string;
-  invoice: string;
-  student: string;
-  guardian: string;
-  phone: string;
-  amount: string;
-  date: string;
-  time: string;
-  status: "Validado" | "Pendente";
-  emisRef: string;
-  agtCert: string;
-}
-
-const MCX_PAYMENTS_INITIAL: McxPayment[] = [
-  {
-    id: "pay-1",
-    invoice: "FT-MOBUSS-2026/8192",
-    student: "Maria Domingos",
-    guardian: "Sra. Luísa Domingos",
-    phone: "+244 923 456 789",
-    amount: "45 000 Kz",
-    date: "27 Out 2026",
-    time: "07:15",
-    status: "Validado",
-    emisRef: "MCX-901824-EMIS",
-    agtCert: "AGT-CERT/2026/8192-VALID",
-  },
-  {
-    id: "pay-2",
-    invoice: "FT-MOBUSS-2026/8193",
-    student: "Edson Manuel",
-    guardian: "Sr. Manuel Neto",
-    phone: "+244 912 345 678",
-    amount: "45 000 Kz",
-    date: "27 Out 2026",
-    time: "07:22",
-    status: "Validado",
-    emisRef: "MCX-482019-EMIS",
-    agtCert: "AGT-CERT/2026/8193-VALID",
-  },
-  {
-    id: "pay-3",
-    invoice: "FT-MOBUSS-2026/8194",
-    student: "Sofia Pedro",
-    guardian: "Sra. Isabel Pedro",
-    phone: "+244 923 888 777",
-    amount: "45 000 Kz",
-    date: "26 Out 2026",
-    time: "18:40",
-    status: "Validado",
-    emisRef: "MCX-194029-EMIS",
-    agtCert: "AGT-CERT/2026/8194-VALID",
-  },
-  {
-    id: "pay-4",
-    invoice: "FT-MOBUSS-2026/8195",
-    student: "Bruno Neto",
-    guardian: "Sr. Carlos Neto",
-    phone: "+244 945 678 901",
-    amount: "45 000 Kz",
-    date: "26 Out 2026",
-    time: "20:05",
-    status: "Pendente",
-    emisRef: "MCX-582910-EMIS",
-    agtCert: "AGT-CERT/2026/8195-AWAIT",
-  },
-];
-
-interface AlertItem {
-  id: string;
-  time: string;
-  bus: number;
-  route: string;
-  type: string;
-  from: string;
-  notes?: string;
-  open: boolean;
-}
-
-const ALERTS_INITIAL: AlertItem[] = [
-  {
-    id: "al-1",
-    time: "07:52",
-    bus: 7,
-    route: "Rota B · Talatona Express",
-    type: "🔧 Avaria mecânica ligeira (furo de pneu)",
-    from: "Paulo Cassoma (Motorista)",
-    notes: "Equipa de apoio técnico despachada com pneu suplente.",
-    open: true,
-  },
-  {
-    id: "al-2",
-    time: "07:35",
-    bus: 9,
-    route: "Rota C · Viana Sul",
-    type: "🚦 Trânsito muito congestionado na Estalagem (+10 min)",
-    from: "Adão Bento (Motorista)",
-    notes: "Notificação push automática enviada a todos os 20 encarregados.",
-    open: false,
-  },
-  {
-    id: "al-3",
-    time: "Ontem 15:10",
-    bus: 12,
-    route: "Rota A · Morro Bento",
-    type: "🚑 Aluno indisposto com febre súbita",
-    from: "João Mateus (Motorista)",
-    notes: "Encarregado contactado imediatamente, recebido na paragem da Maianga.",
-    open: false,
-  },
-];
+const PAYER_LABELS: Record<string, string> = {
+  school: "Escola Paga",
+  parent: "Encarregados Pagam",
+  mixed: "Misto (Escola + Pais)",
+  configurable: "A Configurar",
+};
 
 interface AdminViewProps {
-  onNavigate: (view: "mockup" | "admin" | "deck" | "landing" | "native") => void;
+  onNavigate: (view: "mockup" | "admin" | "deck" | "landing" | "client" | "driver" | "school") => void;
 }
 
 export function AdminView({ onNavigate }: AdminViewProps) {
+  const { isAuthenticated, dbUser, capabilities, loading: authLoading, apiFetch, signOut } = useAuth();
   const [tab, setTab] = useState<AdminTab>("Painel");
   const [search, setSearch] = useState("");
   const [selectedRouteId, setSelectedRouteId] = useState<string>("route_a");
   const [progress, setProgress] = useState(0.42);
 
-  // Contracts state
-  const [contracts, setContracts] = useState([
-    {
-      id: "cnt-1",
-      client: "Escola Primária do Morro Bento",
-      location: "Morro Bento, Luanda",
-      buses: 4,
-      students: 90,
-      value: "1 200 000 Kz",
-      status: "Ativo",
-      contact: "Director Pedagógico Alberto",
-      phone: "+244 923 111 222",
-    },
-    {
-      id: "cnt-2",
-      client: "Colégio São Paulo (Maianga)",
-      location: "Maianga, Luanda",
-      buses: 2,
-      students: 45,
-      value: "650 000 Kz",
-      status: "Ativo",
-      contact: "Irmã Graça (Secretaria)",
-      phone: "+244 912 333 444",
-    },
-    {
-      id: "cnt-3",
-      client: "Colégio São Francisco de Assis",
-      location: "Talatona, Luanda",
-      buses: 3,
-      students: 75,
-      value: "1 050 000 Kz",
-      status: "Pedido",
-      contact: "Dr. Manuel Ferreira",
-      phone: "+244 934 555 666",
-    },
-    {
-      id: "cnt-4",
-      client: "Complexo Escolar do Kilamba",
-      location: "Cidade do Kilamba",
-      buses: 3,
-      students: 80,
-      value: "900 000 Kz",
-      status: "Pedido",
-      contact: "Prof. António Luvualu",
-      phone: "+244 945 777 888",
-    },
-    {
-      id: "cnt-5",
-      client: "Escola Internacional de Talatona",
-      location: "Talatona Sul",
-      buses: 5,
-      students: 120,
-      value: "1 600 000 Kz",
-      status: "Ativo",
-      contact: "Dra. Nicole Santos",
-      phone: "+244 928 999 000",
-    },
-    {
-      id: "cnt-6",
-      client: "Liceu Francês de Luanda",
-      location: "Miramar, Luanda",
-      buses: 2,
-      students: 40,
-      value: "700 000 Kz",
-      status: "Recusado",
-      contact: "Secretariat de Gestion",
-      phone: "+244 918 000 111",
-    },
-  ]);
+  // Real DB state & Health Probe
+  const [overview, setOverview] = useState<AdminOverviewData | null>(null);
+  const [loadingOverview, setLoadingOverview] = useState(false);
+  const [health, setHealth] = useState<{ dbConnected: boolean; latencyMs?: number }>({ dbConnected: false });
 
-  const [buses, setBuses] = useState(BUSES_INITIAL);
-  const [drivers] = useState(DRIVERS_INITIAL);
-  const [students, setStudents] = useState(STUDENTS_INITIAL);
-  const [payments, setPayments] = useState(MCX_PAYMENTS_INITIAL);
-  const [alerts, setAlerts] = useState(ALERTS_INITIAL);
+  // Simulator cross-sync (hazards, sweeps, ratings) + pricing form draft
+  const [syncState, setSyncState] = useState<MoBussSyncState>(() => readMoBussSync());
+  const [pricingDraft, setPricingDraft] = useState<SyncedPricingConfig>(() => readMoBussSync().pricing);
 
-  // New Contract Modal state
+  // Per-lead payer model selection for approval
+  const [leadPayerSelection, setLeadPayerSelection] = useState<Record<number, "school" | "parent" | "mixed">>({});
+
+  // New Contract Modal
   const [contractModalOpen, setContractModalOpen] = useState(false);
   const [newSchool, setNewSchool] = useState("");
   const [newLocation, setNewLocation] = useState("Talatona, Luanda");
+  const [newPayerModel, setNewPayerModel] = useState<"school" | "parent" | "mixed">("school");
   const [newBuses, setNewBuses] = useState(2);
   const [newContact, setNewContact] = useState("");
   const [newPhone, setNewPhone] = useState("+244 923 000 000");
-  const [newValue, setNewValue] = useState("650 000 Kz");
+  const [newMonthlyAoa, setNewMonthlyAoa] = useState(700000);
 
-  // Dispatch Backup Bus Modal
-  const [dispatchModalOpen, setDispatchModalOpen] = useState(false);
-  const [selectedIncident, setSelectedIncident] = useState<AlertItem | null>(null);
+  // New Partner Vehicle Owner Modal
+  const [ownerModalOpen, setOwnerModalOpen] = useState(false);
+  const [ownerName, setOwnerName] = useState("");
+  const [ownerPhone, setOwnerPhone] = useState("+244 9");
+  const [ownerNif, setOwnerNif] = useState("");
+  const [ownerSettlementModel, setOwnerSettlementModel] = useState<"monthly_fixed" | "per_trip">("monthly_fixed");
+  const [ownerMonthlyAoa, setOwnerMonthlyAoa] = useState(350000);
 
-  // Success Toast
+  // Invoice Reconcile Modal
+  const [reconcileInvoiceId, setReconcileInvoiceId] = useState<number | null>(null);
+  const [reconcileRef, setReconcileRef] = useState("");
+
+  // Driver assignment selections per vehicle
+  const [assignDriverSelection, setAssignDriverSelection] = useState<Record<number, number>>({});
+
+  // Admin-only User Provisioning Modal
+  const [userModalOpen, setUserModalOpen] = useState(false);
+  const [newUserFullName, setNewUserFullName] = useState("");
+  const [newUserEmail, setNewUserEmail] = useState("");
+  const [newUserPhone, setNewUserPhone] = useState("+244 9");
+  const [newUserPassword, setNewUserPassword] = useState("");
+  const [newUserRole, setNewUserRole] = useState<MoBussRole>("parent_guardian");
+  const [newUserSchoolId, setNewUserSchoolId] = useState<number | "">("");
+  const [newUserStudentId, setNewUserStudentId] = useState<number | "">("");
+  const [creatingUser, setCreatingUser] = useState(false);
+
+  // Admin Password Reset Modal
+  const [passwordTargetUser, setPasswordTargetUser] = useState<{ id: number; label: string } | null>(null);
+  const [resetPasswordInput, setResetPasswordInput] = useState("");
+  const [savingPassword, setSavingPassword] = useState(false);
+
+  // Admin Edit & Delete User Account Modals
+  const [editingUser, setEditingUser] = useState<{
+    id: number;
+    fullName: string;
+    username: string;
+    email: string;
+    phone: string;
+    primaryRole: MoBussRole;
+    schoolId: number | "";
+    active: boolean;
+  } | null>(null);
+  const [savingUserEdit, setSavingUserEdit] = useState(false);
+  const [deleteUserTarget, setDeleteUserTarget] = useState<{ id: number; label: string; email: string } | null>(null);
+  const [deletingUser, setDeletingUser] = useState(false);
+
+  // Admin Edit & Remove Student Modals
+  const [editingStudent, setEditingStudent] = useState<{
+    id: number;
+    fullName: string;
+    schoolId: number;
+    routeCode: string;
+    stopName: string;
+    shift: "morning" | "afternoon" | "both";
+    enrollmentStatus: "active" | "pending_approval" | "suspended";
+    pinPolicy: "boarding" | "dropoff" | "both";
+    guardianName: string;
+    guardianPhone: string;
+  } | null>(null);
+  const [savingStudent, setSavingStudent] = useState(false);
+  const [deleteStudentTarget, setDeleteStudentTarget] = useState<{ id: number; fullName: string; schoolName: string } | null>(null);
+  const [deletingStudent, setDeletingStudent] = useState(false);
+
+  const [simStatus, setSimStatus] = useState<{
+    running: boolean;
+    routeCode: string;
+    progress: number;
+    nearestStopName: string;
+  } | null>(null);
+  const [simConnectedClients, setSimConnectedClients] = useState(0);
+
+  // Toast
   const [toast, setToast] = useState<string | null>(null);
 
+  const showToast = (msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 4000);
+  };
+
   useEffect(() => {
-    const id = setInterval(() => setProgress((p) => (p + 0.002 > 1 ? 0 : p + 0.002)), 350);
-    return () => clearInterval(id);
+    setSyncState(readMoBussSync());
+    return subscribeMoBussSync((next) => setSyncState(next));
   }, []);
 
-  function showToast(msg: string) {
-    setToast(msg);
-    setTimeout(() => setToast(null), 3800);
+  const checkHealth = useCallback(async () => {
+    try {
+      const res = await fetch("/api/v1/health");
+      const data = await res.json();
+      setHealth({ dbConnected: Boolean(data.dbConnected), latencyMs: data.latencyMs });
+    } catch {
+      setHealth({ dbConnected: false });
+    }
+  }, []);
+
+  const loadOverview = useCallback(async () => {
+    if (!isAuthenticated || !capabilities.canAccessAdmin) return;
+    setLoadingOverview(true);
+    try {
+      const data = await apiFetch<AdminOverviewData>("/api/v1/admin/overview");
+      setOverview(data);
+      if (data.pricing) {
+        const syncedPricing: SyncedPricingConfig = {
+          studentMonthlyFee: data.pricing.studentMonthlyFeeAoa,
+          schoolBusSingleShift: data.pricing.schoolBusSingleShiftAoa,
+          schoolBusDoubleShift: data.pricing.schoolBusDoubleShiftAoa,
+          ivaPercent: data.pricing.ivaPercent,
+          companyName: data.pricing.companyName,
+          companyNif: data.pricing.companyNif,
+          multicaixaEntityCode: data.pricing.multicaixaEntityCode || "00845",
+          agtCertCode:
+            data.pricing.fiscalIntegrationStatus === "sandbox_pending_agt_certification"
+              ? "HOMOLOGAÇÃO / NÃO FISCAL AGT"
+              : data.pricing.fiscalIntegrationStatus,
+        };
+        setPricingDraft(syncedPricing);
+        updatePricingConfig(syncedPricing);
+      }
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao sincronizar painel com PostgreSQL.");
+    } finally {
+      setLoadingOverview(false);
+    }
+  }, [isAuthenticated, capabilities.canAccessAdmin, apiFetch]);
+
+  const { connected: wsConnected } = useTelemetrySocket((event) => {
+    if (event.type === "trip:location") {
+      const routeCode = String(event.payload.routeCode ?? "");
+      const activeCfg = LUANDA_ROUTES[selectedRouteId] || LUANDA_ROUTES.route_a;
+      if (routeCode === activeCfg.code) {
+        setProgress(Number(event.payload.progress ?? 0));
+      }
+      return;
+    }
+    if (event.type === "simulation:status") {
+      setSimStatus({
+        running: Boolean(event.payload.running),
+        routeCode: String(event.payload.routeCode ?? "ROTA-A"),
+        progress: Number(event.payload.progress ?? 0),
+        nearestStopName: String(event.payload.nearestStopName ?? "—"),
+      });
+      return;
+    }
+    if (
+      event.type === "trip:state" ||
+      event.type === "attendance:updated" ||
+      event.type === "pin:validated" ||
+      event.type === "incident:created"
+    ) {
+      void loadOverview();
+    }
+  });
+
+  useEffect(() => {
+    void checkHealth();
+    void loadOverview();
+    if (isAuthenticated && capabilities.canAccessAdmin) {
+      void apiFetch<{ simulation: { running: boolean; routeCode: string; progress: number; nearestStopName: string }; connectedClients: number }>("/api/v1/simulation/status")
+        .then((res) => {
+          setSimStatus(res.simulation);
+          setSimConnectedClients(res.connectedClients);
+        })
+        .catch(() => null);
+    }
+  }, [checkHealth, loadOverview, isAuthenticated, capabilities.canAccessAdmin, apiFetch]);
+
+  async function handleSimulationAction(action: "start" | "pause" | "step" | "reset") {
+    const activeRoute = LUANDA_ROUTES[selectedRouteId] || LUANDA_ROUTES.route_a;
+    try {
+      const res = await apiFetch<{ simulation: { running: boolean; routeCode: string; progress: number; nearestStopName: string }; connectedClients: number }>(
+        `/api/v1/simulation/${action}`,
+        {
+          method: "POST",
+          body: JSON.stringify({ routeCode: activeRoute.code }),
+        }
+      );
+      setSimStatus(res.simulation);
+      setSimConnectedClients(res.connectedClients);
+      setProgress(res.simulation.progress);
+      showToast(
+        action === "start"
+          ? `Simulação PostgreSQL + WebSocket iniciada na ${activeRoute.code}.`
+          : action === "pause"
+          ? "Simulação em pausa."
+          : action === "step"
+          ? `Autocarro avançou para ${res.simulation.nearestStopName}.`
+          : `Simulação reiniciada na ${activeRoute.code}.`
+      );
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao controlar simulação.");
+    }
   }
 
-  const openAlerts = alerts.filter((a) => a.open).length;
-
-  function setContractStatus(index: number, status: string) {
-    setContracts((all) =>
-      all.map((c, i) => (i === index ? { ...c, status } : c))
+  if (authLoading) {
+    return (
+      <div className="min-h-[calc(100vh-3.5rem)] bg-slide-bg text-slide-ink grid place-items-center text-xs text-slide-dim">
+        A verificar sessão administrativa MôBuss...
+      </div>
     );
-    showToast(`Estado do contrato com ${contracts[index]?.client} alterado para: ${status}`);
   }
 
-  function handleDispatchBackupBus(alertId: string) {
-    setBuses((prev) =>
-      prev.map((b) => (b.id === 3 ? { ...b, status: "Na estrada", students: 15 } : b))
+  if (!isAuthenticated) {
+    return (
+      <AuthGatePanel
+        title="MôBuss Admin · Central de Operações"
+        subtitle="Acesso exclusivo à equipa operacional, financeira e de segurança da MôBuss. Inicie sessão para gerir contratos, frota, proprietários parceiros e auditoria."
+        badgeText="PostgreSQL + RBAC · Central Luanda"
+      />
     );
-    setAlerts((prev) =>
-      prev.map((a) =>
-        a.id === alertId
-          ? {
-              ...a,
-              open: false,
-              notes: `${a.notes || ""} | Autocarro Suplente 3 despachado às ${new Date().toLocaleTimeString("pt-AO", { hour: "2-digit", minute: "2-digit" })}.`,
-            }
-          : a
-      )
+  }
+
+  if (!capabilities.canAccessAdmin) {
+    return (
+      <div className="min-h-[calc(100vh-3.5rem)] bg-slide-bg text-slide-ink grid place-items-center p-6">
+        <div className="max-w-md rounded-2xl bg-slide-paper-ink border border-white/10 p-6 text-center space-y-3">
+          <Lock className="w-8 h-8 text-slide-accent mx-auto" />
+          <h2 className="text-lg font-black">Acesso Administrativo Restrito</h2>
+          <p className="text-xs text-slide-dim leading-relaxed">
+            O seu perfil atual (<strong>{dbUser ? ROLE_LABELS[dbUser.primaryRole] : "Utilizador"}</strong>) não possui permissões da equipa central MôBuss.
+          </p>
+          <button
+            type="button"
+            onClick={() => void signOut()}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-slide-accent text-white px-4 py-2 text-xs font-bold cursor-pointer"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Terminar Sessão (Sair)</span>
+          </button>
+        </div>
+      </div>
     );
-    setDispatchModalOpen(false);
-    showToast("🚌 Autocarro Suplente 3 despachado com sucesso!");
+  }
+
+  const q = search.trim().toLowerCase();
+  const contractsList = (overview?.contracts ?? []).filter(
+    (c) =>
+      c.schoolName.toLowerCase().includes(q) ||
+      c.contractNumber.toLowerCase().includes(q) ||
+      c.municipality.toLowerCase().includes(q)
+  );
+  const requestsList = (overview?.contractRequests ?? []).filter(
+    (r) =>
+      r.schoolName.toLowerCase().includes(q) ||
+      r.referenceCode.toLowerCase().includes(q) ||
+      r.municipality.toLowerCase().includes(q)
+  );
+  const vehiclesList = (overview?.vehicles ?? []).filter(
+    (v) =>
+      v.plate.toLowerCase().includes(q) ||
+      v.driverName.toLowerCase().includes(q) ||
+      v.ownerName.toLowerCase().includes(q) ||
+      v.routeCode.toLowerCase().includes(q)
+  );
+  const driversList = (overview?.drivers ?? []).filter(
+    (d) => d.fullName.toLowerCase().includes(q) || d.phone.toLowerCase().includes(q)
+  );
+  const studentsList = (overview?.students ?? []).filter(
+    (s) =>
+      s.fullName.toLowerCase().includes(q) ||
+      s.schoolName.toLowerCase().includes(q) ||
+      s.stopName.toLowerCase().includes(q) ||
+      s.guardianName.toLowerCase().includes(q)
+  );
+  const invoicesList = (overview?.invoices ?? []).filter(
+    (inv) =>
+      inv.invoiceNumber.toLowerCase().includes(q) ||
+      inv.studentName.toLowerCase().includes(q) ||
+      inv.guardianName.toLowerCase().includes(q)
+  );
+
+  const activeHazards = syncState.hazards.filter((h) => h.active);
+  const openIncidentsCount = (overview?.incidents ?? []).filter(
+    (i) => i.status !== "resolved" && i.status !== "closed"
+  ).length;
+  const pendingLeadsCount = (overview?.contractRequests ?? []).filter(
+    (r) => r.status === "request_received" || r.status === "under_review"
+  ).length;
+  const activeContractsCount = (overview?.contracts ?? []).filter((c) => c.status === "active").length;
+  const busesOnRoadCount = (overview?.vehicles ?? []).filter((v) => v.status === "assigned").length;
+
+  async function handleSavePricing() {
+    try {
+      await apiFetch("/api/v1/admin/pricing", {
+        method: "PUT",
+        body: JSON.stringify({
+          studentMonthlyFeeAoa: pricingDraft.studentMonthlyFee,
+          schoolBusSingleShiftAoa: pricingDraft.schoolBusSingleShift,
+          schoolBusDoubleShiftAoa: pricingDraft.schoolBusDoubleShift,
+          ivaPercent: pricingDraft.ivaPercent,
+          companyName: pricingDraft.companyName,
+          companyNif: pricingDraft.companyNif,
+          multicaixaEntityCode: pricingDraft.multicaixaEntityCode || "00845",
+        }),
+      });
+      updatePricingConfig(pricingDraft);
+      showToast(`Tarifário guardado em PostgreSQL: ${formatAOA(pricingDraft.studentMonthlyFee)}/mês.`);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Sem permissão para editar tarifário.");
+    }
+  }
+
+  async function handleReviewLead(requestId: number, action: "approve" | "reject") {
+    try {
+      const payerModel = leadPayerSelection[requestId] || "school";
+      await apiFetch(`/api/v1/admin/contract-requests/${requestId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ action, payerModel }),
+      });
+      showToast(
+        action === "approve"
+          ? `Pedido aprovado e convertido em contrato (${PAYER_LABELS[payerModel]}).`
+          : "Pedido marcado como recusado."
+      );
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao processar pedido.");
+    }
+  }
+
+  async function handleReviewTransportRequest(reqId: number, status: "approved" | "rejected") {
+    try {
+      await apiFetch(`/api/v1/admin/transport-requests/${reqId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      });
+      showToast(`Pedido escolar marcado como ${status === "approved" ? "aprovado" : "recusado"}.`);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao atualizar pedido escolar.");
+    }
+  }
+
+  async function handleCreateContract(e: React.FormEvent) {
+    e.preventDefault();
+    if (!newSchool.trim()) return;
+    try {
+      await apiFetch("/api/v1/admin/contracts", {
+        method: "POST",
+        body: JSON.stringify({
+          schoolName: newSchool.trim(),
+          municipality: newLocation.trim(),
+          payerModel: newPayerModel,
+          busesAllocated: newBuses,
+          studentsCovered: newBuses * 25,
+          monthlyValueAoa: newMonthlyAoa,
+          contactName: newContact.trim() || "Direcção Escolar",
+          contactPhone: newPhone.trim(),
+        }),
+      });
+      setContractModalOpen(false);
+      setNewSchool("");
+      showToast("Contrato registado em PostgreSQL com política de PIN duplo.");
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao registar contrato.");
+    }
+  }
+
+  async function handleCreateVehicleOwner(e: React.FormEvent) {
+    e.preventDefault();
+    try {
+      await apiFetch("/api/v1/admin/vehicle-owners", {
+        method: "POST",
+        body: JSON.stringify({
+          fullName: ownerName,
+          phone: ownerPhone,
+          nif: ownerNif || null,
+          settlementModel: ownerSettlementModel,
+          monthlySettlementAoa: ownerMonthlyAoa,
+        }),
+      });
+      setOwnerModalOpen(false);
+      setOwnerName("");
+      setOwnerNif("");
+      showToast("Proprietário parceiro independente registado.");
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao criar proprietário.");
+    }
+  }
+
+  async function handleAssignDriver(vehicleId: number, fallbackDriverId: number) {
+    const driverId = assignDriverSelection[vehicleId] || fallbackDriverId;
+    if (!driverId) {
+      showToast("Selecione um motorista verificado.");
+      return;
+    }
+    try {
+      await apiFetch(`/api/v1/admin/vehicles/${vehicleId}/assign`, {
+        method: "PATCH",
+        body: JSON.stringify({ driverId }),
+      });
+      showToast("Motorista verificado alocado à viatura.");
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Falha na alocação.");
+    }
+  }
+
+  async function handleResetStudentPin(studentId: number, studentName: string) {
+    try {
+      await apiFetch(`/api/v1/admin/students/${studentId}/reset-pin`, { method: "POST" });
+      showToast(`PIN de ${studentName} revogado e regenerado com hash seguro.`);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Sem permissão para regenerar PIN.");
+    }
+  }
+
+  async function handleIncidentStatus(incidentId: number, status: "acknowledged" | "in_progress" | "resolved") {
+    try {
+      await apiFetch(`/api/v1/admin/incidents/${incidentId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      });
+      showToast(`Ocorrência #${incidentId} atualizada para "${status}".`);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao atualizar ocorrência.");
+    }
+  }
+
+  async function handleReconcileInvoice(e: React.FormEvent) {
+    e.preventDefault();
+    if (!reconcileInvoiceId || !reconcileRef.trim()) return;
+    try {
+      await apiFetch(`/api/v1/admin/invoices/${reconcileInvoiceId}/reconcile`, {
+        method: "POST",
+        body: JSON.stringify({ providerReference: reconcileRef.trim() }),
+      });
+      setReconcileInvoiceId(null);
+      setReconcileRef("");
+      showToast("Fatura conciliada manualmente com referência bancária.");
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao conciliar fatura.");
+    }
+  }
+
+  async function handleUpdateUserRole(targetUserId: number, primaryRole: MoBussRole, schoolId?: number | null) {
+    try {
+      await apiFetch(`/api/v1/admin/system/users/${targetUserId}/role`, {
+        method: "PATCH",
+        body: JSON.stringify({ primaryRole, schoolId }),
+      });
+      showToast("Perfil RBAC atualizado no servidor.");
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Apenas Super Admin pode alterar perfis.");
+    }
+  }
+
+  async function handleToggleUserStatus(targetUserId: number, nextActive: boolean) {
+    try {
+      await apiFetch(`/api/v1/admin/system/users/${targetUserId}/status`, {
+        method: "PATCH",
+        body: JSON.stringify({ active: nextActive }),
+      });
+      showToast(nextActive ? "Conta reativada com sucesso." : "Conta desativada no servidor.");
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Apenas Super Admin pode alterar estado da conta.");
+    }
+  }
+
+  async function handleResetUserPassword(e: React.FormEvent) {
+    e.preventDefault();
+    if (!passwordTargetUser || resetPasswordInput.length < 6) return;
+    setSavingPassword(true);
+    try {
+      const res = await apiFetch<{ message: string }>(`/api/v1/admin/system/users/${passwordTargetUser.id}/password`, {
+        method: "PATCH",
+        body: JSON.stringify({ password: resetPasswordInput }),
+      });
+      setPasswordTargetUser(null);
+      setResetPasswordInput("");
+      showToast(res.message);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao atualizar palavra-passe.");
+    } finally {
+      setSavingPassword(false);
+    }
+  }
+
+  async function handleCreateUserAccount(e: React.FormEvent) {
+    e.preventDefault();
+    if (!newUserFullName.trim() || !newUserEmail.trim()) return;
+    setCreatingUser(true);
+    try {
+      const res = await apiFetch<{ message: string }>("/api/v1/admin/system/users", {
+        method: "POST",
+        body: JSON.stringify({
+          fullName: newUserFullName.trim(),
+          email: newUserEmail.trim().toLowerCase(),
+          phone: newUserPhone.trim() || null,
+          password: newUserPassword.trim() || undefined,
+          primaryRole: newUserRole,
+          schoolId: newUserRole === "school_admin" && newUserSchoolId ? Number(newUserSchoolId) : null,
+          studentId: newUserRole === "parent_guardian" && newUserStudentId ? Number(newUserStudentId) : null,
+        }),
+      });
+      setUserModalOpen(false);
+      setNewUserFullName("");
+      setNewUserEmail("");
+      setNewUserPhone("+244 9");
+      setNewUserPassword("");
+      setNewUserRole("parent_guardian");
+      setNewUserSchoolId("");
+      setNewUserStudentId("");
+      showToast(res.message);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao criar conta.");
+    } finally {
+      setCreatingUser(false);
+    }
+  }
+
+  async function handleSaveUserEdit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editingUser) return;
+    setSavingUserEdit(true);
+    try {
+      const res = await apiFetch<{ message: string }>(`/api/v1/admin/system/users/${editingUser.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          fullName: editingUser.fullName.trim(),
+          username: editingUser.username.trim() || null,
+          email: editingUser.email.trim().toLowerCase(),
+          phone: editingUser.phone.trim() || null,
+          primaryRole: editingUser.primaryRole,
+          schoolId: editingUser.primaryRole === "school_admin" && editingUser.schoolId ? Number(editingUser.schoolId) : null,
+          active: editingUser.active,
+        }),
+      });
+      setEditingUser(null);
+      showToast(res.message);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao atualizar conta.");
+    } finally {
+      setSavingUserEdit(false);
+    }
+  }
+
+  async function handleConfirmDeleteUser() {
+    if (!deleteUserTarget) return;
+    setDeletingUser(true);
+    try {
+      const res = await apiFetch<{ message: string }>(`/api/v1/admin/system/users/${deleteUserTarget.id}`, {
+        method: "DELETE",
+      });
+      setDeleteUserTarget(null);
+      showToast(res.message);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao eliminar conta.");
+    } finally {
+      setDeletingUser(false);
+    }
+  }
+
+  async function handleSaveStudentEdit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editingStudent) return;
+    setSavingStudent(true);
+    try {
+      const res = await apiFetch<{ message: string }>(`/api/v1/admin/students/${editingStudent.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          fullName: editingStudent.fullName.trim(),
+          schoolId: editingStudent.schoolId,
+          routeCode: editingStudent.routeCode.trim(),
+          stopName: editingStudent.stopName.trim(),
+          shift: editingStudent.shift,
+          enrollmentStatus: editingStudent.enrollmentStatus,
+          pinPolicy: editingStudent.pinPolicy,
+          guardianName: editingStudent.guardianName.trim(),
+          guardianPhone: editingStudent.guardianPhone.trim(),
+        }),
+      });
+      setEditingStudent(null);
+      showToast(res.message);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao atualizar dados do aluno.");
+    } finally {
+      setSavingStudent(false);
+    }
+  }
+
+  async function handleConfirmDeleteStudent() {
+    if (!deleteStudentTarget) return;
+    setDeletingStudent(true);
+    try {
+      const res = await apiFetch<{ message: string }>(`/api/v1/admin/students/${deleteStudentTarget.id}`, {
+        method: "DELETE",
+      });
+      setDeleteStudentTarget(null);
+      showToast(res.message);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao remover aluno.");
+    } finally {
+      setDeletingStudent(false);
+    }
   }
 
   function handleDownloadReport(name: string) {
-    if (name === "Relatório mensal de viagens") {
-      downloadCsv("mobuss-viagens-mensal.csv", [
-        ["Data", "Autocarro", "Matrícula", "Motorista", "Corredor", "Alunos", "Estado", "Pontualidade"],
-        ["2026-10-27", "12", "LD-24-61-AB", "João Mateus", "Rota A · Morro Bento", 18, "Concluída", "98%"],
-        ["2026-10-27", "7", "LD-31-02-CK", "Paulo Cassoma", "Rota B · Talatona Express", 22, "Concluída", "94%"],
-        ["2026-10-27", "9", "LD-05-49-HM", "Adão Bento", "Rota C · Viana Sul", 20, "Concluída", "91%"],
-        ["2026-10-27", "4", "LD-22-88-PL", "Teresa Lunda", "Rota D · Baixa & Miramar", 16, "Concluída", "99%"],
-        ["2026-10-27", "3", "LD-18-77-FE", "Rosa Tchissola", "Reserva Central", 0, "Disponível", "100%"],
-      ]);
-    } else if (name === "Livro de Faturas Multicaixa Express (AGT)") {
-      downloadCsv("mobuss-faturas-mcx-agt.csv", [
-        ["Nº Factura", "Aluno", "Encarregado", "Telemóvel MCX", "Valor (Kz)", "Data", "Referência EMIS", "Certificação AGT", "Estado"],
-        ...payments.map((p) => [
-          p.invoice,
-          p.student,
-          p.guardian,
-          p.phone,
-          p.amount,
-          p.date,
-          p.emisRef,
-          p.agtCert,
-          p.status,
+    if (name === "Pauta Diária de Presenças e Desembarque") {
+      downloadCsv("mobuss-pauta-presencas-oficial.csv", [
+        ["Aluno", "Escola", "Corredor", "Paragem", "Encarregado", "Política PIN", "PIN", "Estado"],
+        ...(overview?.students ?? []).map((s) => [
+          s.fullName,
+          s.schoolName,
+          s.routeCode,
+          s.stopName,
+          s.guardianName,
+          "Embarque + Desembarque",
+          "•••• (Mascarado)",
+          s.currentJourneyState,
         ]),
       ]);
-    } else if (name === "Pauta Diária de Presenças e Desembarque") {
-      downloadCsv("mobuss-pauta-presencas-oficial.csv", [
-        ["Aluno", "Instituição Escolar", "Corredor", "Paragem Oficial", "Encarregado", "PIN Validação", "Estado Hoje"],
-        ...students.map((s) => [s.name, s.school, s.corridor, s.stop, s.guardian, s.pin, s.status]),
+    } else if (name === "Livro de Faturas Multicaixa Express (Homologação)") {
+      downloadCsv("mobuss-faturas-homologacao.csv", [
+        ["Nº Documento", "Aluno", "Encarregado", "Valor (Kz)", "Ref. Provedor", "Estado", "Estado Fiscal"],
+        ...(overview?.invoices ?? []).map((inv) => [
+          inv.invoiceNumber,
+          inv.studentName,
+          inv.guardianName,
+          inv.amountAoa,
+          inv.providerReference ?? "A aguardar provedor",
+          inv.status,
+          inv.fiscalStatus,
+        ]),
       ]);
     } else if (name === "Relatório de folha de salários (Motoristas)") {
       downloadCsv("mobuss-folha-salarios.csv", [
-        ["Motorista", "Categoria", "Avaliação Pais", "Autocarro", "Viagens Mês", "Salário Bruto", "Segurança Social (3%)", "Líquido"],
-        ["João Mateus", "Cat. D", "4.9", "Autocarro 12", 44, "220 000 Kz", "6 600 Kz", "213 400 Kz"],
-        ["Paulo Cassoma", "Cat. D", "4.8", "Autocarro 7", 42, "210 000 Kz", "6 300 Kz", "203 700 Kz"],
-        ["Teresa Lunda", "Cat. D", "4.9", "Autocarro 4", 45, "225 000 Kz", "6 750 Kz", "218 250 Kz"],
-        ["Adão Bento", "Cat. D", "4.7", "Autocarro 9", 40, "200 000 Kz", "6 000 Kz", "194 000 Kz"],
-        ["Rosa Tchissola", "Cat. D", "4.8", "Autocarro 3", 38, "190 000 Kz", "5 700 Kz", "184 300 Kz"],
-        ["Manuel Kiala", "Cat. D", "4.6", "Reserva", 20, "100 000 Kz", "3 000 Kz", "97 000 Kz"],
+        ["Motorista", "Contacto", "Habilitação", "Avaliação", "Viagens Mês", "Salário Bruto (Kz)", "Estado"],
+        ...(overview?.drivers ?? []).map((d) => [
+          d.fullName,
+          d.phone,
+          d.licenseCategory,
+          d.rating,
+          d.tripsCompletedMonth,
+          d.monthlySalaryAoa,
+          d.status,
+        ]),
+      ]);
+    } else if (name === "Relatório mensal de viagens") {
+      downloadCsv("mobuss-viagens-ativas.csv", [
+        ["Código Viagem", "Rota", "Turno", "Estado", "GPS", "Inspeção Anti-Esquecimento"],
+        ...(overview?.trips ?? []).map((t) => [
+          t.tripCode,
+          t.routeName,
+          t.legType,
+          t.state,
+          t.gpsStatus,
+          t.emptyBusSweepVerified ? "Confirmada" : "Pendente",
+        ]),
       ]);
     } else {
       downloadDocument(
-        "Relatório de Emergências e Ocorrências SOS MôBuss",
-        `MÔBUSS LUANDA — AUDITORIA DE SEGURANÇA E OCORRÊNCIAS\n` +
-          `Data de Emissão: ${new Date().toLocaleDateString("pt-AO", { day: "2-digit", month: "long", year: "numeric" })}\n\n` +
-          alerts
-            .map(
-              (a) =>
-                `• [${a.time}] Autocarro ${a.bus} (${a.route})\n  Tipo: ${a.type}\n  Origem: ${a.from}\n  Estado: ${a.open ? "ABERTO (EM CURSO)" : "RESOLVIDO"}\n  Notas: ${a.notes || "Sem notas adicionais"}\n`
-            )
-            .join("\n")
+        "Relatorio_Emergencias_MoBuss",
+        (overview?.incidents ?? [])
+          .map(
+            (i) =>
+              `• [${i.createdAt}] ${i.category} (${i.severity}) — Estado: ${i.status}\n  Descrição: ${i.description}\n  Reportado por: ${i.reporterName}`
+          )
+          .join("\n\n")
       );
     }
-    showToast(`Ficheiro "${name}" exportado com sucesso!`);
+    showToast(`Ficheiro "${name}" exportado sem exposição de segredos.`);
   }
 
-  // Filtered queries
-  const filteredBuses = buses.filter(
-    (b) =>
-      b.driver.toLowerCase().includes(search.toLowerCase()) ||
-      b.plate.toLowerCase().includes(search.toLowerCase()) ||
-      b.routeName.toLowerCase().includes(search.toLowerCase())
-  );
-
-  const filteredStudents = students.filter(
-    (s) =>
-      s.name.toLowerCase().includes(search.toLowerCase()) ||
-      s.school.toLowerCase().includes(search.toLowerCase()) ||
-      s.stop.toLowerCase().includes(search.toLowerCase()) ||
-      s.guardian.toLowerCase().includes(search.toLowerCase())
-  );
-
-  const filteredContracts = contracts.filter(
-    (c) =>
-      c.client.toLowerCase().includes(search.toLowerCase()) ||
-      c.location.toLowerCase().includes(search.toLowerCase()) ||
-      c.contact.toLowerCase().includes(search.toLowerCase())
-  );
-
-  const filteredPayments = payments.filter(
-    (p) =>
-      p.student.toLowerCase().includes(search.toLowerCase()) ||
-      p.guardian.toLowerCase().includes(search.toLowerCase()) ||
-      p.invoice.toLowerCase().includes(search.toLowerCase()) ||
-      p.phone.includes(search)
-  );
-
   return (
-    <div className="min-h-screen bg-slide-bg text-slide-ink flex select-none" style={{ fontFamily: "var(--font-body)" }}>
-      {/* Toast Notification */}
-      {toast && (
-        <div className="fixed top-20 right-6 z-50 rounded-2xl bg-slide-paper-ink text-slide-paper px-4 py-3 shadow-2xl border border-slide-surface flex items-center gap-3 animate-in slide-in-from-top-4">
-          <span className="text-lg">🔔</span>
-          <div className="text-xs font-semibold">{toast}</div>
-        </div>
-      )}
+    <div className="min-h-screen bg-slide-bg text-slide-ink flex flex-col lg:flex-row" style={{ fontFamily: "var(--font-body)" }}>
+      <AnimatePresence>
+        {toast && (
+          <motion.div
+            initial={{ opacity: 0, y: -12, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -8, scale: 0.97 }}
+            className="fixed top-20 right-6 z-50 rounded-xl bg-slide-paper-ink text-slide-paper px-4 py-3 shadow-2xl border border-white/15 flex items-center gap-3 max-w-sm"
+          >
+            <Bell className="w-4 h-4 text-slide-accent shrink-0" />
+            <div className="text-xs font-semibold">{toast}</div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-      {/* Sidebar Navigation */}
-      <aside className="w-64 bg-slide-paper-ink text-slide-paper flex flex-col justify-between p-5 shrink-0 border-r border-slide-surface shadow-xl">
+      {/* Desktop Sidebar */}
+      <aside className="hidden lg:flex w-64 bg-slide-paper-ink text-slide-paper flex-col justify-between p-5 shrink-0 border-r border-white/10">
         <div>
-          {/* Logo & Header */}
-          <div className="flex items-center gap-3 mb-6 pb-4 border-b border-slide-surface/80">
+          <div className="flex items-center gap-3 mb-6 pb-4 border-b border-white/10">
             <img
               src="/assets/aistudio/20261117_030824_57b8de0b.jpg"
               alt="MôBuss Logo"
-              className="w-10 h-10 rounded-xl object-cover bg-black border border-white/10 shadow"
+              className="w-9 h-9 rounded-lg object-cover bg-black border border-white/10"
             />
             <div>
-              <div className="font-extrabold text-base tracking-tight leading-none" style={{ fontFamily: "var(--font-display)" }}>
-                MôBuss
+              <div className="font-extrabold text-sm tracking-tight leading-none" style={{ fontFamily: "var(--font-display)" }}>
+                MôBuss Admin
               </div>
-              <div className="text-[11px] text-slide-dim font-medium mt-1 flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-slide-ok inline-block" />
-                <span>Central de Luanda</span>
+              <div className="text-[11px] text-slide-dim font-medium mt-1">
+                Central de Luanda
               </div>
             </div>
           </div>
 
-          {/* Navigation Tabs */}
           <nav className="space-y-1">
-            {ADMIN_TABS.map(([t, icon, desc]) => {
-              const active = tab === t;
+            {ADMIN_TABS.map(({ id, Icon, desc }) => {
+              const active = tab === id;
               return (
                 <button
-                  key={t}
-                  onClick={() => setTab(t)}
-                  className={`w-full flex items-center justify-between rounded-xl px-3.5 py-2.5 font-bold text-xs transition cursor-pointer text-left ${
-                    active
-                      ? "bg-slide-accent text-slide-accent-ink shadow-sm"
-                      : "text-slide-dim hover:text-slide-paper hover:bg-slide-surface/60"
-                  }`}
+                  key={id}
+                  onClick={() => setTab(id)}
                   title={desc}
+                  className={`w-full flex items-center justify-between rounded-xl px-3.5 py-2.5 font-semibold text-xs transition cursor-pointer text-left ${
+                    active
+                      ? "bg-slide-accent text-slide-accent-ink shadow-xs"
+                      : "text-slide-dim hover:text-slide-paper hover:bg-white/5"
+                  }`}
                 >
                   <span className="flex items-center gap-2.5 truncate">
-                    <span className="text-base">{icon}</span>
-                    <span className="truncate">{t}</span>
+                    <Icon className="w-4 h-4 shrink-0" />
+                    <span className="truncate whitespace-nowrap">{id}</span>
                   </span>
 
-                  {t === "Emergências" && openAlerts > 0 && (
-                    <span className="rounded-full bg-destructive text-white px-2 py-0.5 text-[10px] font-black animate-pulse shadow-xs">
-                      {openAlerts}
+                  {id === "Emergências" && (openIncidentsCount + activeHazards.length > 0) && (
+                    <span className="rounded-md px-1.5 py-0.5 text-[10px] font-bold tabular-nums bg-white/15 text-white">
+                      {openIncidentsCount + activeHazards.length}
                     </span>
                   )}
-                  {t === "Contratos" && contracts.filter((c) => c.status === "Pedido").length > 0 && (
-                    <span className="rounded-full bg-slide-accent text-slide-accent-ink px-1.5 py-0.5 text-[9px] font-black">
-                      {contracts.filter((c) => c.status === "Pedido").length} novos
+                  {id === "Contratos" && pendingLeadsCount > 0 && (
+                    <span className="rounded-md px-1.5 py-0.5 text-[10px] font-bold tabular-nums bg-white/15 text-white">
+                      {pendingLeadsCount}
                     </span>
                   )}
                 </button>
@@ -693,768 +1057,1536 @@ export function AdminView({ onNavigate }: AdminViewProps) {
           </nav>
         </div>
 
-        {/* External View Switchers & PWA Info */}
-        <div className="space-y-2 pt-4 border-t border-slide-surface/80 text-xs">
-          <div className="text-[10px] uppercase font-bold text-slide-dim tracking-wider mb-1">Atalhos do Sistema:</div>
+        <div className="space-y-1.5 pt-4 border-t border-white/10 text-xs">
+          <div className="text-[11px] font-semibold text-slide-dim mb-2">Atalhos da Plataforma</div>
           <button
-            onClick={() => onNavigate("mockup")}
-            className="w-full flex items-center gap-2 text-slide-accent font-bold hover:underline transition cursor-pointer text-left py-1"
+            onClick={() => onNavigate("school")}
+            className="w-full flex items-center gap-2 text-slide-paper hover:text-slide-accent font-semibold transition cursor-pointer text-left py-1.5"
           >
-            <span>📱</span>
-            <span>Simulador iPhone (App)</span>
+            <Building2 className="w-3.5 h-3.5 text-slide-accent shrink-0" />
+            <span>Portal Escola</span>
           </button>
           <button
-            onClick={() => onNavigate("landing")}
-            className="w-full flex items-center gap-2 text-slide-paper hover:text-slide-accent transition cursor-pointer text-left py-1"
+            onClick={() => onNavigate("mockup")}
+            className="w-full flex items-center gap-2 text-slide-dim hover:text-slide-paper transition cursor-pointer text-left py-1.5"
           >
-            <span>📄</span>
-            <span>Portal Escolas (Landing Page)</span>
+            <Smartphone className="w-3.5 h-3.5 shrink-0" />
+            <span>Simulador iPhone</span>
           </button>
           <button
             onClick={() => onNavigate("deck")}
-            className="w-full flex items-center gap-2 text-slide-dim hover:text-slide-paper transition cursor-pointer text-left py-1"
+            className="w-full flex items-center gap-2 text-slide-dim hover:text-slide-paper transition cursor-pointer text-left py-1.5"
           >
-            <span>📊</span>
-            <span>Slides de Apresentação</span>
+            <Presentation className="w-3.5 h-3.5 shrink-0" />
+            <span>Slides</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => void signOut()}
+            className="w-full flex items-center gap-2 text-red-300 hover:text-red-200 font-semibold transition cursor-pointer text-left py-1.5 mt-1"
+          >
+            <LogOut className="w-3.5 h-3.5 shrink-0" />
+            <span>Terminar Sessão (Sair)</span>
           </button>
         </div>
       </aside>
 
-      {/* Main Content Area */}
-      <main className="flex-1 min-w-0 p-6 lg:p-8 overflow-y-auto">
-        {/* Top Header */}
-        <header className="flex flex-wrap justify-between items-center gap-4 mb-6 pb-4 border-b border-slide-surface/40">
+      {/* Mobile Tab Strip */}
+      <div className="lg:hidden border-b border-white/10 bg-slide-paper-ink px-4 py-2 overflow-x-auto no-scrollbar flex items-center gap-1.5">
+        {ADMIN_TABS.map(({ id, Icon }) => (
+          <button
+            key={id}
+            onClick={() => setTab(id)}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer transition ${
+              tab === id ? "bg-slide-accent text-white" : "text-slide-dim hover:text-white bg-white/5"
+            }`}
+          >
+            <Icon className="w-3.5 h-3.5" />
+            <span>{id}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* Main Content */}
+      <main className="flex-1 min-w-0 p-5 sm:p-6 lg:p-8 overflow-y-auto">
+        <header className="flex flex-wrap justify-between items-center gap-4 mb-6 pb-4 border-b border-white/10">
           <div>
-            <div className="text-xs font-semibold text-slide-dim flex items-center gap-1.5">
-              <span>🇦🇴 Angola</span>
-              <span>·</span>
-              <span>Província de Luanda</span>
-              <span>·</span>
-              <span className="text-slide-ok font-bold">Sistema 100% Operacional</span>
+            <div className="text-xs font-medium text-slide-dim flex items-center gap-2 flex-wrap">
+              <span>Angola · Luanda</span>
+              <span aria-hidden="true">·</span>
+              <span className={`inline-flex items-center gap-1.5 font-semibold ${health.dbConnected ? "text-slide-ok" : "text-amber-400"}`}>
+                <Database className="w-3.5 h-3.5" />
+                <span>
+                  {health.dbConnected
+                    ? `PostgreSQL Online (${health.latencyMs ?? 0}ms)`
+                    : "A verificar PostgreSQL..."}
+                </span>
+              </span>
+              <span aria-hidden="true">·</span>
+              <span className={`inline-flex items-center gap-1.5 font-semibold ${wsConnected ? "text-emerald-300" : "text-amber-300"}`}>
+                <Radio className="w-3.5 h-3.5" />
+                <span>{wsConnected ? `WS Ao Vivo (${simConnectedClients} cliente(s))` : "A ligar WS..."}</span>
+              </span>
             </div>
             <h1 className="text-2xl sm:text-3xl font-black text-slide-paper mt-1" style={{ fontFamily: "var(--font-display)" }}>
               {tab}
             </h1>
           </div>
 
-          <div className="flex items-center gap-3">
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Pesquisar autocarros, alunos, faturas, motoristas..."
-              className="rounded-xl bg-slide-surface px-4 py-2 text-xs text-slide-paper placeholder:text-slide-dim outline-none w-64 sm:w-80 border border-slide-line/20 focus:ring-2 ring-slide-accent"
-            />
-            <div className="flex items-center gap-2 bg-slide-surface px-3 py-1.5 rounded-xl border border-slide-line/20">
-              <div className="w-7 h-7 rounded-lg bg-slide-accent text-slide-accent-ink grid place-items-center font-black text-xs">
-                OP
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slide-dim absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Pesquisar frota, alunos, contratos..."
+                className="rounded-xl bg-slide-surface pl-9 pr-4 py-2 text-xs text-slide-paper placeholder:text-slide-dim outline-none w-52 sm:w-64 border border-white/10 focus:border-slide-accent"
+              />
+            </div>
+
+            <button
+              onClick={() => {
+                void checkHealth();
+                void loadOverview();
+              }}
+              className="rounded-xl bg-slide-surface border border-white/10 px-3 py-2 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer hover:bg-white/10"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loadingOverview ? "animate-spin" : ""}`} />
+              <span>Atualizar</span>
+            </button>
+
+            <div className="flex items-center gap-2 bg-slide-surface px-3 py-1.5 rounded-xl border border-white/10">
+              <div className="w-7 h-7 rounded-lg bg-slide-accent text-white grid place-items-center font-black text-xs">
+                {(dbUser?.fullName || "MB").slice(0, 2).toUpperCase()}
               </div>
               <div className="text-left hidden sm:block">
-                <div className="text-[11px] font-bold text-slide-paper leading-none">Central DNVT</div>
-                <div className="text-[9px] text-slide-dim">Operador Chefe</div>
+                <div className="text-[11px] font-bold text-slide-paper leading-none">{dbUser?.fullName}</div>
+                <div className="text-[10px] text-slide-dim mt-0.5">{dbUser ? ROLE_LABELS[dbUser.primaryRole] : ""}</div>
               </div>
             </div>
           </div>
         </header>
 
-        {/* ================= TAB 1: PAINEL GERAL (OVERVIEW) ================= */}
-        {tab === "Painel" && (
-          <div className="space-y-6">
-            {/* Top Operational KPIs */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              <Stat
-                label="Contratos Escolares Ativos"
-                value={contracts.filter((c) => c.status === "Ativo").length}
-                sub="+2 propostas em validação"
-              />
-              <Stat
-                label="Autocarros em Rota"
-                value={`${buses.filter((b) => b.status === "Na estrada").length}/${buses.length}`}
-                sub="4 corredores cobertos"
-                accent
-              />
-              <Stat
-                label="Alunos Transportados Hoje"
-                value="412"
-                sub="97% com PIN validado"
-              />
-              <Stat
-                label="Ocorrências SOS Abertas"
-                value={openAlerts}
-                sub={openAlerts > 0 ? "Requer intervenção" : "Nenhum incidente"}
-                danger={openAlerts > 0}
-              />
-            </div>
+        <motion.div key={tab} initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.15 }}>
+          {/* ================= PAINEL ================= */}
+          {tab === "Painel" && (
+            <div className="space-y-6">
+              {activeHazards.length > 0 && (
+                <div className="rounded-2xl bg-slide-accent/15 border border-slide-accent/40 p-4 flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <AlertTriangle className="w-5 h-5 text-slide-accent shrink-0" />
+                    <div>
+                      <div className="text-xs font-extrabold text-white">
+                        Alerta de Via Reportado ({activeHazards[0]!.label})
+                      </div>
+                      <div className="text-xs text-slide-dim">
+                        {activeHazards[0]!.driver} · {activeHazards[0]!.routeCode} · Autocarro {activeHazards[0]!.busNumber}
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      clearHazardForBus(activeHazards[0]!.busNumber);
+                      showToast("Alerta de via limpo.");
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-slide-surface text-xs font-semibold border border-white/10 cursor-pointer"
+                  >
+                    Limpar
+                  </button>
+                </div>
+              )}
 
-            {/* Live Map & Real-Time Luanda Activity Feed */}
-            <div className="grid grid-cols-1 lg:grid-cols-[1.6fr_1fr] gap-6">
-              <Card
-                title="Frota Escolar em Tempo Real · Luanda"
-                action={
-                  <div className="flex items-center gap-1.5">
-                    {Object.values(LUANDA_ROUTES).map((r) => (
-                      <button
-                        key={r.id}
-                        onClick={() => setSelectedRouteId(r.id)}
-                        className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition cursor-pointer ${
-                          selectedRouteId === r.id
-                            ? "bg-slide-accent text-slide-accent-ink"
-                            : "bg-slide-bg text-slide-dim hover:text-slide-paper"
-                        }`}
-                      >
-                        {r.code}
-                      </button>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <Stat
+                  label="Contratos Escolares Ativos"
+                  value={activeContractsCount}
+                  sub={pendingLeadsCount > 0 ? `${pendingLeadsCount} pedido(s) públicos por rever` : "Carteira PostgreSQL ativa"}
+                />
+                <Stat
+                  label="Viaturas Alocadas"
+                  value={`${busesOnRoadCount}/${overview?.vehicles.length ?? 0}`}
+                  sub={`${overview?.vehicleOwners.length ?? 0} proprietário(s) registados`}
+                  accent
+                />
+                <Stat
+                  label="Educandos Monitorizados"
+                  value={overview?.students.length ?? 0}
+                  sub="Política PIN: Embarque + Desembarque"
+                />
+                <Stat
+                  label="Ocorrências em Aberto"
+                  value={openIncidentsCount}
+                  sub={openIncidentsCount > 0 ? "Requer atenção" : "Sem incidentes abertos"}
+                  danger={openIncidentsCount > 0}
+                />
+              </div>
+
+              {/* Server-Backed Live Simulation Bar */}
+              <div className="rounded-2xl bg-slide-surface border border-white/10 p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div>
+                  <div className="font-bold text-white flex items-center gap-2">
+                    <Radio className={`w-4 h-4 ${simStatus?.running ? "text-slide-ok animate-pulse" : "text-slide-accent"}`} />
+                    <span>Simulação de Rota Real em PostgreSQL + WebSocket</span>
+                  </div>
+                  <div className="text-[11px] text-slide-dim mt-0.5">
+                    {simStatus
+                      ? `Rota ${simStatus.routeCode} · Progresso ${Math.round(simStatus.progress * 100)}% · Paragem próxima: ${simStatus.nearestStopName}`
+                      : "Movimenta a viatura real no PostgreSQL e transmite GPS + alertas de 500m em tempo real a todas as apps."}
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  {simStatus?.running ? (
+                    <button
+                      onClick={() => void handleSimulationAction("pause")}
+                      className="rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-200 px-3 py-1.5 font-bold cursor-pointer"
+                    >
+                      Pausar Simulação
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => void handleSimulationAction("start")}
+                      className="rounded-xl bg-slide-ok text-white px-3 py-1.5 font-bold cursor-pointer"
+                    >
+                      Iniciar Simulação Ao Vivo
+                    </button>
+                  )}
+                  <button
+                    onClick={() => void handleSimulationAction("step")}
+                    className="rounded-xl bg-slide-bg border border-white/15 px-3 py-1.5 font-semibold cursor-pointer hover:bg-white/10"
+                  >
+                    +1 Passo (500m)
+                  </button>
+                  <button
+                    onClick={() => void handleSimulationAction("reset")}
+                    className="rounded-xl bg-slide-bg border border-white/15 px-3 py-1.5 font-semibold cursor-pointer hover:bg-white/10"
+                  >
+                    Reiniciar Rota
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-[1.6fr_1fr] gap-6">
+                <Card
+                  title="Corredores de Luanda"
+                  action={
+                    <div className="flex items-center gap-1.5">
+                      {Object.values(LUANDA_ROUTES).map((r) => (
+                        <button
+                          key={r.id}
+                          onClick={() => setSelectedRouteId(r.id)}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer ${
+                            selectedRouteId === r.id
+                              ? "bg-slide-accent text-white"
+                              : "bg-slide-bg text-slide-dim border border-white/10"
+                          }`}
+                        >
+                          {r.code}
+                        </button>
+                      ))}
+                    </div>
+                  }
+                >
+                  <LuandaMap progress={progress} routeId={selectedRouteId} className="h-[360px] rounded-xl border border-white/10" />
+                </Card>
+
+                <Card title="Registo de Auditoria Recente (PostgreSQL)">
+                  <div className="space-y-2 max-h-[360px] overflow-y-auto pr-1">
+                    {(overview?.auditLogs ?? []).slice(0, 10).map((log) => (
+                      <div key={log.id} className="rounded-xl bg-slide-bg p-3 text-xs border border-white/10 space-y-1">
+                        <div className="flex justify-between text-[10px] font-mono text-slide-dim">
+                          <span className="text-slide-accent font-bold">{log.action}</span>
+                          <span>{new Date(log.createdAt).toLocaleTimeString("pt-AO")}</span>
+                        </div>
+                        <div className="text-slide-paper leading-snug">{log.summary}</div>
+                      </div>
                     ))}
                   </div>
+                </Card>
+              </div>
+            </div>
+          )}
+
+          {/* ================= CONTRATOS ================= */}
+          {tab === "Contratos" && (
+            <div className="space-y-6">
+              <div className="flex flex-wrap justify-between items-center gap-3">
+                <span className="text-xs text-slide-dim">
+                  Pedidos públicos de contratação, alterações de escolas e contratos com modelo de pagamento configurável.
+                </span>
+                <button
+                  onClick={() => setContractModalOpen(true)}
+                  className="rounded-xl bg-slide-accent text-white px-4 py-2 font-bold text-xs cursor-pointer inline-flex items-center gap-2"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Registar Novo Contrato</span>
+                </button>
+              </div>
+
+              {/* Public Contract Requests Queue */}
+              <Card title={`Pedidos Públicos de Contrato (${requestsList.length})`}>
+                {requestsList.length === 0 ? (
+                  <div className="text-xs text-slide-dim">Sem pedidos submetidos.</div>
+                ) : (
+                  <div className="space-y-2.5">
+                    {requestsList.map((r) => (
+                      <div key={r.id} className="rounded-xl bg-slide-bg border border-white/10 p-4 flex flex-wrap justify-between items-center gap-3 text-xs">
+                        <div>
+                          <div className="font-bold text-white flex items-center gap-2">
+                            <span className="font-mono text-slide-accent">{r.referenceCode}</span>
+                            <span>· {r.schoolName}</span>
+                          </div>
+                          <div className="text-slide-dim mt-0.5">
+                            {r.municipality} · {r.busesRequested} autocarros · {r.studentsEstimate} alunos · Est. {formatAOA(r.estimatedMonthlyAoa)}/mês · Pref: {PAYER_LABELS[r.payerPreference] ?? r.payerPreference}
+                          </div>
+                          <div className="text-[11px] text-slide-dim mt-0.5">
+                            Contacto: {r.contactName} ({r.contactPhone})
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {r.status === "request_received" || r.status === "under_review" ? (
+                            <>
+                              <select
+                                value={leadPayerSelection[r.id] || "school"}
+                                onChange={(e) =>
+                                  setLeadPayerSelection((prev) => ({
+                                    ...prev,
+                                    [r.id]: e.target.value as "school" | "parent" | "mixed",
+                                  }))
+                                }
+                                className="rounded-lg bg-slide-surface border border-white/10 px-2.5 py-1.5 text-xs text-white"
+                              >
+                                <option value="school">Escola Paga</option>
+                                <option value="parent">Pais Pagam</option>
+                                <option value="mixed">Modelo Misto</option>
+                              </select>
+                              <button
+                                onClick={() => void handleReviewLead(r.id, "approve")}
+                                className="rounded-lg bg-slide-ok text-white px-3 py-1.5 font-bold cursor-pointer"
+                              >
+                                Aprovar & Criar Contrato
+                              </button>
+                              <button
+                                onClick={() => void handleReviewLead(r.id, "reject")}
+                                className="rounded-lg bg-slide-surface border border-white/10 px-3 py-1.5 font-semibold cursor-pointer"
+                              >
+                                Recusar
+                              </button>
+                            </>
+                          ) : (
+                            <StatusBadge s={r.status === "accepted" ? "Ativo" : "Recusado"} />
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </Card>
+
+              {/* Active Contracts Table */}
+              <Table head={["Contrato / Escola", "Município", "Modelo Pagador", "Política PIN", "Frota / Alunos", "Valor Mensal", "Estado"]}>
+                {contractsList.map((c) => (
+                  <tr key={c.id} className="hover:bg-white/[0.03] text-xs">
+                    <td className="p-3.5">
+                      <div className="font-bold text-white">{c.schoolName}</div>
+                      <div className="text-[11px] font-mono text-slide-dim">{c.contractNumber}</div>
+                    </td>
+                    <td className="p-3.5 text-slide-dim">{c.municipality}</td>
+                    <td className="p-3.5">
+                      <span className="px-2 py-0.5 rounded bg-white/10 text-[11px] font-semibold">
+                        {PAYER_LABELS[c.payerModel] ?? c.payerModel}
+                      </span>
+                    </td>
+                    <td className="p-3.5 text-[11px] text-slide-ok font-semibold">
+                      Embarque + Desembarque
+                    </td>
+                    <td className="p-3.5 font-mono tabular-nums">
+                      {c.busesAllocated} bus · {c.studentsCovered} alunos
+                    </td>
+                    <td className="p-3.5 font-mono font-bold text-slide-accent tabular-nums">
+                      {formatAOA(c.monthlyValueAoa)}
+                    </td>
+                    <td className="p-3.5">
+                      <StatusBadge s={c.status === "active" ? "Ativo" : c.status} />
+                    </td>
+                  </tr>
+                ))}
+              </Table>
+
+              {/* School Portal Change Requests */}
+              <Card title={`Pedidos de Alteração das Escolas (${overview?.transportChangeRequests.length ?? 0})`}>
+                {(overview?.transportChangeRequests ?? []).length === 0 ? (
+                  <div className="text-xs text-slide-dim">Sem pedidos pendentes das escolas.</div>
+                ) : (
+                  <div className="space-y-2.5">
+                    {overview?.transportChangeRequests.map((req) => (
+                      <div key={req.id} className="rounded-xl bg-slide-bg border border-white/10 p-3.5 flex flex-wrap justify-between items-center gap-3 text-xs">
+                        <div>
+                          <div className="font-bold text-white">
+                            {req.schoolName} · {req.title}
+                          </div>
+                          <div className="text-slide-dim text-[11px] mt-0.5">{req.details}</div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {req.status === "pending" ? (
+                            <>
+                              <button
+                                onClick={() => void handleReviewTransportRequest(req.id, "approved")}
+                                className="px-2.5 py-1 rounded-lg bg-slide-ok text-white font-bold cursor-pointer"
+                              >
+                                Aprovar
+                              </button>
+                              <button
+                                onClick={() => void handleReviewTransportRequest(req.id, "rejected")}
+                                className="px-2.5 py-1 rounded-lg bg-slide-surface border border-white/10 font-semibold cursor-pointer"
+                              >
+                                Recusar
+                              </button>
+                            </>
+                          ) : (
+                            <StatusBadge s={req.status === "approved" ? "Ativo" : "Recusado"} />
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </Card>
+            </div>
+          )}
+
+          {/* ================= FROTA & PROPRIETÁRIOS ================= */}
+          {tab === "Frota" && (
+            <div className="space-y-6">
+              <Card
+                title={`Proprietários de Frota & Parceiros Independentes (${overview?.vehicleOwners.length ?? 0})`}
+                action={
+                  <button
+                    onClick={() => setOwnerModalOpen(true)}
+                    className="rounded-xl bg-slide-accent text-white px-3.5 py-1.5 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Registar Proprietário Parceiro</span>
+                  </button>
                 }
               >
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between text-xs text-slide-dim pb-1">
-                    <span>
-                      Corredor: <strong className="text-slide-paper">{LUANDA_ROUTES[selectedRouteId]?.name}</strong>
-                    </span>
-                    <span className="font-mono text-slide-accent font-bold">
-                      {LUANDA_ROUTES[selectedRouteId]?.driver} · {LUANDA_ROUTES[selectedRouteId]?.busPlate}
-                    </span>
-                  </div>
-                  <LuandaMap progress={progress} routeId={selectedRouteId} className="h-[360px] rounded-2xl shadow-inner" />
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                  {(overview?.vehicleOwners ?? []).map((owner) => (
+                    <div key={owner.id} className="rounded-xl bg-slide-bg border border-white/10 p-3.5 space-y-1">
+                      <div className="flex justify-between items-center">
+                        <span className="font-bold text-white">{owner.fullName}</span>
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                            owner.ownerType === "mobuss_owned"
+                              ? "bg-white/15 text-white"
+                              : "bg-amber-500/20 text-amber-300"
+                          }`}
+                        >
+                          {owner.ownerType === "mobuss_owned" ? "Frota MôBuss" : "Parceiro Independente"}
+                        </span>
+                      </div>
+                      <div className="text-slide-dim font-mono text-[11px]">{owner.phone}</div>
+                      <div className="text-[11px] text-slide-ok font-semibold">
+                        Acerto: {formatAOA(owner.monthlySettlementAoa)} ({owner.settlementModel})
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </Card>
 
-              <Card title="Feed Operacional em Tempo Real">
-                <div className="space-y-2.5 max-h-[390px] overflow-y-auto pr-1">
-                  {[
-                    { t: "07:52", text: "🚨 Autocarro 7 reportou avaria mecânica na Rota B.", type: "alert" },
-                    { t: "07:48", text: "🛡️ Maria Domingos desembarcou com PIN 4821 validado.", type: "ok" },
-                    { t: "07:42", text: "💳 Multicaixa Express validado: 45 000 Kz (AGT Cert).", type: "mcx" },
-                    { t: "07:38", text: "🔔 Alerta de proximidade 500m enviado a 12 pais no Kinaxixi.", type: "info" },
-                    { t: "07:30", text: "🚌 Autocarro 12 iniciou a Rota A (Mutamba → Morro Bento).", type: "info" },
-                    { t: "07:15", text: "📋 Pauta de presenças diária gerada para Colégio São Paulo.", type: "info" },
-                    { t: "06:45", text: "🧑‍✈️ Check-in de 5 motoristas registado no posto central.", type: "ok" },
-                  ].map((x, idx) => (
-                    <div
-                      key={idx}
-                      className="rounded-xl bg-slide-bg/90 p-3 text-xs border border-slide-line/10 flex items-start gap-2.5"
+              <Table head={["Autocarro", "Matrícula", "Proprietário", "Corredor", "Motorista Alocado", "DNVT / Seguro", "Atribuir Motorista"]}>
+                {vehiclesList.map((v) => (
+                  <tr key={v.id} className="hover:bg-white/[0.03] text-xs">
+                    <td className="p-3.5 font-bold text-white">Autocarro {v.fleetNumber}</td>
+                    <td className="p-3.5 font-mono font-bold">{v.plate}</td>
+                    <td className="p-3.5 text-slide-dim">{v.ownerName}</td>
+                    <td className="p-3.5 text-slide-accent font-semibold">{v.routeCode}</td>
+                    <td className="p-3.5 font-medium">{v.driverName}</td>
+                    <td className="p-3.5 text-[11px] text-slide-dim">
+                      <div>DNVT: {v.dnvtStatus}</div>
+                      <div>{v.insuranceProvider}</div>
+                    </td>
+                    <td className="p-3.5">
+                      <div className="flex items-center gap-1.5">
+                        <select
+                          value={assignDriverSelection[v.id] ?? v.assignedDriverId ?? ""}
+                          onChange={(e) =>
+                            setAssignDriverSelection((prev) => ({
+                              ...prev,
+                              [v.id]: Number(e.target.value),
+                            }))
+                          }
+                          className="rounded-lg bg-slide-bg border border-white/10 px-2 py-1 text-xs text-white"
+                        >
+                          <option value="">Selecionar...</option>
+                          {(overview?.drivers ?? []).map((d) => (
+                            <option key={d.id} value={d.id}>
+                              {d.fullName}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          onClick={() => void handleAssignDriver(v.id, v.assignedDriverId ?? 0)}
+                          className="px-2.5 py-1 rounded-lg bg-slide-accent text-white font-bold cursor-pointer"
+                        >
+                          Alocar
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </Table>
+            </div>
+          )}
+
+          {/* ================= MOTORISTAS ================= */}
+          {tab === "Motoristas" && (
+            <div className="space-y-6">
+              <div className="flex justify-between items-center text-xs text-slide-dim">
+                <span>Motoristas verificados com habilitação profissional Categoria D</span>
+                <button
+                  onClick={() => handleDownloadReport("Relatório de folha de salários (Motoristas)")}
+                  className="bg-slide-surface border border-white/10 text-slide-paper px-3.5 py-2 rounded-xl font-semibold cursor-pointer inline-flex items-center gap-2"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Exportar Folha Salarial CSV</span>
+                </button>
+              </div>
+
+              <Table head={["Motorista", "Contacto", "Categoria", "Avaliação", "Viagens Mês", "Salário Bruto", "Estado"]}>
+                {driversList.map((d) => (
+                  <tr key={d.id} className="hover:bg-white/[0.03] text-xs">
+                    <td className="p-3.5 font-bold text-white">{d.fullName}</td>
+                    <td className="p-3.5 font-mono text-slide-dim">{d.phone}</td>
+                    <td className="p-3.5 text-slide-dim">{d.licenseCategory}</td>
+                    <td className="p-3.5 text-amber-400 font-bold tabular-nums">★ {d.rating}</td>
+                    <td className="p-3.5 font-mono tabular-nums">{d.tripsCompletedMonth}</td>
+                    <td className="p-3.5 font-mono font-bold">{formatAOA(d.monthlySalaryAoa)}</td>
+                    <td className="p-3.5">
+                      <StatusBadge s={d.status === "on_duty" ? "Em serviço" : d.status === "available" ? "Disponível" : "De folga"} />
+                    </td>
+                  </tr>
+                ))}
+              </Table>
+            </div>
+          )}
+
+          {/* ================= ALUNOS (MASKED PINS) ================= */}
+          {tab === "Alunos" && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap justify-between items-center gap-3 text-xs text-slide-dim">
+                <span>Diretório nominal de educandos. Códigos PIN são armazenados em hash e nunca são exibidos em texto simples.</span>
+                <button
+                  onClick={() => handleDownloadReport("Pauta Diária de Presenças e Desembarque")}
+                  className="bg-slide-surface border border-white/10 text-slide-paper px-3.5 py-2 rounded-xl font-semibold cursor-pointer inline-flex items-center gap-2"
+                >
+                  <ClipboardList className="w-3.5 h-3.5" />
+                  <span>Exportar Pauta Segura CSV</span>
+                </button>
+              </div>
+
+              <Table head={["Aluno(a)", "Escola", "Rota / Paragem", "Encarregado", "PIN", "Estado", "Ações"]}>
+                {studentsList.map((s) => (
+                  <tr key={s.id} className="hover:bg-white/[0.03] text-xs">
+                    <td className="p-3.5 font-bold text-white">
+                      <div>{s.fullName}</div>
+                      <div className="text-[10px] text-slide-dim font-normal">
+                        {s.enrollmentStatus === "active"
+                          ? "Matrícula Ativa"
+                          : s.enrollmentStatus === "pending_approval"
+                          ? "Aprovação Pendente"
+                          : "Suspenso"}
+                      </div>
+                    </td>
+                    <td className="p-3.5 text-slide-dim">{s.schoolName}</td>
+                    <td className="p-3.5">
+                      <span className="text-slide-accent font-bold">{s.routeCode}</span> · {s.stopName}
+                    </td>
+                    <td className="p-3.5">
+                      <div>{s.guardianName}</div>
+                      <div className="text-[11px] font-mono text-slide-dim">{s.guardianPhone}</div>
+                    </td>
+                    <td className="p-3.5 font-mono font-bold text-slide-dim">{s.maskedPin}</td>
+                    <td className="p-3.5">
+                      <StatusBadge s={s.currentJourneyState} />
+                    </td>
+                    <td className="p-3.5">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => void handleResetStudentPin(s.id, s.fullName)}
+                          className="px-2.5 py-1 rounded-lg bg-slide-bg border border-white/15 hover:bg-white/10 font-semibold cursor-pointer inline-flex items-center gap-1"
+                        >
+                          <KeyRound className="w-3 h-3 text-slide-accent" />
+                          <span>PIN</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setEditingStudent({
+                              id: s.id,
+                              fullName: s.fullName,
+                              schoolId: s.schoolId,
+                              routeCode: s.routeCode,
+                              stopName: s.stopName,
+                              shift: (s.shift === "morning" || s.shift === "afternoon" ? s.shift : "both"),
+                              enrollmentStatus: (
+                                s.enrollmentStatus === "pending_approval" || s.enrollmentStatus === "suspended"
+                                  ? s.enrollmentStatus
+                                  : "active"
+                              ),
+                              pinPolicy: (
+                                s.pinPolicy === "boarding" || s.pinPolicy === "dropoff" ? s.pinPolicy : "both"
+                              ),
+                              guardianName: s.guardianName === "—" ? "" : s.guardianName,
+                              guardianPhone: s.guardianPhone === "—" ? "" : s.guardianPhone,
+                            })
+                          }
+                          className="px-2.5 py-1 rounded-lg bg-slide-bg border border-white/15 hover:bg-white/10 font-semibold cursor-pointer inline-flex items-center gap-1"
+                        >
+                          <Pencil className="w-3 h-3 text-emerald-300" />
+                          <span>Editar</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setDeleteStudentTarget({
+                              id: s.id,
+                              fullName: s.fullName,
+                              schoolName: s.schoolName,
+                            })
+                          }
+                          className="px-2.5 py-1 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 hover:bg-red-500/20 font-semibold cursor-pointer inline-flex items-center gap-1"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          <span>Remover</span>
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </Table>
+            </div>
+          )}
+
+          {/* ================= FINANÇAS ================= */}
+          {tab === "Finanças" && (
+            <div className="space-y-6">
+              <Card
+                title="Gestão de Tarifário (Persistência PostgreSQL)"
+                action={
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPricingDraft(DEFAULT_PRICING)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slide-bg border border-white/10 text-xs font-semibold text-slide-dim cursor-pointer"
                     >
-                      <span className="font-mono font-bold text-[10px] text-slide-dim shrink-0 mt-0.5">{x.t}</span>
-                      <span className="leading-relaxed text-slide-paper">{x.text}</span>
+                      <RotateCcw className="w-3 h-3" />
+                      <span>Repor</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleSavePricing()}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-slide-accent text-white text-xs font-bold cursor-pointer"
+                    >
+                      <Save className="w-3.5 h-3.5" />
+                      <span>Guardar no PostgreSQL</span>
+                    </button>
+                  </div>
+                }
+              >
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+                  <div className="rounded-xl bg-slide-bg p-4 border border-white/10 space-y-2">
+                    <div className="text-slide-dim font-semibold flex justify-between">
+                      <span>Mensalidade por Aluno (AOA)</span>
+                      <SlidersHorizontal className="w-3.5 h-3.5 text-slide-accent" />
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setPricingDraft((p) => ({ ...p, studentMonthlyFee: Math.max(5000, p.studentMonthlyFee - 1000) }))}
+                        className="w-9 h-9 rounded-lg bg-slide-surface border border-white/10 grid place-items-center cursor-pointer"
+                      >
+                        <Minus className="w-3.5 h-3.5" />
+                      </button>
+                      <input
+                        type="number"
+                        value={pricingDraft.studentMonthlyFee}
+                        onChange={(e) => setPricingDraft((p) => ({ ...p, studentMonthlyFee: Number(e.target.value) || 0 }))}
+                        className="w-full rounded-lg bg-slide-surface px-3 py-2 text-sm font-mono font-bold text-center border border-white/10 outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setPricingDraft((p) => ({ ...p, studentMonthlyFee: p.studentMonthlyFee + 1000 }))}
+                        className="w-9 h-9 rounded-lg bg-slide-surface border border-white/10 grid place-items-center cursor-pointer"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl bg-slide-bg p-4 border border-white/10 space-y-2">
+                    <div className="text-slide-dim font-semibold">Autocarro Contratual (Turno Único / Duplo)</div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <input
+                        type="number"
+                        value={pricingDraft.schoolBusSingleShift}
+                        onChange={(e) => setPricingDraft((p) => ({ ...p, schoolBusSingleShift: Number(e.target.value) || 0 }))}
+                        className="rounded-lg bg-slide-surface px-2.5 py-2 font-mono font-bold border border-white/10 outline-none"
+                      />
+                      <input
+                        type="number"
+                        value={pricingDraft.schoolBusDoubleShift}
+                        onChange={(e) => setPricingDraft((p) => ({ ...p, schoolBusDoubleShift: Number(e.target.value) || 0 }))}
+                        className="rounded-lg bg-slide-surface px-2.5 py-2 font-mono font-bold border border-white/10 outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl bg-slide-bg p-4 border border-white/10 space-y-2">
+                    <div className="text-slide-dim font-semibold">Emitente, Entidade MCX & IVA</div>
+                    <div className="grid grid-cols-[1fr_92px_68px] gap-2">
+                      <input
+                        value={pricingDraft.companyNif}
+                        onChange={(e) => setPricingDraft((p) => ({ ...p, companyNif: e.target.value }))}
+                        placeholder="NIF"
+                        className="rounded-lg bg-slide-surface px-2.5 py-2 font-mono border border-white/10 outline-none"
+                      />
+                      <input
+                        value={pricingDraft.multicaixaEntityCode ?? "00845"}
+                        onChange={(e) => setPricingDraft((p) => ({ ...p, multicaixaEntityCode: e.target.value }))}
+                        placeholder="Entidade MCX"
+                        title="Entidade Multicaixa Express"
+                        className="rounded-lg bg-slide-surface px-2.5 py-2 font-mono font-bold text-orange-300 border border-white/10 outline-none"
+                      />
+                      <select
+                        value={pricingDraft.ivaPercent}
+                        onChange={(e) => setPricingDraft((p) => ({ ...p, ivaPercent: Number(e.target.value) }))}
+                        className="rounded-lg bg-slide-surface px-2 py-2 font-mono border border-white/10 outline-none"
+                      >
+                        <option value={14}>14%</option>
+                        <option value={5}>5%</option>
+                        <option value={0}>0%</option>
+                      </select>
+                    </div>
+                    <div className="text-[11px] text-amber-300 font-semibold">
+                      Entidade MCX configurável ({pricingDraft.multicaixaEntityCode || "00845"}) · Estado AGT: Homologação
+                    </div>
+                  </div>
+                </div>
+              </Card>
+
+              <Table head={["Documento", "Educando / Encarregado", "Valor", "Entidade / PIN MCX", "Estado", "Ações"]}>
+                {invoicesList.map((inv) => (
+                  <tr key={inv.id} className="hover:bg-white/[0.03] text-xs">
+                    <td className="p-3.5 font-mono font-bold text-white">{inv.invoiceNumber}</td>
+                    <td className="p-3.5">
+                      <div className="font-semibold">{inv.studentName}</div>
+                      <div className="text-[11px] text-slide-dim">{inv.guardianName}</div>
+                    </td>
+                    <td className="p-3.5 font-mono font-bold text-slide-accent tabular-nums">{formatAOA(inv.amountAoa)}</td>
+                    <td className="p-3.5 font-mono text-[11px] text-slide-dim">
+                      {inv.paymentReferencePin ? (
+                        <div>
+                          <span className="text-orange-300 font-bold">Ent. {inv.paymentEntity || "00845"}</span>
+                          {" · "}
+                          <span className="text-white font-bold">{inv.paymentReferencePin}</span>
+                        </div>
+                      ) : (
+                        inv.providerReference || "A aguardar provedor"
+                      )}
+                    </td>
+                    <td className="p-3.5">
+                      <span
+                        className={`px-2 py-0.5 rounded text-[11px] font-bold ${
+                          inv.status === "confirmed" ? "bg-emerald-500/20 text-emerald-300" : "bg-amber-500/20 text-amber-300"
+                        }`}
+                      >
+                        {inv.status === "confirmed" ? "Conciliado (Homologação)" : "Aguardando Provedor"}
+                      </span>
+                    </td>
+                    <td className="p-3.5 space-x-1.5 whitespace-nowrap">
+                      {inv.status !== "confirmed" && (
+                        <button
+                          onClick={() => {
+                            setReconcileInvoiceId(inv.id);
+                            setReconcileRef(
+                              inv.providerReference ||
+                                (inv.paymentReferencePin
+                                  ? `MCX-${inv.paymentEntity || "00845"}-${inv.paymentReferencePin.replace(/\s+/g, "")}`
+                                  : "")
+                            );
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-slide-ok text-white font-bold cursor-pointer"
+                        >
+                          Conciliar
+                        </button>
+                      )}
+                      <button
+                        onClick={() => {
+                          exportAgtReceipt(
+                            {
+                              invoice: inv.invoiceNumber,
+                              student: inv.studentName,
+                              guardian: inv.guardianName,
+                              phone: inv.phone,
+                              amountValue: inv.amountAoa,
+                              date: new Date(inv.issuedAt).toLocaleDateString("pt-AO"),
+                              emisRef: inv.providerReference ?? "PENDENTE",
+                              agtCert: inv.fiscalStatus,
+                              status: inv.status === "confirmed" ? "Validado" : "Pendente",
+                            },
+                            pricingDraft
+                          );
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-slide-bg border border-white/10 font-semibold cursor-pointer inline-flex items-center gap-1"
+                      >
+                        <Download className="w-3 h-3" />
+                        <span>Nota Provisória</span>
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </Table>
+            </div>
+          )}
+
+          {/* ================= DNVT ================= */}
+          {tab === "DNVT" && (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <Stat
+                  label="Inspeções DNVT Válidas"
+                  value={`${(overview?.vehicles ?? []).filter((v) => v.dnvtStatus === "valid").length}/${overview?.vehicles.length ?? 0}`}
+                  sub="Controlo por viatura"
+                />
+                <Stat
+                  label="Viagens c/ Inspeção Vazio"
+                  value={(overview?.trips ?? []).filter((t) => t.emptyBusSweepVerified).length + syncState.sweepLogs.length}
+                  sub="Verificação anti-esquecimento"
+                  accent
+                />
+                <Stat label="Proprietários Verificados" value={overview?.vehicleOwners.length ?? 0} sub="Frota própria & parceiros" />
+              </div>
+
+              <Table head={["Autocarro", "Matrícula", "Estado DNVT", "Validade DNVT", "Seguradora", "Estado Seguro"]}>
+                {(overview?.vehicles ?? []).map((v) => (
+                  <tr key={v.id} className="hover:bg-white/[0.03] text-xs">
+                    <td className="p-3.5 font-bold text-white">Autocarro {v.fleetNumber}</td>
+                    <td className="p-3.5 font-mono">{v.plate}</td>
+                    <td className="p-3.5"><StatusBadge s={v.dnvtStatus === "valid" ? "Válido" : "A renovar"} /></td>
+                    <td className="p-3.5 font-mono text-slide-dim">{v.dnvtExpiresAt}</td>
+                    <td className="p-3.5 text-slide-dim">{v.insuranceProvider}</td>
+                    <td className="p-3.5"><StatusBadge s={v.insuranceStatus === "active" ? "Válido" : "Pendente"} /></td>
+                  </tr>
+                ))}
+              </Table>
+            </div>
+          )}
+
+          {/* ================= EMERGÊNCIAS ================= */}
+          {tab === "Emergências" && (
+            <div className="space-y-4">
+              {(overview?.incidents ?? []).map((inc) => (
+                <div
+                  key={inc.id}
+                  className={`rounded-2xl p-5 flex flex-wrap justify-between items-center gap-4 border ${
+                    inc.status === "resolved" || inc.status === "closed"
+                      ? "bg-slide-surface border-white/10"
+                      : "bg-slide-accent/15 border-slide-accent/50"
+                  }`}
+                >
+                  <div className="space-y-1 flex-1 min-w-[240px]">
+                    <div className="font-bold text-sm text-white flex items-center gap-2">
+                      <HeartPulse className="w-4 h-4 text-slide-accent" />
+                      <span>{inc.category}</span>
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slide-bg border border-white/10">
+                        {inc.severity}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slide-paper">{inc.description}</p>
+                    <div className="text-[11px] text-slide-dim">
+                      Reportado por {inc.reporterName} ({inc.reporterRole}) · Estado: <strong>{inc.status}</strong>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {inc.status !== "resolved" && inc.status !== "closed" ? (
+                      <>
+                        <button
+                          onClick={() => void handleIncidentStatus(inc.id, "in_progress")}
+                          className="px-3 py-1.5 rounded-xl bg-slide-surface border border-white/15 text-xs font-semibold cursor-pointer"
+                        >
+                          Em Tratamento
+                        </button>
+                        <button
+                          onClick={() => void handleIncidentStatus(inc.id, "resolved")}
+                          className="px-3 py-1.5 rounded-xl bg-slide-ok text-white text-xs font-bold cursor-pointer"
+                        >
+                          Resolver
+                        </button>
+                      </>
+                    ) : (
+                      <StatusBadge s="Resolvida" />
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* ================= RELATÓRIOS ================= */}
+          {tab === "Relatórios" && (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {[
+                { title: "Relatório mensal de viagens", desc: "Viagens separadas por turno com estado de inspeção.", format: "CSV", Icon: Bus },
+                { title: "Livro de Faturas Multicaixa Express (Homologação)", desc: "Registo contabilístico com referências e estado fiscal.", format: "CSV", Icon: FileSpreadsheet },
+                { title: "Pauta Diária de Presenças e Desembarque", desc: "Lista nominal mascarada sem exposição de códigos PIN.", format: "CSV", Icon: ClipboardList },
+                { title: "Relatório de folha de salários (Motoristas)", desc: "Equipa verificada e processamento salarial.", format: "CSV", Icon: UserCheck },
+                { title: "Relatório de Emergências e Ocorrências SOS MôBuss", desc: "Auditoria de incidentes e resoluções.", format: "TXT", Icon: Radio },
+              ].map((r) => {
+                const ReportIcon = r.Icon;
+                return (
+                  <button
+                    key={r.title}
+                    onClick={() => handleDownloadReport(r.title)}
+                    className="rounded-2xl bg-slide-surface p-5 text-left hover:border-slide-accent/60 transition cursor-pointer border border-white/10 flex flex-col justify-between"
+                  >
+                    <div>
+                      <div className="w-10 h-10 rounded-xl bg-slide-bg border border-white/10 text-slide-accent grid place-items-center mb-3">
+                        <ReportIcon className="w-5 h-5" />
+                      </div>
+                      <div className="text-sm font-bold text-white">{r.title}</div>
+                      <div className="text-xs text-slide-dim mt-2">{r.desc}</div>
+                    </div>
+                    <div className="text-xs mt-4 pt-3 border-t border-white/10 flex justify-between text-slide-accent font-bold">
+                      <span>Descarregar</span>
+                      <span className="font-mono">{r.format}</span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {/* ================= SISTEMA & ACESSOS (NEW TAB 10) ================= */}
+          {tab === "Sistema & Acessos" && (
+            <div className="space-y-6">
+              <Card
+                title={`Utilizadores & Perfis RBAC (${overview?.staffUsers.length ?? 0})`}
+                action={
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <span className="text-[11px] text-slide-dim flex items-center gap-1.5">
+                      <Users className="w-3.5 h-3.5 text-slide-accent" />
+                      <span>{capabilities.canManageRbac ? "Super Admin: Edição Ativa" : "Registo Exclusivo Admin"}</span>
+                    </span>
+                    {(capabilities.canManageRbac ||
+                      dbUser?.primaryRole === "operations_manager" ||
+                      dbUser?.primaryRole === "school_account_manager") && (
+                      <button
+                        type="button"
+                        onClick={() => setUserModalOpen(true)}
+                        className="rounded-xl bg-slide-accent text-white px-3.5 py-1.5 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Criar Nova Conta</span>
+                      </button>
+                    )}
+                  </div>
+                }
+              >
+                <div className="mb-3 rounded-xl bg-slide-bg border border-white/10 p-3 text-[11px] text-slide-dim">
+                  Registo fechado: utilizadores que descarregam a app não podem criar contas próprias. Apenas contas criadas aqui têm acesso autenticado ao sistema.
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="text-[11px] text-slide-dim border-b border-white/10">
+                        <th className="p-3">Utilizador</th>
+                        <th className="p-3">Email</th>
+                        <th className="p-3">Perfil RBAC</th>
+                        <th className="p-3">Escola (se school_admin)</th>
+                        <th className="p-3">Estado</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/10">
+                      {(overview?.staffUsers ?? []).map((u) => (
+                        <tr key={u.id}>
+                          <td className="p-3 font-bold text-white">
+                            <div>{u.fullName}</div>
+                            {u.username && (
+                              <div className="text-[10px] font-mono text-slide-accent font-semibold">@{u.username}</div>
+                            )}
+                          </td>
+                          <td className="p-3 font-mono text-slide-dim">{u.email}</td>
+                          <td className="p-3">
+                            <select
+                              disabled={!capabilities.canManageRbac}
+                              value={u.primaryRole}
+                              onChange={(e) => void handleUpdateUserRole(u.id, e.target.value as MoBussRole, u.schoolId)}
+                              className="rounded-lg bg-slide-bg border border-white/10 px-2.5 py-1.5 text-xs text-white disabled:opacity-50"
+                            >
+                              {(Object.keys(ROLE_LABELS) as MoBussRole[]).map((roleKey) => (
+                                <option key={roleKey} value={roleKey}>
+                                  {ROLE_LABELS[roleKey]}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="p-3">
+                            {u.primaryRole === "school_admin" ? (
+                              <select
+                                disabled={!capabilities.canManageRbac}
+                                value={u.schoolId ?? ""}
+                                onChange={(e) =>
+                                  void handleUpdateUserRole(u.id, u.primaryRole, Number(e.target.value) || null)
+                                }
+                                className="rounded-lg bg-slide-bg border border-white/10 px-2.5 py-1.5 text-xs text-white"
+                              >
+                                <option value="">Selecionar escola...</option>
+                                {(overview?.schools ?? []).map((sc) => (
+                                  <option key={sc.id} value={sc.id}>
+                                    {sc.name}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : (
+                              <span className="text-slide-dim">—</span>
+                            )}
+                          </td>
+                          <td className="p-3">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                  !u.active
+                                    ? "bg-red-500/20 text-red-300"
+                                    : u.uid.startsWith("pending:")
+                                    ? "bg-amber-500/20 text-amber-300"
+                                    : "bg-emerald-500/20 text-emerald-300"
+                                }`}
+                              >
+                                {!u.active ? "Desativada" : u.uid.startsWith("pending:") ? "Aguarda 1º Login Google" : "Ativa"}
+                              </span>
+                              {capabilities.canManageRbac && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setEditingUser({
+                                      id: u.id,
+                                      fullName: u.fullName,
+                                      username: u.username ?? "",
+                                      email: u.email,
+                                      phone: u.phone ?? "",
+                                      primaryRole: u.primaryRole,
+                                      schoolId: u.schoolId ?? "",
+                                      active: u.active,
+                                    })
+                                  }
+                                  className="px-2 py-0.5 rounded bg-slide-bg border border-white/15 text-[10px] font-semibold cursor-pointer hover:bg-white/10 inline-flex items-center gap-1"
+                                >
+                                  <Pencil className="w-2.5 h-2.5 text-emerald-300" />
+                                  <span>Editar</span>
+                                </button>
+                              )}
+                              {capabilities.canManageRbac && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setPasswordTargetUser({ id: u.id, label: u.username || u.email });
+                                    setResetPasswordInput("");
+                                  }}
+                                  className="px-2 py-0.5 rounded bg-slide-bg border border-white/15 text-[10px] font-semibold cursor-pointer hover:bg-white/10"
+                                >
+                                  Senha
+                                </button>
+                              )}
+                              {capabilities.canManageRbac && dbUser?.id !== u.id && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleToggleUserStatus(u.id, !u.active)}
+                                    className="px-2 py-0.5 rounded bg-slide-bg border border-white/15 text-[10px] font-semibold cursor-pointer hover:bg-white/10"
+                                  >
+                                    {u.active ? "Desativar" : "Reativar"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setDeleteUserTarget({
+                                        id: u.id,
+                                        label: u.fullName,
+                                        email: u.username ? `@${u.username} (${u.email})` : u.email,
+                                      })
+                                    }
+                                    className="px-2 py-0.5 rounded bg-red-500/10 border border-red-500/30 text-red-300 text-[10px] font-semibold cursor-pointer hover:bg-red-500/20 inline-flex items-center gap-1"
+                                  >
+                                    <Trash2 className="w-2.5 h-2.5" />
+                                    <span>Eliminar</span>
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+
+              <Card title="Trilha de Auditoria Imutável (PostgreSQL)">
+                <div className="space-y-2 max-h-[380px] overflow-y-auto">
+                  {(overview?.auditLogs ?? []).map((log) => (
+                    <div key={log.id} className="rounded-xl bg-slide-bg border border-white/10 p-3 text-xs flex flex-wrap justify-between gap-2">
+                      <div>
+                        <span className="font-mono text-slide-accent font-bold mr-2">{log.action}</span>
+                        <span className="text-white">{log.summary}</span>
+                        <div className="text-[11px] text-slide-dim mt-0.5">
+                          Ator: {log.actorEmail || "sistema"} ({log.actorRole}) · Alvo: {log.targetEntity} #{log.targetId ?? "—"}
+                        </div>
+                      </div>
+                      <span className="font-mono text-[11px] text-slide-dim">
+                        {new Date(log.createdAt).toLocaleString("pt-AO")}
+                      </span>
                     </div>
                   ))}
                 </div>
               </Card>
             </div>
-
-            {/* Quick Financial & Punctuality Stats */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              <Card title="Pontualidade dos Autocarros">
-                <div className="flex items-baseline gap-2">
-                  <div className="text-4xl font-black text-slide-ok">94.8%</div>
-                  <div className="text-xs text-slide-dim">média semanal</div>
-                </div>
-                <p className="text-xs text-slide-dim mt-2">
-                  Rotas adaptadas dinamicamente para contornar estrangulamentos na Maianga e Via Expressa.
-                </p>
-                <div className="mt-3 h-2 rounded-full bg-slide-bg overflow-hidden">
-                  <div className="h-full bg-slide-ok rounded-full" style={{ width: "94.8%" }} />
-                </div>
-              </Card>
-
-              <Card title="Volume Mensal Multicaixa Express">
-                <div className="flex items-baseline gap-2">
-                  <div className="text-4xl font-black text-slide-accent">3 450 000 Kz</div>
-                  <div className="text-xs text-slide-dim">faturado</div>
-                </div>
-                <p className="text-xs text-slide-dim mt-2">
-                  100% dos pagamentos de mensalidades integrados com faturas certificadas pela AGT.
-                </p>
-                <button
-                  onClick={() => setTab("Finanças")}
-                  className="mt-3 text-xs text-slide-accent font-bold underline cursor-pointer"
-                >
-                  Ver Faturas e Transações MCX →
-                </button>
-              </Card>
-
-              <Card title="Conformidade & Vistoria DNVT">
-                <div className="flex items-baseline gap-2">
-                  <div className="text-4xl font-black text-slide-paper">6/6</div>
-                  <div className="text-xs text-slide-ok font-bold">Autocarros Licenciados</div>
-                </div>
-                <p className="text-xs text-slide-dim mt-2">
-                  Inspeções técnicas em dia junto da Direção Nacional de Viação e Trânsito de Angola.
-                </p>
-                <button
-                  onClick={() => setTab("DNVT")}
-                  className="mt-3 text-xs text-slide-accent font-bold underline cursor-pointer"
-                >
-                  Ver Documentos dos Veículos →
-                </button>
-              </Card>
-            </div>
-          </div>
-        )}
-
-        {/* ================= TAB 2: CONTRATOS ESCOLARES ================= */}
-        {tab === "Contratos" && (
-          <div className="space-y-4">
-            <div className="flex flex-wrap justify-between items-center gap-3">
-              <div>
-                <span className="text-xs text-slide-dim">
-                  Gestão formal de acordos de transporte escolar com colégios privados e instituições em Luanda
-                </span>
-              </div>
-              <button
-                onClick={() => setContractModalOpen(true)}
-                className="rounded-xl bg-slide-accent text-slide-accent-ink px-4 py-2 font-black text-xs cursor-pointer shadow hover:opacity-90 transition flex items-center gap-2"
-              >
-                <span>➕</span>
-                <span>Registar Novo Contrato Escolar</span>
-              </button>
-            </div>
-
-            <Table head={["Instituição de Ensino", "Localização", "Autocarros", "Alunos", "Valor Mensal", "Contacto / Secretaria", "Estado", "Ações"]}>
-              {filteredContracts.map((c, i) => (
-                <tr key={c.id} className="border-t border-slide-bg hover:bg-slide-surface/50 transition text-xs">
-                  <td className="p-4 font-bold text-slide-paper">{c.client}</td>
-                  <td className="p-4 text-slide-dim">{c.location}</td>
-                  <td className="p-4 font-semibold">{c.buses} autocarros</td>
-                  <td className="p-4 font-semibold">{c.students} alunos</td>
-                  <td className="p-4 font-mono font-bold text-slide-accent">{c.value}</td>
-                  <td className="p-4">
-                    <div className="font-medium text-slide-paper">{c.contact}</div>
-                    <div className="text-[10px] text-slide-dim font-mono">{c.phone}</div>
-                  </td>
-                  <td className="p-4">
-                    <Badge s={c.status} />
-                  </td>
-                  <td className="p-4 text-right space-x-1.5 whitespace-nowrap">
-                    {c.status === "Pedido" && (
-                      <>
-                        <button
-                          onClick={() => setContractStatus(i, "Ativo")}
-                          className="rounded-lg bg-slide-ok text-slide-accent-ink px-2.5 py-1 text-xs font-bold cursor-pointer hover:opacity-90"
-                        >
-                          Aprovar
-                        </button>
-                        <button
-                          onClick={() => setContractStatus(i, "Recusado")}
-                          className="rounded-lg bg-slide-bg px-2.5 py-1 text-xs font-bold cursor-pointer hover:opacity-80"
-                        >
-                          Recusar
-                        </button>
-                      </>
-                    )}
-                    {c.status === "Ativo" && (
-                      <button
-                        onClick={() =>
-                          handleDownloadReport("Relatório mensal de viagens")
-                        }
-                        className="rounded-lg bg-slide-surface px-2.5 py-1 text-xs font-medium text-slide-paper hover:bg-slide-line/40 transition cursor-pointer"
-                      >
-                        📄 Proposta
-                      </button>
-                    )}
-                    {c.status === "Recusado" && (
-                      <button
-                        onClick={() => setContractStatus(i, "Pedido")}
-                        className="text-xs text-slide-accent underline cursor-pointer"
-                      >
-                        Reabrir
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </Table>
-          </div>
-        )}
-
-        {/* ================= TAB 3: GESTÃO DE FROTA ================= */}
-        {tab === "Frota" && (
-          <div className="space-y-4">
-            <div className="flex justify-between items-center text-xs text-slide-dim">
-              <span>Frota oficial MôBuss autorizada pela Direção Nacional de Viação e Trânsito (DNVT)</span>
-              <span>Total: {buses.length} autocarros</span>
-            </div>
-
-            <Table head={["Nº Frota", "Matrícula Luanda", "Motorista Alocado", "Corredor / Rota", "Lotação", "Combustível", "Inspeção DNVT", "Seguro", "Estado"]}>
-              {filteredBuses.map((b) => (
-                <tr key={b.id} className="border-t border-slide-bg hover:bg-slide-surface/50 transition text-xs">
-                  <td className="p-4 font-black text-slide-paper">🚌 Autocarro {b.id}</td>
-                  <td className="p-4 font-mono font-bold text-slide-paper">{b.plate}</td>
-                  <td className="p-4 font-semibold">{b.driver}</td>
-                  <td className="p-4 text-slide-dim">{b.routeName}</td>
-                  <td className="p-4 font-mono">
-                    {b.students}/{b.capacity} lugares
-                  </td>
-                  <td className="p-4 font-mono text-xs">{b.fuel}</td>
-                  <td className="p-4 text-[11px] font-semibold text-slide-dim">{b.inspection}</td>
-                  <td className="p-4 text-[11px] font-semibold text-slide-dim">{b.insurance}</td>
-                  <td className="p-4">
-                    <Badge s={b.status} />
-                  </td>
-                </tr>
-              ))}
-            </Table>
-          </div>
-        )}
-
-        {/* ================= TAB 4: MOTORISTAS ================= */}
-        {tab === "Motoristas" && (
-          <div className="space-y-4">
-            <div className="flex justify-between items-center text-xs text-slide-dim">
-              <span>Equipa de motoristas profissionais certificados com carta de pesados (Categoria D)</span>
-              <button
-                onClick={() => handleDownloadReport("Relatório de folha de salários (Motoristas)")}
-                className="bg-slide-surface text-slide-paper px-3 py-1.5 rounded-xl font-bold cursor-pointer hover:bg-slide-surface/80 transition"
-              >
-                📥 Exportar Folha de Salários CSV
-              </button>
-            </div>
-
-            <Table head={["Motorista", "Contacto", "Habilitação", "Avaliação Pais", "Autocarro", "Viagens Mês", "Salário Bruto", "Check-In", "Estado"]}>
-              {drivers.map((d) => (
-                <tr key={d.name} className="border-t border-slide-bg hover:bg-slide-surface/50 transition text-xs">
-                  <td className="p-4 font-bold text-slide-paper">{d.name}</td>
-                  <td className="p-4 font-mono text-[11px] text-slide-dim">{d.phone}</td>
-                  <td className="p-4 text-[11px] font-semibold text-slide-dim">{d.category}</td>
-                  <td className="p-4 text-slide-accent font-black">★ {d.rating}</td>
-                  <td className="p-4 font-medium">{d.bus}</td>
-                  <td className="p-4 font-mono">{d.trips}</td>
-                  <td className="p-4 font-mono font-bold text-slide-paper">{d.salary}</td>
-                  <td className="p-4 font-mono text-[11px] text-slide-ok font-bold">{d.checkInTime}</td>
-                  <td className="p-4">
-                    <Badge s={d.status} />
-                  </td>
-                </tr>
-              ))}
-            </Table>
-          </div>
-        )}
-
-        {/* ================= TAB 5: ALUNOS & PRESCENÇAS ================= */}
-        {tab === "Alunos" && (
-          <div className="space-y-4">
-            <div className="flex justify-between items-center text-xs text-slide-dim">
-              <span>Diretório de estudantes com validação por PIN de 4 dígitos na entrega</span>
-              <button
-                onClick={() => handleDownloadReport("Pauta Diária de Presenças e Desembarque")}
-                className="bg-slide-surface text-slide-paper px-3 py-1.5 rounded-xl font-bold cursor-pointer hover:bg-slide-surface/80 transition"
-              >
-                📋 Exportar Pauta Diária CSV
-              </button>
-            </div>
-
-            <Table head={["Aluno(a)", "Instituição Escolar", "Corredor", "Paragem de Embarque", "Encarregado(a)", "Contacto", "PIN de Segurança", "Estado Hoje"]}>
-              {filteredStudents.map((s, idx) => (
-                <tr key={idx} className="border-t border-slide-bg hover:bg-slide-surface/50 transition text-xs">
-                  <td className="p-4 font-bold text-slide-paper">{s.name}</td>
-                  <td className="p-4 text-slide-dim">{s.school}</td>
-                  <td className="p-4 font-semibold text-slide-accent">{s.corridor}</td>
-                  <td className="p-4 text-slide-dim">{s.stop}</td>
-                  <td className="p-4 font-medium text-slide-paper">{s.guardian}</td>
-                  <td className="p-4 font-mono text-[11px] text-slide-dim">{s.phone}</td>
-                  <td className="p-4">
-                    <span className="font-mono font-black text-xs px-2.5 py-1 rounded-lg bg-slide-bg border border-slide-line/20 text-slide-paper">
-                      {s.pin}
-                    </span>
-                  </td>
-                  <td className="p-4">
-                    <Badge s={s.status} />
-                  </td>
-                </tr>
-              ))}
-            </Table>
-          </div>
-        )}
-
-        {/* ================= TAB 6: FINANÇAS & MULTICAIXA EXPRESS ================= */}
-        {tab === "Finanças" && (
-          <div className="space-y-6">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <Stat label="Total Faturado no Mês" value="3 450 000 Kz" sub="Mensalidades escolares" accent />
-              <Stat label="Pagamentos via Multicaixa Express" value="98.2%" sub="Liquidação instantânea EMIS" />
-              <Stat label="Faturas Emitidas com AGT" value={`${payments.length} emitidas`} sub="Certificação fiscal regular" />
-            </div>
-
-            <div className="flex justify-between items-center text-xs text-slide-dim">
-              <span>Livro de Faturação e Transações Multicaixa Express (MCX) certificadas</span>
-              <button
-                onClick={() => handleDownloadReport("Livro de Faturas Multicaixa Express (AGT)")}
-                className="bg-slide-surface text-slide-paper px-3 py-1.5 rounded-xl font-bold cursor-pointer hover:bg-slide-surface/80 transition"
-              >
-                📥 Exportar Faturas AGT (CSV)
-              </button>
-            </div>
-
-            <Table head={["Nº Factura", "Educando", "Encarregado", "Telemóvel MCX", "Valor", "Data & Hora", "Referência EMIS", "Certificação AGT", "Estado"]}>
-              {filteredPayments.map((p) => (
-                <tr key={p.id} className="border-t border-slide-bg hover:bg-slide-surface/50 transition text-xs">
-                  <td className="p-4 font-mono font-bold text-slide-paper">{p.invoice}</td>
-                  <td className="p-4 font-semibold">{p.student}</td>
-                  <td className="p-4 text-slide-dim">{p.guardian}</td>
-                  <td className="p-4 font-mono text-[11px]">{p.phone}</td>
-                  <td className="p-4 font-mono font-bold text-slide-accent">{p.amount}</td>
-                  <td className="p-4 text-slide-dim">
-                    {p.date} · {p.time}
-                  </td>
-                  <td className="p-4 font-mono text-[11px] text-slide-dim">{p.emisRef}</td>
-                  <td className="p-4 font-mono text-[10px] text-slide-ok font-semibold">{p.agtCert}</td>
-                  <td className="p-4">
-                    <Badge s={p.status} />
-                  </td>
-                </tr>
-              ))}
-            </Table>
-          </div>
-        )}
-
-        {/* ================= TAB 7: CONFORMIDADE LEGAL & DNVT ================= */}
-        {tab === "DNVT" && (
-          <div className="space-y-6">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <Stat label="Inspeções DNVT Ativas" value="5/6 Válidas" sub="1 autocarro em renovação" />
-              <Stat label="Seguros Obrigatórios ENSA / Fidelidade" value="6/6 Ativos" sub="Cobertura total de passageiros" accent />
-              <Stat label="Licenças de Transporte GPL" value="100% Regular" sub="Governo Provincial de Luanda" />
-            </div>
-
-            <div className="rounded-2xl bg-slide-surface p-5 border border-slide-line/10 space-y-4">
-              <h3 className="font-bold text-sm text-slide-paper">Documentação Obrigatória por Viatura (Regulamento de Luanda)</h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-                {[
-                  {
-                    doc: "Alvará de Transporte Coletivo Escolar",
-                    issuer: "Governo Provincial de Luanda (GPL)",
-                    validity: "Outubro 2027",
-                    status: "Válido",
-                  },
-                  {
-                    doc: "Ficha de Inspeção Periódica Obrigatória",
-                    issuer: "Direção Nacional de Viação e Trânsito (DNVT)",
-                    validity: "Março 2027",
-                    status: "Válido",
-                  },
-                  {
-                    doc: "Apólice de Seguro de Responsabilidade Civil de Ocupantes",
-                    issuer: "ENSA Seguros de Angola / Fidelidade",
-                    validity: "Dezembro 2026",
-                    status: "Válido",
-                  },
-                  {
-                    doc: "Certificado de Primeiros Socorros e Extintores",
-                    issuer: "Serviço de Proteção Civil e Bombeiros de Luanda",
-                    validity: "15 dias restantes",
-                    status: "A renovar",
-                  },
-                ].map((item, idx) => (
-                  <div key={idx} className="p-4 rounded-xl bg-slide-bg border border-slide-surface flex justify-between items-center">
-                    <div>
-                      <div className="font-bold text-slide-paper text-sm">{item.doc}</div>
-                      <div className="text-[11px] text-slide-dim mt-0.5">Emissor: {item.issuer}</div>
-                      <div className="text-[11px] text-slide-dim font-mono mt-1">Validade: {item.validity}</div>
-                    </div>
-                    <Badge s={item.status} />
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ================= TAB 8: EMERGÊNCIAS & SOS ================= */}
-        {tab === "Emergências" && (
-          <div className="space-y-4">
-            <div className="flex justify-between items-center text-xs text-slide-dim">
-              <span>Gestão central de chamadas de emergência, avarias mecânicas e incidentes de trânsito em Luanda</span>
-              <span className="font-bold text-destructive">
-                {openAlerts > 0 ? `🚨 ${openAlerts} ocorrência(s) em aberto` : "✅ Sem ocorrências pendentes"}
-              </span>
-            </div>
-
-            <div className="space-y-3">
-              {alerts.map((a) => (
-                <div
-                  key={a.id}
-                  className={`rounded-2xl p-5 flex flex-wrap justify-between items-center gap-4 transition shadow-sm ${
-                    a.open ? "bg-destructive/15 border-2 border-destructive" : "bg-slide-surface border border-slide-line/10"
-                  }`}
-                >
-                  <div className="space-y-1">
-                    <div className="font-extrabold text-base text-slide-paper flex items-center gap-2">
-                      <span>{a.type}</span>
-                      <span className="text-xs px-2 py-0.5 rounded-md bg-slide-bg text-slide-dim font-mono">
-                        Autocarro {a.bus}
-                      </span>
-                    </div>
-                    <div className="text-xs text-slide-dim">
-                      {a.time} · {a.route} · Reportado por <strong>{a.from}</strong>
-                    </div>
-                    {a.notes && (
-                      <div className="text-xs text-slide-paper/80 bg-slide-bg/60 p-2 rounded-lg mt-2 font-mono">
-                        {a.notes}
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    {a.open ? (
-                      <>
-                        <button
-                          onClick={() => {
-                            setSelectedIncident(a);
-                            setDispatchModalOpen(true);
-                          }}
-                          className="rounded-xl bg-slide-accent text-slide-accent-ink px-4 py-2 font-bold text-xs cursor-pointer shadow hover:opacity-90"
-                        >
-                          🚌 Despachar Suplente
-                        </button>
-
-                        <button
-                          onClick={() => {
-                            setAlerts((all) =>
-                              all.map((x) => (x.id === a.id ? { ...x, open: false } : x))
-                            );
-                            showToast("Ocorrência marcada como resolvida.");
-                          }}
-                          className="rounded-xl bg-slide-ok text-slide-accent-ink px-4 py-2 font-bold text-xs cursor-pointer hover:opacity-90"
-                        >
-                          Marcar Resolvida ✓
-                        </button>
-                      </>
-                    ) : (
-                      <Badge s="Resolvida" />
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {/* Emergency Hotline Assistance */}
-            <div className="p-4 rounded-2xl bg-slide-surface border border-slide-line/10 mt-6">
-              <div className="text-xs font-bold text-slide-dim uppercase tracking-wider mb-2">
-                Linhas Diretas Oficiais de Intervenção Rápida (Luanda):
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-                <div className="p-3 rounded-xl bg-slide-bg flex justify-between items-center">
-                  <div>
-                    <div className="font-black text-sm text-slide-paper">113</div>
-                    <div className="text-[11px] text-slide-dim">Polícia Nacional de Angola</div>
-                  </div>
-                  <a href="tel:113" className="px-3 py-1 bg-slide-accent text-slide-accent-ink font-bold rounded-lg text-xs">
-                    Ligar
-                  </a>
-                </div>
-                <div className="p-3 rounded-xl bg-slide-bg flex justify-between items-center">
-                  <div>
-                    <div className="font-black text-sm text-slide-paper">115</div>
-                    <div className="text-[11px] text-slide-dim">Serviço de Bombeiros</div>
-                  </div>
-                  <a href="tel:115" className="px-3 py-1 bg-slide-accent text-slide-accent-ink font-bold rounded-lg text-xs">
-                    Ligar
-                  </a>
-                </div>
-                <div className="p-3 rounded-xl bg-slide-bg flex justify-between items-center">
-                  <div>
-                    <div className="font-black text-sm text-slide-paper">112</div>
-                    <div className="text-[11px] text-slide-dim">INEM / Emergência Médica</div>
-                  </div>
-                  <a href="tel:112" className="px-3 py-1 bg-slide-accent text-slide-accent-ink font-bold rounded-lg text-xs">
-                    Ligar
-                  </a>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ================= TAB 9: RELATÓRIOS & EXPORTAÇÃO ================= */}
-        {tab === "Relatórios" && (
-          <div className="space-y-6">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <Stat label="Receita Mensal Contratada" value="5 400 000 Kz" sub="Total de 6 instituições" accent />
-              <Stat label="Km Percorridos no Mês" value="12 450 km" sub="Média de 412 alunos/dia" />
-              <Stat label="Folha de Pagamentos Mensal" value="1 145 000 Kz" sub="6 motoristas profissionais" />
-            </div>
-
-            <div className="text-xs text-slide-dim">
-              Clique em qualquer relatório abaixo para descarregar o ficheiro em formato CSV ou TXT compatível com AGT e Excel:
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {[
-                {
-                  title: "Relatório mensal de viagens",
-                  desc: "Histórico completo de viagens, quilómetros e pontualidade por autocarro em Luanda.",
-                  format: "CSV",
-                },
-                {
-                  title: "Livro de Faturas Multicaixa Express (AGT)",
-                  desc: "Registo contabilístico de mensalidades com referência EMIS e validação tributária AGT.",
-                  format: "CSV",
-                },
-                {
-                  title: "Pauta Diária de Presenças e Desembarque",
-                  desc: "Lista nominal de alunos, horários de recolha e validação de PIN de segurança.",
-                  format: "CSV",
-                },
-                {
-                  title: "Relatório de folha de salários (Motoristas)",
-                  desc: "Processamento salarial, bónus de pontualidade e retenção na fonte da segurança social.",
-                  format: "CSV",
-                },
-                {
-                  title: "Relatório de Emergências e Ocorrências SOS MôBuss",
-                  desc: "Auditoria de segurança, avarias, tempos de resposta e resolução técnica.",
-                  format: "TXT",
-                },
-              ].map((r) => (
-                <button
-                  key={r.title}
-                  onClick={() => handleDownloadReport(r.title)}
-                  className="rounded-2xl bg-slide-surface p-5 text-left font-semibold hover:ring-2 ring-slide-accent transition cursor-pointer border border-slide-line/10 flex flex-col justify-between"
-                >
-                  <div>
-                    <div className="text-2xl mb-2">📑</div>
-                    <div className="text-sm font-black text-slide-paper">{r.title}</div>
-                    <div className="text-xs text-slide-dim mt-2 leading-relaxed">{r.desc}</div>
-                  </div>
-                  <div className="text-xs mt-4 pt-3 border-t border-slide-line/20 flex items-center justify-between text-slide-accent font-bold">
-                    <span>Descarregar Relatório</span>
-                    <span className="font-mono bg-slide-bg px-2 py-0.5 rounded text-[10px]">{r.format} ↓</span>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+          )}
+        </motion.div>
       </main>
 
-      {/* ================= MODAL: NOVO CONTRATO ESCOLAR ================= */}
+      {/* Modal: Novo Contrato */}
       {contractModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="w-full max-w-lg rounded-3xl bg-slide-paper-ink text-slide-paper p-6 shadow-2xl border border-slide-surface">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <span className="text-[10px] uppercase font-bold text-slide-accent tracking-wider">
-                  NOVA PARCERIA ESCOLAR
-                </span>
-                <h3 className="text-lg font-black text-slide-paper" style={{ fontFamily: "var(--font-display)" }}>
-                  Registar Contrato de Transporte
-                </h3>
-              </div>
-              <button
-                onClick={() => setContractModalOpen(false)}
-                className="w-8 h-8 rounded-full bg-slide-surface text-slide-dim hover:text-slide-paper grid place-items-center text-sm font-bold cursor-pointer"
-              >
-                ✕
+          <div className="w-full max-w-lg rounded-2xl bg-slide-paper-ink text-slide-paper p-6 border border-white/15 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-black">Registar Novo Contrato Escolar</h3>
+              <button onClick={() => setContractModalOpen(false)} className="p-1.5 rounded-full bg-slide-surface cursor-pointer">
+                <X className="w-4 h-4" />
               </button>
             </div>
-
-            <form
-              className="space-y-3.5 text-xs"
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (!newSchool.trim()) return;
-                setContracts([
-                  {
-                    id: `cnt-${Date.now()}`,
-                    client: newSchool.trim(),
-                    location: newLocation.trim(),
-                    buses: newBuses,
-                    students: newBuses * 25,
-                    value: newValue,
-                    status: "Ativo",
-                    contact: newContact.trim() || "Secretaria Escolar",
-                    phone: newPhone.trim(),
-                  },
-                  ...contracts,
-                ]);
-                setContractModalOpen(false);
-                setNewSchool("");
-                showToast(`Novo contrato para "${newSchool}" registado com sucesso!`);
-              }}
-            >
-              <div>
-                <label className="block mb-1 font-bold text-slide-dim">Nome da Escola / Instituição Parceira:</label>
+            <form onSubmit={handleCreateContract} className="space-y-3 text-xs">
+              <input
+                required
+                value={newSchool}
+                onChange={(e) => setNewSchool(e.target.value)}
+                placeholder="Nome da Escola Parceira"
+                className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+              />
+              <div className="grid grid-cols-2 gap-3">
                 <input
                   required
-                  value={newSchool}
-                  onChange={(e) => setNewSchool(e.target.value)}
-                  placeholder="Ex: Colégio Sagrada Esperança (Kilamba)"
-                  className="w-full rounded-xl bg-slide-surface px-3 py-2.5 text-slide-paper outline-none border border-slide-line/20 font-semibold"
+                  value={newLocation}
+                  onChange={(e) => setNewLocation(e.target.value)}
+                  placeholder="Município"
+                  className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                />
+                <select
+                  value={newPayerModel}
+                  onChange={(e) => setNewPayerModel(e.target.value as "school" | "parent" | "mixed")}
+                  className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                >
+                  <option value="school">Escola Paga</option>
+                  <option value="parent">Encarregados Pagam</option>
+                  <option value="mixed">Misto (Escola + Pais)</option>
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <input
+                  type="number"
+                  min={1}
+                  value={newBuses}
+                  onChange={(e) => {
+                    const b = Number(e.target.value) || 1;
+                    setNewBuses(b);
+                    setNewMonthlyAoa(b * pricingDraft.schoolBusDoubleShift);
+                  }}
+                  placeholder="Autocarros"
+                  className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
+                />
+                <input
+                  type="number"
+                  min={50000}
+                  value={newMonthlyAoa}
+                  onChange={(e) => setNewMonthlyAoa(Number(e.target.value) || 0)}
+                  placeholder="Valor Mensal (Kz)"
+                  className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <input
+                  value={newContact}
+                  onChange={(e) => setNewContact(e.target.value)}
+                  placeholder="Contacto / Diretor"
+                  className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                />
+                <input
+                  value={newPhone}
+                  onChange={(e) => setNewPhone(e.target.value)}
+                  placeholder="Telefone"
+                  className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
+                />
+              </div>
+              <button type="submit" className="w-full rounded-xl bg-slide-accent text-white py-3 font-bold cursor-pointer">
+                Guardar Contrato em PostgreSQL
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Novo Proprietário Parceiro */}
+      {ownerModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-md rounded-2xl bg-slide-paper-ink text-slide-paper p-6 border border-white/15 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-black">Novo Proprietário Parceiro</h3>
+              <button onClick={() => setOwnerModalOpen(false)} className="p-1.5 rounded-full bg-slide-surface cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleCreateVehicleOwner} className="space-y-3 text-xs">
+              <input
+                required
+                value={ownerName}
+                onChange={(e) => setOwnerName(e.target.value)}
+                placeholder="Nome completo / Sociedade parceira"
+                className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+              />
+              <input
+                required
+                value={ownerPhone}
+                onChange={(e) => setOwnerPhone(e.target.value)}
+                placeholder="Telefone (+244 9xx xxx xxx)"
+                className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
+              />
+              <input
+                value={ownerNif}
+                onChange={(e) => setOwnerNif(e.target.value)}
+                placeholder="NIF (Opcional)"
+                className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
+              />
+              <div className="grid grid-cols-2 gap-3">
+                <select
+                  value={ownerSettlementModel}
+                  onChange={(e) => setOwnerSettlementModel(e.target.value as "monthly_fixed" | "per_trip")}
+                  className="rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white outline-none"
+                >
+                  <option value="monthly_fixed">Mensalidade Fixa</option>
+                  <option value="per_trip">Por Viagem</option>
+                </select>
+                <input
+                  type="number"
+                  value={ownerMonthlyAoa}
+                  onChange={(e) => setOwnerMonthlyAoa(Number(e.target.value) || 0)}
+                  className="rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white font-mono outline-none"
+                />
+              </div>
+              <button type="submit" className="w-full rounded-xl bg-slide-accent text-white py-3 font-bold cursor-pointer">
+                Registar Proprietário Parceiro
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Reconcile Invoice */}
+      {reconcileInvoiceId && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <form
+            onSubmit={handleReconcileInvoice}
+            className="w-full max-w-sm rounded-2xl bg-slide-paper-ink border border-white/15 p-6 space-y-4 text-xs"
+          >
+            <h3 className="text-base font-black text-white">Conciliar Pagamento Manualmente</h3>
+            <p className="text-slide-dim">Introduza a referência confirmada pelo banco / EMIS para liquidar o documento:</p>
+            <input
+              required
+              value={reconcileRef}
+              onChange={(e) => setReconcileRef(e.target.value)}
+              placeholder="Ex: MCX-849201-EMIS"
+              className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
+            />
+            <div className="flex gap-2">
+              <button type="submit" className="flex-1 rounded-xl bg-slide-ok text-white py-2.5 font-bold cursor-pointer">
+                Confirmar Conciliação
+              </button>
+              <button
+                type="button"
+                onClick={() => setReconcileInvoiceId(null)}
+                className="rounded-xl bg-slide-surface px-4 py-2.5 font-semibold cursor-pointer"
+              >
+                Cancelar
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Modal: Criar Nova Conta (Exclusivo Admin) */}
+      {userModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-lg rounded-2xl bg-slide-paper-ink text-slide-paper p-6 border border-white/15 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-black">Criar Conta Oficial MôBuss</h3>
+              <button onClick={() => setUserModalOpen(false)} className="p-1.5 rounded-full bg-slide-surface cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-[11px] text-slide-dim">
+              Indique uma palavra-passe inicial para acesso por E-mail/Palavra-passe ou deixe em branco para autorizar o acesso via Google com este e-mail.
+            </p>
+            <form onSubmit={handleCreateUserAccount} className="space-y-3 text-xs">
+              <input
+                required
+                value={newUserFullName}
+                onChange={(e) => setNewUserFullName(e.target.value)}
+                placeholder="Nome completo (ex: Ana Domingos)"
+                className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+              />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <input
+                  required
+                  type="text"
+                  autoCapitalize="none"
+                  value={newUserEmail}
+                  onChange={(e) => setNewUserEmail(e.target.value)}
+                  placeholder="Utilizador ou e-mail oficial"
+                  className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                />
+                <input
+                  value={newUserPhone}
+                  onChange={(e) => setNewUserPhone(e.target.value)}
+                  placeholder="Telefone (+244 9xx xxx xxx)"
+                  className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
+                />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <select
+                  value={newUserRole}
+                  onChange={(e) => setNewUserRole(e.target.value as MoBussRole)}
+                  className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                >
+                  {(Object.keys(ROLE_LABELS) as MoBussRole[])
+                    .filter((roleKey) =>
+                      capabilities.canManageRbac
+                        ? true
+                        : ["parent_guardian", "driver", "school_admin", "vehicle_owner"].includes(roleKey)
+                    )
+                    .map((roleKey) => (
+                      <option key={roleKey} value={roleKey}>
+                        {ROLE_LABELS[roleKey]}
+                      </option>
+                    ))}
+                </select>
+                <input
+                  type="password"
+                  minLength={6}
+                  value={newUserPassword}
+                  onChange={(e) => setNewUserPassword(e.target.value)}
+                  placeholder="Palavra-passe inicial (opcional p/ Google)"
+                  className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              {newUserRole === "school_admin" && (
+                <select
+                  value={newUserSchoolId}
+                  onChange={(e) => setNewUserSchoolId(e.target.value ? Number(e.target.value) : "")}
+                  className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                >
+                  <option value="">Selecionar escola associada...</option>
+                  {(overview?.schools ?? []).map((sc) => (
+                    <option key={sc.id} value={sc.id}>
+                      {sc.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              {newUserRole === "parent_guardian" && (
+                <select
+                  value={newUserStudentId}
+                  onChange={(e) => setNewUserStudentId(e.target.value ? Number(e.target.value) : "")}
+                  className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                >
+                  <option value="">Vincular a educando existente (opcional)...</option>
+                  {(overview?.students ?? []).map((st) => (
+                    <option key={st.id} value={st.id}>
+                      {st.fullName} · {st.schoolName} ({st.routeCode})
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              <button
+                type="submit"
+                disabled={creatingUser}
+                className="w-full rounded-xl bg-slide-ok text-white py-3 font-bold cursor-pointer disabled:opacity-50"
+              >
+                {creatingUser ? "A criar conta no servidor..." : "Criar Conta Autorizada"}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Definir / Atualizar Palavra-passe (Super Admin) */}
+      {passwordTargetUser && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <form
+            onSubmit={handleResetUserPassword}
+            className="w-full max-w-sm rounded-2xl bg-slide-paper-ink text-slide-paper p-6 border border-white/15 space-y-4 text-xs"
+          >
+            <div className="flex justify-between items-center">
+              <h3 className="text-base font-black">Definir Palavra-passe</h3>
+              <button
+                type="button"
+                onClick={() => setPasswordTargetUser(null)}
+                className="p-1.5 rounded-full bg-slide-surface cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-slide-dim">
+              Introduza a nova palavra-passe para <strong className="text-white">{passwordTargetUser.label}</strong> (mínimo 6 caracteres):
+            </p>
+            <input
+              required
+              type="password"
+              minLength={6}
+              value={resetPasswordInput}
+              onChange={(e) => setResetPasswordInput(e.target.value)}
+              placeholder="Nova palavra-passe"
+              className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+            />
+            <div className="flex gap-2">
+              <button
+                type="submit"
+                disabled={savingPassword}
+                className="flex-1 rounded-xl bg-slide-ok text-white py-2.5 font-bold cursor-pointer disabled:opacity-50"
+              >
+                {savingPassword ? "A guardar..." : "Guardar Palavra-passe"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setPasswordTargetUser(null)}
+                className="rounded-xl bg-slide-surface px-4 py-2.5 font-semibold cursor-pointer"
+              >
+                Cancelar
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Modal: Editar Conta de Utilizador (Super Admin) */}
+      {editingUser && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-lg rounded-2xl bg-slide-paper-ink text-slide-paper p-6 border border-white/15 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-black">Editar Conta de Utilizador</h3>
+              <button type="button" onClick={() => setEditingUser(null)} className="p-1.5 rounded-full bg-slide-surface cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveUserEdit} className="space-y-3 text-xs">
+              <div>
+                <label className="text-[11px] text-slide-dim font-semibold block mb-1">Nome Completo</label>
+                <input
+                  required
+                  value={editingUser.fullName}
+                  onChange={(e) => setEditingUser({ ...editingUser, fullName: e.target.value })}
+                  className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block mb-1 font-bold text-slide-dim">Município / Bairro (Luanda):</label>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Utilizador (opcional)</label>
+                  <input
+                    autoCapitalize="none"
+                    value={editingUser.username}
+                    onChange={(e) => setEditingUser({ ...editingUser, username: e.target.value })}
+                    placeholder="ex: admin"
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">E-mail</label>
                   <input
                     required
-                    value={newLocation}
-                    onChange={(e) => setNewLocation(e.target.value)}
-                    placeholder="Ex: Talatona / Maianga"
-                    className="w-full rounded-xl bg-slide-surface px-3 py-2.5 text-slide-paper outline-none border border-slide-line/20"
-                  />
-                </div>
-
-                <div>
-                  <label className="block mb-1 font-bold text-slide-dim">Número de Autocarros:</label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={20}
-                    value={newBuses}
-                    onChange={(e) => {
-                      const b = Number(e.target.value);
-                      setNewBuses(b);
-                      setNewValue(`${(b * 350000).toLocaleString("pt-AO")} Kz`);
-                    }}
-                    className="w-full rounded-xl bg-slide-surface px-3 py-2.5 text-slide-paper outline-none border border-slide-line/20 font-mono font-bold"
+                    type="email"
+                    autoCapitalize="none"
+                    value={editingUser.email}
+                    onChange={(e) => setEditingUser({ ...editingUser, email: e.target.value })}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
                   />
                 </div>
               </div>
-
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block mb-1 font-bold text-slide-dim">Pessoa de Contacto:</label>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Telefone</label>
                   <input
-                    value={newContact}
-                    onChange={(e) => setNewContact(e.target.value)}
-                    placeholder="Ex: Diretor Manuel"
-                    className="w-full rounded-xl bg-slide-surface px-3 py-2.5 text-slide-paper outline-none border border-slide-line/20"
-                  />
-                </div>
-
-                <div>
-                  <label className="block mb-1 font-bold text-slide-dim">Telefone:</label>
-                  <input
-                    value={newPhone}
-                    onChange={(e) => setNewPhone(e.target.value)}
+                    value={editingUser.phone}
+                    onChange={(e) => setEditingUser({ ...editingUser, phone: e.target.value })}
                     placeholder="+244 9xx xxx xxx"
-                    className="w-full rounded-xl bg-slide-surface px-3 py-2.5 text-slide-paper outline-none border border-slide-line/20 font-mono"
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
                   />
                 </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Perfil RBAC</label>
+                  <select
+                    value={editingUser.primaryRole}
+                    disabled={dbUser?.id === editingUser.id}
+                    onChange={(e) => setEditingUser({ ...editingUser, primaryRole: e.target.value as MoBussRole })}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none disabled:opacity-50"
+                  >
+                    {(Object.keys(ROLE_LABELS) as MoBussRole[]).map((roleKey) => (
+                      <option key={roleKey} value={roleKey}>
+                        {ROLE_LABELS[roleKey]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
-
-              <div>
-                <label className="block mb-1 font-bold text-slide-dim">Valor Mensal Previsto (AOA):</label>
+              {editingUser.primaryRole === "school_admin" && (
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Escola Associada</label>
+                  <select
+                    value={editingUser.schoolId}
+                    onChange={(e) => setEditingUser({ ...editingUser, schoolId: e.target.value ? Number(e.target.value) : "" })}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                  >
+                    <option value="">Selecionar escola...</option>
+                    {(overview?.schools ?? []).map((sc) => (
+                      <option key={sc.id} value={sc.id}>
+                        {sc.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <label className="flex items-center gap-2 text-xs text-slide-dim cursor-pointer">
                 <input
-                  value={newValue}
-                  onChange={(e) => setNewValue(e.target.value)}
-                  className="w-full rounded-xl bg-slide-surface px-3 py-2.5 text-slide-paper outline-none border border-slide-line/20 font-mono font-black text-slide-accent"
+                  type="checkbox"
+                  disabled={dbUser?.id === editingUser.id}
+                  checked={editingUser.active}
+                  onChange={(e) => setEditingUser({ ...editingUser, active: e.target.checked })}
                 />
-              </div>
-
-              <div className="flex gap-2 pt-3">
+                <span>Conta ativa com acesso permitido</span>
+              </label>
+              <div className="flex gap-2 pt-1">
                 <button
                   type="submit"
-                  className="flex-1 rounded-xl bg-slide-accent text-slide-accent-ink py-3 font-black cursor-pointer hover:opacity-90 shadow transition text-xs"
+                  disabled={savingUserEdit}
+                  className="flex-1 rounded-xl bg-slide-ok text-white py-2.5 font-bold cursor-pointer disabled:opacity-50"
                 >
-                  Concluir e Registar Contrato
+                  {savingUserEdit ? "A guardar..." : "Guardar Alterações"}
                 </button>
                 <button
                   type="button"
-                  onClick={() => setContractModalOpen(false)}
-                  className="rounded-xl bg-slide-surface px-4 py-3 font-bold cursor-pointer hover:bg-slide-surface/80 text-xs"
+                  onClick={() => setEditingUser(null)}
+                  className="rounded-xl bg-slide-surface px-4 py-2.5 font-semibold cursor-pointer"
                 >
                   Cancelar
                 </button>
@@ -1464,57 +2596,208 @@ export function AdminView({ onNavigate }: AdminViewProps) {
         </div>
       )}
 
-      {/* ================= MODAL: DESPACHAR AUTOCARRO SUPLENTE ================= */}
-      {dispatchModalOpen && selectedIncident && (
+      {/* Modal: Confirmar Eliminação de Conta */}
+      {deleteUserTarget && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="w-full max-w-md rounded-3xl bg-slide-paper-ink text-slide-paper p-6 shadow-2xl border border-slide-surface">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-base font-black flex items-center gap-2">
-                <span>🚌</span>
-                <span>Despachar Viatura de Substituição</span>
-              </h3>
-              <button
-                onClick={() => setDispatchModalOpen(false)}
-                className="w-7 h-7 rounded-full bg-slide-surface text-slide-dim hover:text-slide-paper grid place-items-center text-xs font-bold cursor-pointer"
-              >
-                ✕
-              </button>
+          <div className="w-full max-w-sm rounded-2xl bg-slide-paper-ink text-slide-paper p-6 border border-red-500/35 space-y-4 text-xs">
+            <div className="flex items-center gap-2 text-red-400 font-bold">
+              <AlertTriangle className="w-4 h-4" />
+              <span>Eliminar Conta Permanentemente</span>
             </div>
-
-            <p className="text-xs text-slide-dim mb-4 leading-relaxed">
-              Ocorreu um incidente no <strong>Autocarro {selectedIncident.bus}</strong> ({selectedIncident.type}). O
-              Autocarro Reserva 3 está pronto na Central do Morro Bento com a motorista Rosa Tchissola.
+            <p className="text-slide-dim leading-relaxed">
+              Tem a certeza que pretende eliminar a conta de <strong className="text-white">{deleteUserTarget.label}</strong> ({deleteUserTarget.email})? O acesso será revogado de imediato.
             </p>
-
-            <div className="p-3 rounded-2xl bg-slide-bg border border-slide-surface mb-4 space-y-1.5 text-xs">
-              <div className="flex justify-between">
-                <span className="text-slide-dim">Viatura Suplente:</span>
-                <strong className="text-slide-paper">Autocarro 3 (LD-18-77-FE)</strong>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slide-dim">Motorista Designada:</span>
-                <strong className="text-slide-paper">Rosa Tchissola (★ 4.8)</strong>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slide-dim">Combustível:</span>
-                <strong className="text-slide-ok">95% (Pronto)</strong>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slide-dim">Tempo estimado de chegada:</span>
-                <strong className="text-slide-accent font-mono">12 minutos</strong>
-              </div>
-            </div>
-
             <div className="flex gap-2">
               <button
-                onClick={() => handleDispatchBackupBus(selectedIncident.id)}
-                className="flex-1 rounded-xl bg-slide-accent text-slide-accent-ink py-2.5 font-black text-xs cursor-pointer shadow hover:opacity-90"
+                type="button"
+                disabled={deletingUser}
+                onClick={() => void handleConfirmDeleteUser()}
+                className="flex-1 rounded-xl bg-red-600 hover:bg-red-500 text-white py-2.5 font-bold cursor-pointer disabled:opacity-50"
               >
-                Confirmar e Despachar
+                {deletingUser ? "A eliminar..." : "Confirmar Eliminação"}
               </button>
               <button
-                onClick={() => setDispatchModalOpen(false)}
-                className="rounded-xl bg-slide-surface px-4 py-2.5 text-xs font-bold cursor-pointer"
+                type="button"
+                onClick={() => setDeleteUserTarget(null)}
+                className="rounded-xl bg-slide-surface px-4 py-2.5 font-semibold cursor-pointer"
+              >
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Editar Detalhes do Educando */}
+      {editingStudent && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-lg rounded-2xl bg-slide-paper-ink text-slide-paper p-6 border border-white/15 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-black">Editar Dados do Educando</h3>
+              <button type="button" onClick={() => setEditingStudent(null)} className="p-1.5 rounded-full bg-slide-surface cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveStudentEdit} className="space-y-3 text-xs">
+              <div>
+                <label className="text-[11px] text-slide-dim font-semibold block mb-1">Nome Completo do Aluno</label>
+                <input
+                  required
+                  value={editingStudent.fullName}
+                  onChange={(e) => setEditingStudent({ ...editingStudent, fullName: e.target.value })}
+                  className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Escola</label>
+                  <select
+                    value={editingStudent.schoolId}
+                    onChange={(e) => setEditingStudent({ ...editingStudent, schoolId: Number(e.target.value) })}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                  >
+                    {(overview?.schools ?? []).map((sc) => (
+                      <option key={sc.id} value={sc.id}>
+                        {sc.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Corredor / Rota</label>
+                  <input
+                    required
+                    value={editingStudent.routeCode}
+                    onChange={(e) => setEditingStudent({ ...editingStudent, routeCode: e.target.value })}
+                    placeholder="ROTA-A"
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="text-[11px] text-slide-dim font-semibold block mb-1">Paragem de Recolha / Entrega</label>
+                <input
+                  required
+                  value={editingStudent.stopName}
+                  onChange={(e) => setEditingStudent({ ...editingStudent, stopName: e.target.value })}
+                  className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Turno</label>
+                  <select
+                    value={editingStudent.shift}
+                    onChange={(e) =>
+                      setEditingStudent({ ...editingStudent, shift: e.target.value as "morning" | "afternoon" | "both" })
+                    }
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white outline-none"
+                  >
+                    <option value="both">Manhã + Tarde</option>
+                    <option value="morning">Manhã</option>
+                    <option value="afternoon">Tarde</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Estado Matrícula</label>
+                  <select
+                    value={editingStudent.enrollmentStatus}
+                    onChange={(e) =>
+                      setEditingStudent({
+                        ...editingStudent,
+                        enrollmentStatus: e.target.value as "active" | "pending_approval" | "suspended",
+                      })
+                    }
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white outline-none"
+                  >
+                    <option value="active">Ativo</option>
+                    <option value="pending_approval">Pendente</option>
+                    <option value="suspended">Suspenso</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Política PIN</label>
+                  <select
+                    value={editingStudent.pinPolicy}
+                    onChange={(e) =>
+                      setEditingStudent({
+                        ...editingStudent,
+                        pinPolicy: e.target.value as "boarding" | "dropoff" | "both",
+                      })
+                    }
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white outline-none"
+                  >
+                    <option value="both">Embarque + Desembarque</option>
+                    <option value="boarding">Só Embarque</option>
+                    <option value="dropoff">Só Desembarque</option>
+                  </select>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Encarregado</label>
+                  <input
+                    value={editingStudent.guardianName}
+                    onChange={(e) => setEditingStudent({ ...editingStudent, guardianName: e.target.value })}
+                    placeholder="Nome do encarregado"
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Telefone Encarregado</label>
+                  <input
+                    value={editingStudent.guardianPhone}
+                    onChange={(e) => setEditingStudent({ ...editingStudent, guardianPhone: e.target.value })}
+                    placeholder="+244 9xx xxx xxx"
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
+                  />
+                </div>
+              </div>
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="submit"
+                  disabled={savingStudent}
+                  className="flex-1 rounded-xl bg-slide-ok text-white py-2.5 font-bold cursor-pointer disabled:opacity-50"
+                >
+                  {savingStudent ? "A guardar..." : "Guardar Dados do Aluno"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditingStudent(null)}
+                  className="rounded-xl bg-slide-surface px-4 py-2.5 font-semibold cursor-pointer"
+                >
+                  Cancelar
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Confirmar Remoção de Educando */}
+      {deleteStudentTarget && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-sm rounded-2xl bg-slide-paper-ink text-slide-paper p-6 border border-red-500/35 space-y-4 text-xs">
+            <div className="flex items-center gap-2 text-red-400 font-bold">
+              <AlertTriangle className="w-4 h-4" />
+              <span>Remover Educando da Pauta</span>
+            </div>
+            <p className="text-slide-dim leading-relaxed">
+              Tem a certeza que pretende remover <strong className="text-white">{deleteStudentTarget.fullName}</strong> ({deleteStudentTarget.schoolName})? Os registos de presença e credenciais PIN associados serão igualmente removidos.
+            </p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                disabled={deletingStudent}
+                onClick={() => void handleConfirmDeleteStudent()}
+                className="flex-1 rounded-xl bg-red-600 hover:bg-red-500 text-white py-2.5 font-bold cursor-pointer disabled:opacity-50"
+              >
+                {deletingStudent ? "A remover..." : "Confirmar Remoção"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setDeleteStudentTarget(null)}
+                className="rounded-xl bg-slide-surface px-4 py-2.5 font-semibold cursor-pointer"
               >
                 Cancelar
               </button>
@@ -1541,34 +2824,26 @@ function Stat({
 }) {
   return (
     <div
-      className={`rounded-2xl p-5 shadow-sm border transition ${
+      className={`rounded-2xl p-5 border transition ${
         danger
-          ? "bg-destructive text-destructive-foreground border-destructive/30"
+          ? "bg-slide-accent text-white border-slide-accent"
           : accent
-          ? "bg-slide-accent text-slide-accent-ink border-slide-accent/40"
-          : "bg-slide-surface text-slide-paper border-slide-line/10"
+          ? "bg-slide-paper-ink text-slide-paper border-slide-accent/50"
+          : "bg-slide-surface text-slide-paper border-white/10"
       }`}
     >
-      <div className="text-3xl font-black tracking-tight">{value}</div>
-      <div className="text-xs font-bold opacity-80 mt-1 uppercase tracking-wider">{label}</div>
-      {sub && <div className="text-[11px] opacity-70 mt-1 font-medium">{sub}</div>}
+      <div className="text-3xl font-black tracking-tight tabular-nums">{value}</div>
+      <div className="text-xs font-semibold opacity-80 mt-1">{label}</div>
+      {sub && <div className="text-[11px] opacity-65 mt-1">{sub}</div>}
     </div>
   );
 }
 
-function Card({
-  title,
-  action,
-  children,
-}: {
-  title: string;
-  action?: ReactNode;
-  children: ReactNode;
-}) {
+function Card({ title, action, children }: { title: string; action?: ReactNode; children: ReactNode }) {
   return (
-    <div className="rounded-2xl bg-slide-surface p-5 shadow-sm border border-slide-line/10">
-      <div className="flex justify-between items-center mb-4">
-        <div className="font-extrabold text-sm text-slide-paper" style={{ fontFamily: "var(--font-display)" }}>
+    <div className="rounded-2xl bg-slide-surface p-5 border border-white/10">
+      <div className="flex flex-wrap justify-between items-center gap-2 mb-4">
+        <div className="font-bold text-sm text-slide-paper" style={{ fontFamily: "var(--font-display)" }}>
           {title}
         </div>
         {action}
@@ -1580,41 +2855,34 @@ function Card({
 
 function Table({ head, children }: { head: string[]; children: ReactNode }) {
   return (
-    <div className="rounded-2xl bg-slide-surface overflow-x-auto shadow-sm border border-slide-line/10">
+    <div className="rounded-2xl bg-slide-surface overflow-x-auto border border-white/10">
       <table className="w-full text-left border-collapse">
         <thead>
-          <tr className="text-xs text-slide-dim border-b border-slide-bg uppercase tracking-wider">
+          <tr className="text-[11px] text-slide-dim border-b border-white/10 bg-white/[0.02]">
             {head.map((h) => (
-              <th key={h} className="p-4 font-extrabold">
+              <th key={h} className="p-3.5 font-bold whitespace-nowrap">
                 {h}
               </th>
             ))}
           </tr>
         </thead>
-        <tbody className="divide-y divide-slide-line/10">{children}</tbody>
+        <tbody className="divide-y divide-white/10">{children}</tbody>
       </table>
     </div>
   );
 }
 
-function Badge({ s }: { s: string }) {
-  const ok = ["Ativo", "Na estrada", "Em serviço", "A bordo", "Resolvida", "Disponível", "Validado", "Válido"].includes(s);
-  const warn = ["Pedido", "À espera", "Parado", "A renovar", "Pendente"].includes(s);
-  const info = ["Reserva", "Entregue"].includes(s);
-
+function StatusBadge({ s }: { s: string }) {
+  const ok = ["Ativo", "Em serviço", "Disponível", "Válido", "Resolvida", "boarded", "handed_over", "active"].includes(s);
+  const warn = ["Pedido", "Pendente", "A renovar", "expected", "pending"].includes(s);
   return (
     <span
-      className={`rounded-full px-2.5 py-0.5 text-[10px] font-black inline-block whitespace-nowrap ${
-        ok
-          ? "bg-slide-ok text-slide-accent-ink"
-          : warn
-          ? "bg-slide-accent text-slide-accent-ink"
-          : info
-          ? "bg-blue-600 text-white"
-          : "bg-slide-bg text-slide-dim"
+      className={`text-xs font-bold inline-flex items-center gap-1.5 whitespace-nowrap ${
+        ok ? "text-slide-ok" : warn ? "text-amber-400" : "text-slide-dim"
       }`}
     >
-      {s}
+      <span className={`w-1.5 h-1.5 rounded-full ${ok ? "bg-slide-ok" : warn ? "bg-amber-400" : "bg-slide-dim"}`} />
+      <span>{s}</span>
     </span>
   );
 }

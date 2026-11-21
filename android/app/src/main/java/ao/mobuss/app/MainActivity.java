@@ -1,4 +1,4 @@
-package ao.transigo.app;
+package ao.mobuss.app;
 
 import com.getcapacitor.BridgeActivity;
 

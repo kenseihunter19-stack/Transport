@@ -1,10 +1,23 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { motion } from "motion/react";
+import {
+  ArrowLeft,
+  Check,
+  CheckCircle2,
+  Download,
+  FileText,
+  ShieldCheck,
+} from "lucide-react";
 import { downloadDocument } from "@/lib/operations";
+import { apiUrl } from "@/lib/runtime-config";
+import { readMoBussSync, subscribeMoBussSync } from "@/lib/mobuss-sync";
 
 interface ContractRequestPageProps {
   onBackToApp?: () => void;
+  onOpenAdminContracts?: () => void;
   onSubmitContract?: (contract: {
     client: string;
+    location: string;
     buses: number;
     students: number;
     value: string;
@@ -13,41 +26,101 @@ interface ContractRequestPageProps {
   }) => void;
 }
 
-export function ContractRequestPage({ onBackToApp, onSubmitContract }: ContractRequestPageProps) {
+export function ContractRequestPage({
+  onBackToApp,
+  onOpenAdminContracts,
+  onSubmitContract,
+}: ContractRequestPageProps) {
   const [schoolName, setSchoolName] = useState("");
   const [district, setDistrict] = useState("Talatona");
   const [buses, setBuses] = useState(3);
   const [students, setStudents] = useState(75);
   const [shift, setShift] = useState<"morning" | "afternoon" | "both">("both");
+  const [payerPreference, setPayerPreference] = useState<"school" | "parent" | "mixed" | "configurable">("configurable");
   const [contactName, setContactName] = useState("");
   const [contactPhone, setContactPhone] = useState("+244 9");
   const [contactEmail, setContactEmail] = useState("");
   const [notes, setNotes] = useState("");
   const [submitted, setSubmitted] = useState(false);
+  const [referenceCode, setReferenceCode] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [pricing, setPricing] = useState(() => readMoBussSync().pricing);
 
-  // Price calculations in AOA
-  const pricePerBus = shift === "both" ? 350000 : 250000;
+  useEffect(() => {
+    setPricing(readMoBussSync().pricing);
+    const unsubscribe = subscribeMoBussSync((s) => setPricing(s.pricing));
+    fetch(apiUrl("/api/v1/pricing/public"))
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.pricing) {
+          setPricing((prev) => ({
+            ...prev,
+            studentMonthlyFee: data.pricing.studentMonthlyFeeAoa ?? prev.studentMonthlyFee,
+            schoolBusSingleShift: data.pricing.schoolBusSingleShiftAoa ?? prev.schoolBusSingleShift,
+            schoolBusDoubleShift: data.pricing.schoolBusDoubleShiftAoa ?? prev.schoolBusDoubleShift,
+            ivaPercent: data.pricing.ivaPercent ?? prev.ivaPercent,
+            companyName: data.pricing.companyName ?? prev.companyName,
+            companyNif: data.pricing.companyNif ?? prev.companyNif,
+          }));
+        }
+      })
+      .catch(() => null);
+    return unsubscribe;
+  }, []);
+
+  const pricePerBus = shift === "both" ? pricing.schoolBusDoubleShift : pricing.schoolBusSingleShift;
   const estimatedTotal = buses * pricePerBus;
   const pricePerStudent = Math.round(estimatedTotal / Math.max(1, students));
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!schoolName.trim()) return;
+    setSubmitting(true);
+    setSubmitError(null);
 
     const valueStr = `${estimatedTotal.toLocaleString("pt-AO")} Kz`;
 
-    if (onSubmitContract) {
-      onSubmitContract({
-        client: schoolName.trim(),
-        buses,
-        students,
-        value: valueStr,
-        contact: contactName.trim() || "Direcção Geral",
-        phone: contactPhone.trim(),
+    try {
+      const res = await fetch(apiUrl("/api/v1/school-contract-requests"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          schoolName: schoolName.trim(),
+          municipality: district,
+          shiftRegime: shift,
+          busesRequested: buses,
+          studentsEstimate: students,
+          payerPreference,
+          contactName: contactName.trim() || "Direcção Geral",
+          contactPhone: contactPhone.trim(),
+          contactEmail: contactEmail.trim() || null,
+          notes: notes.trim() || null,
+        }),
       });
-    }
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload.error || "Não foi possível submeter o pedido.");
+      }
+      setReferenceCode(payload.referenceCode ?? null);
 
-    setSubmitted(true);
+      if (onSubmitContract) {
+        onSubmitContract({
+          client: schoolName.trim(),
+          location: `${district}, Luanda`,
+          buses,
+          students,
+          value: valueStr,
+          contact: contactName.trim() || "Direcção Geral",
+          phone: contactPhone.trim(),
+        });
+      }
+      setSubmitted(true);
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : "Erro ao comunicar com o servidor.");
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   function handleDownloadQuote() {
@@ -58,102 +131,104 @@ export function ContractRequestPage({ onBackToApp, onSubmitContract }: ContractR
     });
 
     const quoteContent = `=====================================================
-PROPOSTA DE TRANSPORTE ESCOLAR INTEGRADO — MÔBUSS
+ESTIMATIVA INDICATIVA DE TRANSPORTE ESCOLAR — MÔBUSS
 MôBuss Angola Lda. · Luanda, Angola
 =====================================================
-Data da Proposta: ${today}
+Referência do Pedido: ${referenceCode || "MINUTA"}
+Data de Emissão: ${today}
 Instituição Solicitante: ${schoolName}
 Município / Zona: ${district}
+Modelo de Pagamento Preferencial: ${payerPreference}
 Responsável: ${contactName} (${contactPhone})
 Email: ${contactEmail}
 
-ESPECIFICAÇÕES DO SERVIÇO:
+ESPECIFICAÇÕES SOLICITADAS:
 - Número de Autocarros Solicitados: ${buses} autocarro(s)
 - Estimativa de Alunos: ${students} alunos
 - Regime de Turnos: ${shift === "both" ? "Duplo (Manhã e Tarde)" : shift === "morning" ? "Manhã" : "Tarde"}
-- Cobertura Tecnológica Incluída:
-  * App móvel para todos os encarregados com GPS em tempo real
-  * Sistema de validação de entrega por código PIN seguro
-  * App dedicada para cada motorista com lista de chamada digital
-  * Painel de monitorização administrativa para a secretaria da escola
-  * Botão de emergência SOS ligado à Polícia e Bombeiros de Luanda
+- Política de Segurança: PIN de validação no embarque e no desembarque
 
-ORÇAMENTO ESTIMADO:
-- Valor mensal por autocarro: ${(pricePerBus).toLocaleString("pt-AO")} Kz
+ESTIMATIVA INDICATIVA (NÃO VINCULATIVA):
+- Valor mensal base por autocarro: ${pricePerBus.toLocaleString("pt-AO")} Kz
 -----------------------------------------------------
-VALOR TOTAL MENSAL: ${estimatedTotal.toLocaleString("pt-AO")} Kz / mês
+ESTIMATIVA MENSAL INDICATIVA: ${estimatedTotal.toLocaleString("pt-AO")} Kz / mês
 Custo médio estimado por aluno: ${pricePerStudent.toLocaleString("pt-AO")} Kz / mês
 -----------------------------------------------------
-Validade da Proposta: 30 dias
+Nota: Os valores acima constituem estimativa indicativa sujeita a análise operacional e aprovação contratual da MôBuss Angola.
 Contacto Comercial: comercial@mobuss.ao | +244 923 000 000
 =====================================================`;
 
-    downloadDocument(`Proposta_MoBuss_${schoolName.replace(/\s+/g, "_")}`, quoteContent);
+    downloadDocument(`Estimativa_MoBuss_${schoolName.replace(/\s+/g, "_")}`, quoteContent);
   }
 
   return (
     <div className="min-h-screen bg-slide-bg text-slide-ink font-sans pb-16">
-      {/* Header bar */}
-      <header className="border-b border-slide-surface bg-slide-paper-ink/90 backdrop-blur px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <img
-            src="/assets/aistudio/20261117_030824_57b8de0b.jpg"
-            alt="MôBuss Logo"
-            className="w-10 h-10 rounded-xl object-cover bg-black border border-white/10 shadow"
-          />
-          <div>
-            <span className="font-extrabold text-xl text-slide-paper" style={{ fontFamily: "var(--font-display)" }}>
-              MôBuss Institucional
-            </span>
-            <span className="text-xs text-slide-dim block">Parcerias com Escolas & Colégios em Luanda</span>
-          </div>
+      {/* Sub-header context bar */}
+      <div className="border-b border-white/10 bg-slide-paper-ink/90 backdrop-blur px-6 py-3.5 flex items-center justify-between gap-4">
+        <div className="flex items-center gap-2 text-xs text-slide-dim">
+          <span className="font-bold text-slide-paper">MôBuss Institucional</span>
+          <span aria-hidden="true">·</span>
+          <span>Parcerias com Escolas & Colégios em Luanda</span>
         </div>
 
         {onBackToApp && (
           <button
             onClick={onBackToApp}
-            className="px-4 py-2 rounded-xl bg-slide-surface text-slide-paper hover:bg-slide-surface/80 text-xs font-bold transition cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-slide-surface text-slide-paper hover:bg-white/10 text-xs font-semibold border border-white/10 transition cursor-pointer whitespace-nowrap shrink-0"
           >
-            ← Voltar à Aplicação
+            <ArrowLeft className="w-3.5 h-3.5" />
+            <span>Voltar</span>
           </button>
         )}
-      </header>
+      </div>
 
       {/* Main Content */}
-      <div className="max-w-4xl mx-auto px-6 py-10">
-        {/* Hero Banner */}
-        <div className="text-center max-w-2xl mx-auto mb-12">
-          <span className="text-xs font-black uppercase tracking-widest text-slide-accent bg-slide-surface px-3.5 py-1 rounded-full">
+      <div className="max-w-5xl mx-auto px-6 py-10">
+        <div className="text-center max-w-2xl mx-auto mb-10">
+          <div className="text-xs font-bold tracking-wider uppercase text-slide-accent">
             Contratos de Frota Escolar · Luanda 2026
-          </span>
-          <h1 className="text-3xl sm:text-5xl font-black mt-4 leading-tight" style={{ fontFamily: "var(--font-display)" }}>
+          </div>
+          <h1
+            className="text-3xl sm:text-5xl font-black mt-3 leading-tight text-balance"
+            style={{ fontFamily: "var(--font-display)" }}
+          >
             Transporte Escolar Inteligente para a sua Escola
           </h1>
-          <p className="text-slide-dim mt-4 text-base leading-relaxed">
-            Elimine as reclamações de atrasos, dê aos pais a localização ao vivo no telemóvel e receba relatórios diários de presenças gerados automaticamente para a sua secretaria.
+          <p className="text-slide-dim mt-4 text-sm sm:text-base leading-relaxed">
+            Elimine atrasos sem aviso, ofereça localização ao vivo no telemóvel dos encarregados e receba pautas diárias de presenças geradas automaticamente para a secretaria.
           </p>
         </div>
 
         {submitted ? (
-          <div className="max-w-xl mx-auto rounded-3xl bg-slide-surface p-8 text-center border border-slide-accent/40 shadow-2xl">
-            <div className="w-16 h-16 rounded-full bg-slide-ok text-slide-accent-ink mx-auto grid place-items-center text-3xl font-black mb-4">
-              ✓
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.18 }}
+            className="max-w-xl mx-auto rounded-2xl bg-slide-surface p-8 text-center border border-white/10 shadow-xl"
+          >
+            <div className="w-14 h-14 rounded-2xl bg-slide-ok text-white mx-auto grid place-items-center mb-4">
+              <CheckCircle2 className="w-8 h-8" />
             </div>
             <h2 className="text-2xl font-black mb-2" style={{ fontFamily: "var(--font-display)" }}>
-              Pedido Submetido com Sucesso!
+              Pedido Submetido com Sucesso
             </h2>
-            <p className="text-sm text-slide-dim mb-6">
-              A equipa de operações da <strong>MôBuss Angola</strong> irá analisar o corredor viário para o colégio <strong>{schoolName}</strong> e entrar em contacto com <strong>{contactName}</strong> nas próximas 24 horas.
+            {referenceCode && (
+              <div className="inline-block rounded-lg bg-slide-bg border border-white/10 px-3 py-1 text-xs font-mono font-bold text-slide-accent mb-3">
+                Referência: {referenceCode}
+              </div>
+            )}
+            <p className="text-sm text-slide-dim mb-6 leading-relaxed">
+              A equipa comercial da <strong className="text-slide-paper">MôBuss Angola</strong> registou o pedido de <strong className="text-slide-paper">{schoolName}</strong> na base de dados e irá analisá-lo na aba <strong className="text-slide-paper">Contratos</strong>.
             </p>
 
-            <div className="rounded-2xl bg-slide-bg p-4 text-left text-xs space-y-2 mb-6 font-mono">
+            <div className="rounded-xl bg-slide-bg p-4 text-left text-xs space-y-2 mb-6 font-mono tabular-nums border border-white/10">
               <div className="flex justify-between">
                 <span className="text-slide-dim">Autocarros Solicitados:</span>
                 <span className="font-bold">{buses} autocarros</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slide-dim">Estimativa Mensal:</span>
-                <span className="font-bold text-slide-accent">{estimatedTotal.toLocaleString("pt-AO")} Kz</span>
+                <span className="text-slide-dim">Estimativa Indicativa:</span>
+                <span className="font-bold text-slide-accent">{estimatedTotal.toLocaleString("pt-AO")} Kz/mês</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-slide-dim">Localidade:</span>
@@ -164,47 +239,61 @@ Contacto Comercial: comercial@mobuss.ao | +244 923 000 000
             <div className="flex flex-col sm:flex-row gap-3">
               <button
                 onClick={handleDownloadQuote}
-                className="flex-1 rounded-xl bg-slide-accent text-slide-accent-ink py-3 text-xs font-black shadow hover:opacity-90 transition cursor-pointer"
+                className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-slide-accent text-slide-accent-ink py-3 px-4 text-xs font-bold shadow hover:opacity-90 active:scale-[0.98] transition cursor-pointer"
               >
-                📄 Descarregar Documento da Proposta
+                <FileText className="w-4 h-4" />
+                <span>Descarregar Minuta</span>
               </button>
+              {onOpenAdminContracts && (
+                <button
+                  onClick={onOpenAdminContracts}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-slide-ok text-white px-5 py-3 text-xs font-bold hover:opacity-90 active:scale-[0.98] transition cursor-pointer"
+                >
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>Ver no Painel Admin</span>
+                </button>
+              )}
               {onBackToApp && (
                 <button
                   onClick={onBackToApp}
-                  className="rounded-xl bg-slide-bg text-slide-paper px-6 py-3 text-xs font-bold hover:bg-slide-bg/70 transition cursor-pointer"
+                  className="rounded-xl bg-slide-bg text-slide-paper px-5 py-3 text-xs font-semibold border border-white/10 hover:bg-white/5 transition cursor-pointer"
                 >
-                  Voltar à App
+                  Voltar
                 </button>
               )}
             </div>
-          </div>
+          </motion.div>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-[1.3fr_1fr] gap-8 items-start">
+          <div className="grid grid-cols-1 lg:grid-cols-[1.35fr_1fr] gap-6 items-start">
             {/* Left Column: Form */}
-            <div className="rounded-3xl bg-slide-surface p-6 sm:p-8 border border-slide-line/20 shadow-xl">
-              <h2 className="text-xl font-bold mb-4" style={{ fontFamily: "var(--font-display)" }}>
+            <div className="rounded-2xl bg-slide-surface p-6 sm:p-8 border border-white/10">
+              <h2 className="text-lg font-bold mb-5" style={{ fontFamily: "var(--font-display)" }}>
                 Pedir Proposta Institucional
               </h2>
 
               <form onSubmit={handleSubmit} className="space-y-4 text-xs">
                 <div>
-                  <label className="block font-bold text-slide-paper mb-1">Nome da Instituição de Ensino:</label>
+                  <label className="block font-semibold text-slide-paper mb-1.5">
+                    Nome da Instituição de Ensino
+                  </label>
                   <input
                     required
                     value={schoolName}
                     onChange={(e) => setSchoolName(e.target.value)}
                     placeholder="Ex: Colégio São Francisco de Assis"
-                    className="w-full rounded-xl bg-slide-bg px-4 py-2.5 text-sm text-slide-paper outline-none border border-slide-line/30 focus:border-slide-accent"
+                    className="w-full rounded-xl bg-slide-bg px-4 py-2.5 text-sm text-slide-paper outline-none border border-white/15 focus:border-slide-accent transition"
                   />
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
-                    <label className="block font-bold text-slide-paper mb-1">Município / Localidade:</label>
+                    <label className="block font-semibold text-slide-paper mb-1.5">
+                      Município / Localidade
+                    </label>
                     <select
                       value={district}
                       onChange={(e) => setDistrict(e.target.value)}
-                      className="w-full rounded-xl bg-slide-bg px-4 py-2.5 text-xs text-slide-paper outline-none border border-slide-line/30"
+                      className="w-full rounded-xl bg-slide-bg px-4 py-2.5 text-xs text-slide-paper outline-none border border-white/15 focus:border-slide-accent"
                     >
                       <option value="Talatona">Talatona</option>
                       <option value="Maianga">Maianga</option>
@@ -217,11 +306,13 @@ Contacto Comercial: comercial@mobuss.ao | +244 923 000 000
                   </div>
 
                   <div>
-                    <label className="block font-bold text-slide-paper mb-1">Regime de Turnos:</label>
+                    <label className="block font-semibold text-slide-paper mb-1.5">
+                      Regime de Turnos
+                    </label>
                     <select
                       value={shift}
                       onChange={(e) => setShift(e.target.value as "morning" | "afternoon" | "both")}
-                      className="w-full rounded-xl bg-slide-bg px-4 py-2.5 text-xs text-slide-paper outline-none border border-slide-line/30"
+                      className="w-full rounded-xl bg-slide-bg px-4 py-2.5 text-xs text-slide-paper outline-none border border-white/15 focus:border-slide-accent"
                     >
                       <option value="both">Duplo (Manhã + Tarde)</option>
                       <option value="morning">Apenas Manhã</option>
@@ -232,8 +323,8 @@ Contacto Comercial: comercial@mobuss.ao | +244 923 000 000
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
-                    <label className="block font-bold text-slide-paper mb-1">
-                      Autocarros Necessários ({buses}):
+                    <label className="block font-semibold text-slide-paper mb-1.5 tabular-nums">
+                      Autocarros Necessários ({buses})
                     </label>
                     <input
                       type="range"
@@ -243,15 +334,15 @@ Contacto Comercial: comercial@mobuss.ao | +244 923 000 000
                       onChange={(e) => setBuses(Number(e.target.value))}
                       className="w-full accent-[#e11d2e] cursor-pointer"
                     />
-                    <div className="flex justify-between text-[10px] text-slide-dim mt-1">
+                    <div className="flex justify-between text-[11px] text-slide-dim mt-1 tabular-nums">
                       <span>1 autocarro</span>
                       <span>12 autocarros</span>
                     </div>
                   </div>
 
                   <div>
-                    <label className="block font-bold text-slide-paper mb-1">
-                      Alunos a Transportar:
+                    <label className="block font-semibold text-slide-paper mb-1.5">
+                      Alunos a Transportar
                     </label>
                     <input
                       type="number"
@@ -259,33 +350,49 @@ Contacto Comercial: comercial@mobuss.ao | +244 923 000 000
                       max={600}
                       value={students}
                       onChange={(e) => setStudents(Number(e.target.value))}
-                      className="w-full rounded-xl bg-slide-bg px-4 py-2 text-xs text-slide-paper outline-none border border-slide-line/30 font-mono"
+                      className="w-full rounded-xl bg-slide-bg px-4 py-2 text-xs text-slide-paper outline-none border border-white/15 focus:border-slide-accent font-mono tabular-nums"
                     />
                   </div>
                 </div>
 
-                <div className="pt-2 border-t border-slide-line/20">
-                  <div className="font-bold text-slide-accent mb-2">Dados do Responsável / Secretaria:</div>
+                <div>
+                  <label className="block font-semibold text-slide-paper mb-1.5">
+                    Modelo de Pagamento Preferencial
+                  </label>
+                  <select
+                    value={payerPreference}
+                    onChange={(e) =>
+                      setPayerPreference(e.target.value as "school" | "parent" | "mixed" | "configurable")
+                    }
+                    className="w-full rounded-xl bg-slide-bg px-4 py-2.5 text-xs text-slide-paper outline-none border border-white/15 focus:border-slide-accent"
+                  >
+                    <option value="configurable">A configurar em contrato com a MôBuss</option>
+                    <option value="school">Escola paga a fatura mensal consolidada</option>
+                    <option value="parent">Encarregados pagam mensalidade individual</option>
+                    <option value="mixed">Modelo Misto (Escola + Encarregados)</option>
+                  </select>
+                </div>
+
+                <div className="pt-3 border-t border-white/10">
+                  <div className="font-bold text-slide-paper mb-2.5">
+                    Dados do Responsável / Secretaria
+                  </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <input
-                        required
-                        value={contactName}
-                        onChange={(e) => setContactName(e.target.value)}
-                        placeholder="Nome do Director(a) / Gestor(a)"
-                        className="w-full rounded-xl bg-slide-bg px-3 py-2 text-xs text-slide-paper outline-none border border-slide-line/30"
-                      />
-                    </div>
-                    <div>
-                      <input
-                        required
-                        value={contactPhone}
-                        onChange={(e) => setContactPhone(e.target.value)}
-                        placeholder="Telefone (+244 9xx xxx xxx)"
-                        className="w-full rounded-xl bg-slide-bg px-3 py-2 text-xs text-slide-paper outline-none border border-slide-line/30 font-mono"
-                      />
-                    </div>
+                    <input
+                      required
+                      value={contactName}
+                      onChange={(e) => setContactName(e.target.value)}
+                      placeholder="Nome do Director(a) / Gestor(a)"
+                      className="w-full rounded-xl bg-slide-bg px-3.5 py-2.5 text-xs text-slide-paper outline-none border border-white/15 focus:border-slide-accent"
+                    />
+                    <input
+                      required
+                      value={contactPhone}
+                      onChange={(e) => setContactPhone(e.target.value)}
+                      placeholder="Telefone (+244 9xx xxx xxx)"
+                      className="w-full rounded-xl bg-slide-bg px-3.5 py-2.5 text-xs text-slide-paper outline-none border border-white/15 focus:border-slide-accent font-mono tabular-nums"
+                    />
                   </div>
 
                   <div className="mt-3">
@@ -294,7 +401,7 @@ Contacto Comercial: comercial@mobuss.ao | +244 923 000 000
                       value={contactEmail}
                       onChange={(e) => setContactEmail(e.target.value)}
                       placeholder="Email institucional da escola"
-                      className="w-full rounded-xl bg-slide-bg px-3 py-2 text-xs text-slide-paper outline-none border border-slide-line/30"
+                      className="w-full rounded-xl bg-slide-bg px-3.5 py-2.5 text-xs text-slide-paper outline-none border border-white/15 focus:border-slide-accent"
                     />
                   </div>
 
@@ -304,67 +411,85 @@ Contacto Comercial: comercial@mobuss.ao | +244 923 000 000
                       value={notes}
                       onChange={(e) => setNotes(e.target.value)}
                       placeholder="Informações adicionais sobre paragens prioritárias ou horários..."
-                      className="w-full rounded-xl bg-slide-bg px-3 py-2 text-xs text-slide-paper outline-none border border-slide-line/30"
+                      className="w-full rounded-xl bg-slide-bg px-3.5 py-2.5 text-xs text-slide-paper outline-none border border-white/15 focus:border-slide-accent"
                     />
                   </div>
                 </div>
 
+                {submitError && (
+                  <div className="rounded-xl bg-slide-accent/15 border border-slide-accent/40 p-3 text-xs text-red-200 font-semibold">
+                    {submitError}
+                  </div>
+                )}
+
                 <button
                   type="submit"
-                  className="w-full rounded-xl bg-slide-accent text-slide-accent-ink py-3.5 text-xs font-black shadow-lg hover:opacity-95 transition cursor-pointer"
+                  disabled={submitting}
+                  className="w-full rounded-xl bg-slide-accent text-slide-accent-ink py-3 text-xs font-bold shadow hover:opacity-95 active:scale-[0.99] transition cursor-pointer disabled:opacity-50"
                 >
-                  Enviar Pedido de Contrato Oficial
+                  {submitting ? "A registar pedido no servidor..." : "Enviar Pedido de Contrato Oficial"}
                 </button>
               </form>
             </div>
 
             {/* Right Column: Dynamic Price Summary */}
             <div className="space-y-4">
-              <div className="rounded-3xl bg-slide-paper-ink text-slide-paper p-6 border border-slide-surface shadow-xl">
-                <span className="text-[10px] font-bold text-slide-accent uppercase tracking-wider">
-                  SIMULADOR DE CUSTOS
+              <div className="rounded-2xl bg-slide-paper-ink text-slide-paper p-6 border border-white/10">
+                <span className="text-[11px] font-bold text-slide-accent uppercase tracking-wider">
+                  Estimativa indicativa (não vinculativa)
                 </span>
-                <div className="text-3xl font-black text-slide-paper mt-1 font-mono">
+                <div className="text-3xl font-black text-slide-paper mt-1 font-mono tabular-nums">
                   {estimatedTotal.toLocaleString("pt-AO")} Kz
                 </div>
-                <div className="text-xs text-slide-dim">Valor mensal estimado (IVA incluído)</div>
+                <div className="text-xs text-slide-dim">
+                  Valor mensal indicativo (IVA {pricing.ivaPercent}% aplicável · sujeito a proposta formal)
+                </div>
 
-                <div className="my-5 pt-4 border-t border-slide-surface space-y-2.5 text-xs">
+                <div className="my-5 pt-4 border-t border-white/10 space-y-2.5 text-xs tabular-nums">
                   <div className="flex justify-between">
-                    <span className="text-slide-dim">Frota alocada:</span>
+                    <span className="text-slide-dim">Frota alocada</span>
                     <span className="font-bold">{buses} autocarros dedicados</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slide-dim">Capacidade total:</span>
+                    <span className="text-slide-dim">Capacidade total</span>
                     <span className="font-bold">{students} lugares garantidos</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slide-dim">Custo médio por aluno:</span>
+                    <span className="text-slide-dim">Custo médio por aluno</span>
                     <span className="font-mono text-slide-ok font-bold">
                       ~{pricePerStudent.toLocaleString("pt-AO")} Kz/mês
                     </span>
                   </div>
                 </div>
 
-                <div className="rounded-xl bg-slide-bg p-3 text-[11px] text-slide-dim space-y-1">
-                  <div>✓ Motoristas profissionais com cadastro e teste toxicológico</div>
-                  <div>✓ Manutenção preventiva e autocarros de reserva imediata</div>
-                  <div>✓ Licença e seguro escolar da DNVT em conformidade</div>
+                <div className="rounded-xl bg-slide-surface p-3.5 text-[11px] text-slide-dim space-y-2 border border-white/10">
+                  <div className="flex items-start gap-2">
+                    <Check className="w-3.5 h-3.5 text-slide-ok shrink-0 mt-0.5" />
+                    <span>Motoristas profissionais com cadastro e teste toxicológico</span>
+                  </div>
+                  <div className="flex items-start gap-2">
+                    <Check className="w-3.5 h-3.5 text-slide-ok shrink-0 mt-0.5" />
+                    <span>Manutenção preventiva e autocarros de reserva imediata</span>
+                  </div>
+                  <div className="flex items-start gap-2">
+                    <Check className="w-3.5 h-3.5 text-slide-ok shrink-0 mt-0.5" />
+                    <span>Licença e seguro escolar da DNVT em conformidade</span>
+                  </div>
                 </div>
               </div>
 
-              {/* Instant proposal download */}
-              <div className="rounded-2xl bg-slide-surface p-4 border border-slide-line/20 text-center">
-                <div className="font-bold text-xs mb-1">Deseja uma proposta formal em PDF/TXT?</div>
+              <div className="rounded-2xl bg-slide-surface p-5 border border-white/10 text-center">
+                <div className="font-bold text-xs mb-1">Deseja uma proposta formal em TXT?</div>
                 <p className="text-[11px] text-slide-dim mb-3">
-                  Pode descarregar uma minuta oficial do orçamento preliminar.
+                  Descarregue uma minuta oficial do orçamento preliminar para a direção.
                 </p>
                 <button
                   type="button"
                   onClick={handleDownloadQuote}
-                  className="w-full rounded-xl bg-slide-bg hover:bg-slide-bg/70 text-slide-paper py-2 text-xs font-bold border border-slide-line/30 transition cursor-pointer"
+                  className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-slide-bg hover:bg-white/5 text-slide-paper py-2.5 text-xs font-semibold border border-white/15 transition cursor-pointer"
                 >
-                  📄 Descarregar Minuta de Orçamento
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Descarregar Minuta de Orçamento</span>
                 </button>
               </div>
             </div>

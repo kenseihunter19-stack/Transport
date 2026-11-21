@@ -1,10 +1,19 @@
 apply plugin: 'com.android.application'
 
 android {
-    namespace = "ao.transigo.app"
+    namespace = "ao.mobuss.app"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "ao.transigo.app"
+        def mobussTarget = project.hasProperty('MOBUSS_TARGET') ? project.property('MOBUSS_TARGET').toString() : 'hub'
+        def resolvedAppId = mobussTarget == 'client' ? 'ao.mobuss.client' : (mobussTarget == 'driver' ? 'ao.mobuss.driver' : 'ao.mobuss.app')
+        def resolvedAppName = mobussTarget == 'client' ? 'MôBuss Cliente' : (mobussTarget == 'driver' ? 'MôBuss Motorista' : 'MôBuss')
+
+        applicationId resolvedAppId
+        resValue "string", "app_name", resolvedAppName
+        resValue "string", "title_activity_main", resolvedAppName
+        resValue "string", "package_name", resolvedAppId
+        resValue "string", "custom_url_scheme", resolvedAppId
+
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1

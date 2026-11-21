@@ -1,0 +1,33 @@
+{
+	"appId": "ao.mobuss.driver",
+	"appName": "MôBuss Motorista",
+	"webDir": "dist",
+	"server": {
+		"androidScheme": "https",
+		"cleartext": false
+	},
+	"plugins": {
+		"PushNotifications": {
+			"presentationOptions": [
+				"badge",
+				"sound",
+				"alert"
+			]
+		}
+	},
+	"ios": {
+		"contentInset": "automatic",
+		"backgroundColor": "#09090b"
+	},
+	"android": {
+		"allowMixedContent": false,
+		"backgroundColor": "#09090b"
+	},
+	"packageClassList": [
+		"AppPlugin",
+		"GeolocationPlugin",
+		"CAPNetworkPlugin",
+		"PushNotificationsPlugin",
+		"StatusBarPlugin"
+	]
+}

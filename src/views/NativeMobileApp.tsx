@@ -49,6 +49,17 @@ import { LUANDA_ROUTES, type LuandaRouteConfig } from "@/lib/route-luanda";
 import { MulticaixaModal } from "@/components/MulticaixaModal";
 import { AttendanceReportModal } from "@/components/AttendanceReportModal";
 import { VehicleDocumentsModal } from "@/components/VehicleDocumentsModal";
+import {
+  clearHazardForBus,
+  exportAgtReceipt,
+  formatAOA,
+  publishHazardReport,
+  publishSimulatorAlert,
+  readMoBussSync,
+  recordDriverRating,
+  recordEmptyBusSweep,
+  subscribeMoBussSync,
+} from "@/lib/mobuss-sync";
 
 export type Role = "parent" | "driver" | "company";
 
@@ -247,6 +258,12 @@ export function NativeMobileApp({
   const [tripRating, setTripRating] = useState(0);
   const [ratingTags, setRatingTags] = useState<string[]>([]);
   const [ratingSubmitted, setRatingSubmitted] = useState(false);
+  const [syncPricing, setSyncPricing] = useState(() => readMoBussSync().pricing);
+
+  useEffect(() => {
+    setSyncPricing(readMoBussSync().pricing);
+    return subscribeMoBussSync((s) => setSyncPricing(s.pricing));
+  }, []);
 
   // Quick Preset Messages between Driver and Parent
   const [messages, setMessages] = useState<QuickMessage[]>([
@@ -405,6 +422,14 @@ export function NativeMobileApp({
       busNumber: currentRoute.busId,
       details: `Alerta emitido no corredor ${currentRoute.name} de Luanda.`,
     });
+    publishSimulatorAlert({
+      time: now,
+      bus: currentRoute.busId,
+      route: `${currentRoute.code} · ${currentRoute.name}`,
+      type,
+      from: `${from} (${role === "driver" ? currentRoute.driver : currentKid.guardian})`,
+      notes: `Alerta SOS emitido em tempo real a partir do simulador móvel.`,
+    });
     setRunning(false);
     setSosOpen(false);
     notify(`SOS DISPARADO: ${type} transmitido aos serviços de emergência.`, "alert");
@@ -506,7 +531,7 @@ export function NativeMobileApp({
                 <Building2 className="w-3 h-3 text-[#e11d2e]" />
               )}
               <span className="text-[10px] font-bold text-white">
-                {role === "parent" ? "Sra. Luísa" : role === "driver" ? "João M." : "Empresa"}
+                {role === "parent" ? "Sra. Luísa" : role === "driver" ? "João M." : "Operações"}
               </span>
             </div>
 
@@ -922,6 +947,13 @@ export function NativeMobileApp({
                                 disabled={tripRating === 0}
                                 onClick={() => {
                                   setRatingSubmitted(true);
+                                  recordDriverRating({
+                                    driver: currentRoute.driver,
+                                    routeCode: currentRoute.code,
+                                    rating: tripRating,
+                                    tags: ratingTags,
+                                    parentName: currentKid.guardian,
+                                  });
                                   notify(`Avaliação de ${tripRating} estrelas registada para ${currentRoute.driver}!`, "success");
                                 }}
                                 className="w-full py-2 rounded-xl bg-white text-zinc-950 text-xs font-black disabled:opacity-40 cursor-pointer active:scale-[0.98] transition"
@@ -1083,7 +1115,9 @@ export function NativeMobileApp({
                     <div className="flex justify-between items-start">
                       <div>
                         <div className="text-xs text-slide-dim font-bold uppercase tracking-wider">MÊS CORRENTE</div>
-                        <div className="text-3xl font-black text-slide-accent mt-1 tabular-nums">45 000 Kz</div>
+                        <div className="text-3xl font-black text-slide-accent mt-1 tabular-nums">
+                          {formatAOA(syncPricing.studentMonthlyFee)}
+                        </div>
                       </div>
                       <div className="w-10 h-10 rounded-xl bg-orange-600 text-white font-black grid place-items-center text-xs shadow">
                         MCX
@@ -1106,25 +1140,64 @@ export function NativeMobileApp({
                   </div>
 
                   <div className="space-y-2">
-                    <div className="text-xs font-bold opacity-75">HISTÓRICO FISCAL AGT</div>
+                    <div className="text-xs font-bold opacity-75">HISTÓRICO DE MENSALIDADES (HOMOLOGAÇÃO)</div>
                     {[
-                      ["Outubro 2026", "45 000 Kz", "Pago via MCX", "AGT-CERT/2026/VALID"],
-                      ["Setembro 2026", "45 000 Kz", "Pago via MCX", "AGT-CERT/2026/VALID"],
-                    ].map(([m, val, st, cert]) => (
+                      {
+                        month: "Outubro 2026",
+                        invoice: "PRO-MOB-2026/8192",
+                        amountValue: syncPricing.studentMonthlyFee,
+                        emisRef: "MCX-901824-EMIS",
+                        cert: "HOMOLOGAÇÃO · NÃO FISCAL",
+                      },
+                      {
+                        month: "Setembro 2026",
+                        invoice: "PRO-MOB-2026/7741",
+                        amountValue: syncPricing.studentMonthlyFee,
+                        emisRef: "MCX-774102-EMIS",
+                        cert: "HOMOLOGAÇÃO · NÃO FISCAL",
+                      },
+                    ].map((item) => (
                       <div
-                        key={m}
-                        className="rounded-xl border border-slide-line p-3 flex justify-between items-center bg-slide-paper"
+                        key={item.month}
+                        className="rounded-xl border border-slide-line p-3 flex justify-between items-center gap-2 bg-slide-paper"
                       >
-                        <div>
-                          <div className="font-bold text-xs">{m}</div>
-                          <div className="text-[10px] text-zinc-500 font-mono">{cert}</div>
+                        <div className="min-w-0">
+                          <div className="font-bold text-xs">{item.month}</div>
+                          <div className="text-[10px] text-zinc-500 font-mono truncate">{item.cert}</div>
                         </div>
-                        <div className="text-right">
-                          <div className="font-mono text-xs font-bold tabular-nums">{val}</div>
-                          <span className="text-[10px] font-bold text-slide-ok inline-flex items-center gap-1 justify-end">
-                            <span>{st}</span>
-                            <CheckCircle2 className="w-3 h-3" />
-                          </span>
+                        <div className="flex items-center gap-2.5 shrink-0">
+                          <div className="text-right">
+                            <div className="font-mono text-xs font-bold tabular-nums">{formatAOA(item.amountValue)}</div>
+                            <span className="text-[10px] font-bold text-slide-ok inline-flex items-center gap-1 justify-end">
+                              <span>Pago via MCX</span>
+                              <CheckCircle2 className="w-3 h-3" />
+                            </span>
+                          </div>
+                          <button
+                            onClick={() => {
+                              exportAgtReceipt(
+                                {
+                                  invoice: item.invoice,
+                                  student: currentKid.name,
+                                  guardian: currentKid.guardian,
+                                  phone: currentKid.phone,
+                                  amountValue: item.amountValue,
+                                  date: item.month,
+                                  emisRef: item.emisRef,
+                                  agtCert: item.cert,
+                                  status: "Validado",
+                                  school: currentKid.school,
+                                  routeLabel: currentRoute.name,
+                                },
+                                syncPricing
+                              );
+                              notify(`Nota provisória (${item.invoice}) descarregada.`, "success");
+                            }}
+                            className="p-2 rounded-lg bg-zinc-100 hover:bg-zinc-200 text-zinc-900 cursor-pointer transition"
+                            title="Descarregar Comprovativo Provisório"
+                          >
+                            <FileText className="w-3.5 h-3.5" />
+                          </button>
                         </div>
                       </div>
                     ))}
@@ -1293,6 +1366,12 @@ export function NativeMobileApp({
                             const next = !emptyBusChecked;
                             setEmptyBusChecked(next);
                             if (next) {
+                              recordEmptyBusSweep({
+                                busNumber: currentRoute.busId,
+                                plate: currentRoute.busPlate,
+                                driver: currentRoute.driver,
+                                routeName: `${currentRoute.code} · ${currentRoute.name}`,
+                              });
                               notify("Verificação anti-esquecimento concluída: 0 alunos no autocarro.", "success");
                             }
                           }}
@@ -1415,6 +1494,7 @@ export function NativeMobileApp({
                             <button
                               onClick={() => {
                                 setActiveHazard(null);
+                                clearHazardForBus(currentRoute.busId);
                                 notify("Alerta de via removido.", "info");
                               }}
                               className="text-[10px] text-zinc-300 underline cursor-pointer"
@@ -1437,8 +1517,17 @@ export function NativeMobileApp({
                                   const next = active ? null : label;
                                   setActiveHazard(next);
                                   if (next) {
+                                    publishHazardReport({
+                                      label,
+                                      routeCode: currentRoute.code,
+                                      routeName: currentRoute.name,
+                                      driver: currentRoute.driver,
+                                      busNumber: currentRoute.busId,
+                                    });
                                     sendQuickMessage(`Alerta na via: ${label} no corredor ${currentRoute.code}.`);
                                     notify(`Alerta Waze publicado: ${label}`, "alert");
+                                  } else {
+                                    clearHazardForBus(currentRoute.busId);
                                   }
                                 }}
                                 className={`px-2 py-1.5 rounded-xl border text-[10px] font-bold flex flex-col items-center gap-1 cursor-pointer active:scale-95 transition ${
@@ -1973,7 +2062,7 @@ export function NativeMobileApp({
                 <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#e11d2e]/15 text-[#e11d2e] text-[10px] font-black uppercase tracking-wider">
                   <Sparkles className="w-3 h-3" />
                   <span>
-                    Guia · {role === "parent" ? "Encarregado" : role === "driver" ? "Motorista" : "Empresa"}
+                    Guia · {role === "parent" ? "Encarregado" : role === "driver" ? "Motorista" : "Operações MôBuss"}
                   </span>
                 </div>
                 <button
@@ -2317,7 +2406,10 @@ export function NativeMobileApp({
           onClose={() => setMulticaixaModalOpen(false)}
           onSuccess={() => notify("Pagamento Multicaixa Express validado com sucesso!", "success")}
           studentName={currentKid.name}
-          amount="45 000 Kz"
+          guardianName={currentKid.guardian}
+          schoolName={currentKid.school}
+          routeLabel={currentRoute.name}
+          amountValue={syncPricing.studentMonthlyFee}
         />
 
         {/* MODAL: DIGITAL ATTENDANCE LOG */}

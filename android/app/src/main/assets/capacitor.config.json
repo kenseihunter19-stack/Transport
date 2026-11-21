@@ -1,13 +1,26 @@
 {
-	"appId": "ao.transigo.app",
-	"appName": "TransiGo",
+	"appId": "ao.mobuss.driver",
+	"appName": "MôBuss Motorista",
 	"webDir": "dist",
 	"server": {
 		"androidScheme": "https",
-		"cleartext": true
+		"cleartext": false
+	},
+	"plugins": {
+		"PushNotifications": {
+			"presentationOptions": [
+				"badge",
+				"sound",
+				"alert"
+			]
+		}
+	},
+	"ios": {
+		"contentInset": "automatic",
+		"backgroundColor": "#09090b"
 	},
 	"android": {
-		"allowMixedContent": true,
-		"backgroundColor": "#1b2540"
+		"allowMixedContent": false,
+		"backgroundColor": "#09090b"
 	}
 }

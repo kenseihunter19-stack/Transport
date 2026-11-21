@@ -1,4 +1,4 @@
-name: Build Android APK (TransiGo)
+name: Build Android APKs (MôBuss Cliente & Motorista)
 
 on:
   push:
@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-apk:
-    name: Build TransiGo Android APK
+  build-android-apks:
+    name: Build MôBuss Client & Driver APKs
     runs-on: ubuntu-latest
 
     steps:
@@ -32,23 +32,38 @@ jobs:
       - name: Install NPM Dependencies
         run: npm ci || npm install
 
-      - name: Build Web Application
-        run: npm run build
-
-      - name: Add Capacitor Android Platform
+      - name: Sync & Build MôBuss Cliente APK (ao.mobuss.client)
+        env:
+          VITE_APP_TARGET: client
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
         run: |
-          npx cap add android || true
+          npm run build:client
           npx cap sync android
-
-      - name: Build Debug APK with Gradle
-        run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew assembleDebug -PMOBUSS_TARGET=client --no-daemon
 
-      - name: Upload Debug APK
+      - name: Upload MôBuss Cliente APK
         uses: actions/upload-artifact@v4
         with:
-          name: TransiGo-Android-APK
+          name: MoBuss-Client-Android-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Sync & Build MôBuss Motorista APK (ao.mobuss.driver)
+        env:
+          VITE_APP_TARGET: driver
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+        run: |
+          npm run build:driver
+          npx cap sync android
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug -PMOBUSS_TARGET=driver --no-daemon
+
+      - name: Upload MôBuss Motorista APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MoBuss-Driver-Android-APK
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
