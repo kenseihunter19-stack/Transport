@@ -2122,6 +2122,324 @@ async function createApp() {
     }
   });
 
+  app.post('/api/v1/admin/vehicles', requireAuth, requireRoles(['mobuss_super_admin', 'fleet_manager', 'operations_manager']), async (req: AuthRequest, res: Response) => {
+    try {
+      const actor = req.dbUser!;
+      const fleetNumber = Number(req.body?.fleetNumber);
+      const plate = String(req.body?.plate ?? '').trim().toUpperCase();
+      const ownerId = Number(req.body?.ownerId);
+      const routeCode = String(req.body?.routeCode ?? 'ROTA-A').trim();
+      const routeName = String(req.body?.routeName ?? routeCode).trim();
+      const capacity = Math.max(8, Number(req.body?.capacity) || 22);
+      const dnvtExpiry = String(req.body?.dnvtExpiry ?? '2027-12-31').trim();
+      const dnvtStatus = ['valid', 'expiring_soon', 'expired'].includes(req.body?.dnvtStatus)
+        ? String(req.body.dnvtStatus)
+        : 'valid';
+      const insuranceProvider = String(req.body?.insuranceProvider ?? 'ENSA Seguros de Angola').trim();
+      const insuranceStatus = ['valid', 'expired', 'pending'].includes(req.body?.insuranceStatus)
+        ? String(req.body.insuranceStatus)
+        : 'valid';
+
+      if (!Number.isInteger(fleetNumber) || fleetNumber <= 0) {
+        return res.status(400).json({ error: 'Número de frota inválido.' });
+      }
+      if (plate.length < 4) {
+        return res.status(400).json({ error: 'Matrícula da viatura obrigatória.' });
+      }
+
+      const ownerRows = await db.select().from(vehicleOwners).where(eq(vehicleOwners.id, ownerId)).limit(1);
+      const owner = ownerRows[0];
+      if (!owner) {
+        return res.status(400).json({ error: 'Proprietário da viatura não encontrado.' });
+      }
+
+      const dup = await db
+        .select()
+        .from(vehicles)
+        .where(or(eq(vehicles.fleetNumber, fleetNumber), eq(vehicles.plate, plate)))
+        .limit(1);
+      if (dup[0]) {
+        return res.status(409).json({ error: 'Já existe uma viatura com este número de frota ou matrícula.' });
+      }
+
+      const inserted = await db
+        .insert(vehicles)
+        .values({
+          fleetNumber,
+          plate,
+          ownershipType: owner.ownerType === 'mobuss' ? 'mobuss_owned' : 'partner_owned',
+          ownerId: owner.id,
+          routeCode,
+          routeName,
+          capacity,
+          status: 'available',
+          fuelPercent: 90,
+          dnvtExpiry,
+          dnvtStatus,
+          insuranceProvider,
+          insuranceStatus,
+          verificationStatus: 'verified',
+        })
+        .returning();
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'vehicle.created',
+        targetEntity: 'vehicles',
+        targetId: inserted[0]!.id,
+        summary: `Nova viatura registada: Autocarro ${fleetNumber} (${plate}) · Proprietário ${owner.fullName}.`,
+      });
+
+      res.status(201).json({
+        vehicle: inserted[0],
+        message: `Autocarro ${fleetNumber} (${plate}) registado na frota.`,
+      });
+    } catch (error) {
+      console.error('Create vehicle failed:', error);
+      res.status(500).json({ error: 'Erro ao registar nova viatura.' });
+    }
+  });
+
+  app.patch('/api/v1/admin/vehicles/:id', requireAuth, requireRoles(['mobuss_super_admin', 'fleet_manager', 'operations_manager']), async (req: AuthRequest, res: Response) => {
+    try {
+      const actor = req.dbUser!;
+      const vehicleId = Number(req.params.id);
+      if (!Number.isInteger(vehicleId) || vehicleId <= 0) {
+        return res.status(400).json({ error: 'ID de viatura inválido.' });
+      }
+
+      const existingRows = await db.select().from(vehicles).where(eq(vehicles.id, vehicleId)).limit(1);
+      const existing = existingRows[0];
+      if (!existing) {
+        return res.status(404).json({ error: 'Viatura não encontrada.' });
+      }
+
+      const plate = String(req.body?.plate ?? existing.plate).trim().toUpperCase();
+      const ownerId = req.body?.ownerId != null ? Number(req.body.ownerId) : existing.ownerId;
+      const routeCode = String(req.body?.routeCode ?? existing.routeCode ?? 'ROTA-A').trim();
+      const capacity = Math.max(8, Number(req.body?.capacity ?? existing.capacity) || existing.capacity);
+      const dnvtExpiry = String(req.body?.dnvtExpiry ?? existing.dnvtExpiry).trim();
+      const dnvtStatus = ['valid', 'expiring_soon', 'expired'].includes(req.body?.dnvtStatus)
+        ? String(req.body.dnvtStatus)
+        : existing.dnvtStatus;
+      const insuranceProvider = String(req.body?.insuranceProvider ?? existing.insuranceProvider).trim();
+      const insuranceStatus = ['valid', 'expired', 'pending'].includes(req.body?.insuranceStatus)
+        ? String(req.body.insuranceStatus)
+        : existing.insuranceStatus;
+      const status = ['available', 'assigned', 'on_trip', 'reserve', 'maintenance', 'out_of_service', 'suspended'].includes(req.body?.status)
+        ? String(req.body.status)
+        : existing.status;
+
+      const ownerRows = await db.select().from(vehicleOwners).where(eq(vehicleOwners.id, ownerId)).limit(1);
+      if (!ownerRows[0]) {
+        return res.status(400).json({ error: 'Proprietário não encontrado.' });
+      }
+
+      const updated = await db
+        .update(vehicles)
+        .set({
+          plate,
+          ownerId,
+          ownershipType: ownerRows[0].ownerType === 'mobuss' ? 'mobuss_owned' : 'partner_owned',
+          routeCode,
+          capacity,
+          dnvtExpiry,
+          dnvtStatus,
+          insuranceProvider,
+          insuranceStatus,
+          status,
+        })
+        .where(eq(vehicles.id, vehicleId))
+        .returning();
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'vehicle.updated',
+        targetEntity: 'vehicles',
+        targetId: vehicleId,
+        summary: `Viatura Autocarro ${existing.fleetNumber} (${plate}) atualizada (DNVT: ${dnvtStatus}).`,
+      });
+
+      res.json({
+        vehicle: updated[0],
+        message: `Viatura ${plate} atualizada com sucesso.`,
+      });
+    } catch (error) {
+      console.error('Update vehicle failed:', error);
+      res.status(500).json({ error: 'Erro ao atualizar viatura.' });
+    }
+  });
+
+  app.patch('/api/v1/admin/drivers/:id', requireAuth, requireRoles(['mobuss_super_admin', 'fleet_manager', 'operations_manager']), async (req: AuthRequest, res: Response) => {
+    try {
+      const actor = req.dbUser!;
+      const driverId = Number(req.params.id);
+      if (!Number.isInteger(driverId) || driverId <= 0) {
+        return res.status(400).json({ error: 'ID de motorista inválido.' });
+      }
+
+      const existingRows = await db.select().from(drivers).where(eq(drivers.id, driverId)).limit(1);
+      const existing = existingRows[0];
+      if (!existing) {
+        return res.status(404).json({ error: 'Motorista não encontrado.' });
+      }
+
+      const fullName = String(req.body?.fullName ?? existing.fullName).trim();
+      const phone = String(req.body?.phone ?? existing.phone).trim();
+      const licenceCategory = String(req.body?.licenceCategory ?? existing.licenceCategory).trim();
+      const licenceNumber = String(req.body?.licenceNumber ?? existing.licenceNumber).trim();
+      const licenceExpiry = String(req.body?.licenceExpiry ?? existing.licenceExpiry).trim();
+      const availabilityStatus = ['in_service', 'available', 'off_duty'].includes(req.body?.availabilityStatus)
+        ? String(req.body.availabilityStatus)
+        : existing.availabilityStatus;
+      const monthlyCompensationAoa = Math.max(0, Number(req.body?.monthlyCompensationAoa ?? existing.monthlyCompensationAoa) || 0);
+
+      if (fullName.length < 2 || !phone) {
+        return res.status(400).json({ error: 'Nome e telefone do motorista são obrigatórios.' });
+      }
+
+      const updated = await db
+        .update(drivers)
+        .set({
+          fullName,
+          phone,
+          licenceCategory,
+          licenceNumber,
+          licenceExpiry,
+          availabilityStatus,
+          monthlyCompensationAoa,
+        })
+        .where(eq(drivers.id, driverId))
+        .returning();
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'driver.updated',
+        targetEntity: 'drivers',
+        targetId: driverId,
+        summary: `Dados do motorista ${fullName} (#${driverId}) atualizados (${availabilityStatus}).`,
+      });
+
+      res.json({
+        driver: updated[0],
+        message: `Motorista ${fullName} atualizado com sucesso.`,
+      });
+    } catch (error) {
+      console.error('Update driver failed:', error);
+      res.status(500).json({ error: 'Erro ao atualizar motorista.' });
+    }
+  });
+
+  app.post('/api/v1/admin/students', requireAuth, requireRoles(['mobuss_super_admin', 'operations_manager', 'school_account_manager']), async (req: AuthRequest, res: Response) => {
+    try {
+      const actor = req.dbUser!;
+      const fullName = String(req.body?.fullName ?? '').trim();
+      const schoolId = Number(req.body?.schoolId);
+      const routeCode = String(req.body?.routeCode ?? 'ROTA-A').trim();
+      const stopName = String(req.body?.stopName ?? 'Largo do Kinaxixi').trim();
+      const shift = ['morning', 'afternoon', 'both'].includes(req.body?.shift)
+        ? String(req.body.shift)
+        : 'both';
+      const pinPolicy = ['boarding', 'dropoff', 'both'].includes(req.body?.pinPolicy)
+        ? String(req.body.pinPolicy)
+        : 'both';
+      const guardianName = req.body?.guardianName ? String(req.body.guardianName).trim() : '';
+      const guardianPhone = req.body?.guardianPhone ? String(req.body.guardianPhone).trim() : '';
+
+      if (fullName.length < 2 || !schoolId) {
+        return res.status(400).json({ error: 'Nome do educando e escola são obrigatórios.' });
+      }
+
+      const schoolRows = await db.select().from(schools).where(eq(schools.id, schoolId)).limit(1);
+      if (!schoolRows[0]) {
+        return res.status(400).json({ error: 'Escola selecionada não encontrada.' });
+      }
+
+      const dup = await db
+        .select()
+        .from(students)
+        .where(and(eq(students.schoolId, schoolId), eq(students.fullName, fullName)))
+        .limit(1);
+      if (dup[0]) {
+        return res.status(409).json({ error: `O aluno "${fullName}" já está registado nesta escola.` });
+      }
+
+      const insertedStudent = await db
+        .insert(students)
+        .values({
+          fullName,
+          schoolId,
+          routeCode,
+          stopName,
+          stopIndex: 1,
+          shift,
+          enrollmentStatus: 'active',
+          currentJourneyState: 'expected',
+          pinPolicy,
+        })
+        .returning();
+
+      const student = insertedStudent[0]!;
+
+      if (guardianName) {
+        const gIns = await db
+          .insert(guardians)
+          .values({
+            fullName: guardianName,
+            phone: guardianPhone || '+244 923 000 000',
+            verificationStatus: 'verified',
+          })
+          .returning();
+        if (gIns[0]) {
+          await db.insert(guardianStudentLinks).values({
+            guardianId: gIns[0].id,
+            studentId: student.id,
+            relationship: 'Encarregado(a)',
+            isPrimary: true,
+            canViewPin: true,
+            active: true,
+          });
+        }
+      }
+
+      const { salt, hash } = generateSecurePin();
+      await db.insert(handoverCredentials).values({
+        studentId: student.id,
+        tripScope: 'both',
+        pinHash: hash,
+        pinSalt: salt,
+        maskedDisplay: '••••',
+        status: 'active',
+        failedAttempts: 0,
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      });
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'student.created_by_admin',
+        targetEntity: 'students',
+        targetId: student.id,
+        summary: `Educando "${fullName}" registado pelo Admin na escola ${schoolRows[0].name} (${routeCode}).`,
+      });
+
+      res.status(201).json({
+        student,
+        message: `Educando ${fullName} registado com credencial PIN segura.`,
+      });
+    } catch (error) {
+      console.error('Admin create student failed:', error);
+      res.status(500).json({ error: 'Erro ao registar educando.' });
+    }
+  });
+
   app.post('/api/v1/admin/students/:id/reset-pin', requireAuth, requireRoles(['mobuss_super_admin', 'safety_support_agent', 'operations_manager']), async (req: AuthRequest, res: Response) => {
     try {
       const dbUser = req.dbUser!;

@@ -151,7 +151,7 @@ interface AdminOverviewData {
     routeCode: string;
     capacity: number;
     dnvtStatus: string;
-    dnvtExpiresAt: string;
+    dnvtExpiry: string;
     insuranceProvider: string;
     insuranceStatus: string;
     verificationStatus: string;
@@ -161,12 +161,14 @@ interface AdminOverviewData {
     id: number;
     fullName: string;
     phone: string;
-    licenseCategory: string;
+    licenceCategory: string;
+    licenceNumber: string;
+    licenceExpiry: string;
     verificationStatus: string;
-    rating: string;
-    status: string;
-    monthlySalaryAoa: number;
-    tripsCompletedMonth: number;
+    ratingAvg: string;
+    availabilityStatus: string;
+    monthlyCompensationAoa: number;
+    tripsCompleted: number;
   }>;
   students: Array<{
     id: number;
@@ -222,7 +224,7 @@ interface AdminOverviewData {
     status: string;
     providerReference: string | null;
     fiscalStatus: string;
-    issuedAt: string;
+    createdAt: string;
     confirmedAt: string | null;
   }>;
   pricing: {
@@ -372,6 +374,50 @@ export function AdminView({ onNavigate }: AdminViewProps) {
   const [savingStudent, setSavingStudent] = useState(false);
   const [deleteStudentTarget, setDeleteStudentTarget] = useState<{ id: number; fullName: string; schoolName: string } | null>(null);
   const [deletingStudent, setDeletingStudent] = useState(false);
+
+  // Admin Create Student Modal
+  const [newStudentModalOpen, setNewStudentModalOpen] = useState(false);
+  const [newStudentForm, setNewStudentForm] = useState({
+    fullName: "",
+    schoolId: "" as number | "",
+    routeCode: "ROTA-A",
+    stopName: "Largo do Kinaxixi",
+    shift: "both" as "morning" | "afternoon" | "both",
+    pinPolicy: "both" as "boarding" | "dropoff" | "both",
+    guardianName: "",
+    guardianPhone: "+244 9",
+  });
+  const [creatingStudent, setCreatingStudent] = useState(false);
+
+  // Admin Create / Edit Vehicle Modal
+  const [vehicleModalOpen, setVehicleModalOpen] = useState(false);
+  const [editingVehicleId, setEditingVehicleId] = useState<number | null>(null);
+  const [vehicleForm, setVehicleForm] = useState({
+    fleetNumber: "",
+    plate: "",
+    ownerId: "" as number | "",
+    routeCode: "ROTA-A",
+    capacity: 22,
+    dnvtExpiry: "2027-12-31",
+    dnvtStatus: "valid" as "valid" | "expiring_soon" | "expired",
+    insuranceProvider: "ENSA Seguros de Angola",
+    insuranceStatus: "valid" as "valid" | "pending" | "expired",
+    status: "available",
+  });
+  const [savingVehicle, setSavingVehicle] = useState(false);
+
+  // Admin Edit Driver Modal
+  const [editingDriver, setEditingDriver] = useState<{
+    id: number;
+    fullName: string;
+    phone: string;
+    licenceCategory: string;
+    licenceNumber: string;
+    licenceExpiry: string;
+    availabilityStatus: "in_service" | "available" | "off_duty";
+    monthlyCompensationAoa: number;
+  } | null>(null);
+  const [savingDriver, setSavingDriver] = useState(false);
 
   const [simStatus, setSimStatus] = useState<{
     running: boolean;
@@ -920,6 +966,127 @@ export function AdminView({ onNavigate }: AdminViewProps) {
     }
   }
 
+  async function handleCreateStudent(e: React.FormEvent) {
+    e.preventDefault();
+    const resolvedSchoolId = Number(newStudentForm.schoolId || overview?.schools[0]?.id || 0);
+    if (!resolvedSchoolId || !newStudentForm.fullName.trim()) {
+      showToast("Indique o nome do educando e selecione uma escola.");
+      return;
+    }
+    setCreatingStudent(true);
+    try {
+      const res = await apiFetch<{ message: string }>("/api/v1/admin/students", {
+        method: "POST",
+        body: JSON.stringify({
+          fullName: newStudentForm.fullName.trim(),
+          schoolId: resolvedSchoolId,
+          routeCode: newStudentForm.routeCode.trim(),
+          stopName: newStudentForm.stopName.trim(),
+          shift: newStudentForm.shift,
+          pinPolicy: newStudentForm.pinPolicy,
+          guardianName: newStudentForm.guardianName.trim(),
+          guardianPhone: newStudentForm.guardianPhone.trim(),
+        }),
+      });
+      setNewStudentModalOpen(false);
+      setNewStudentForm({
+        fullName: "",
+        schoolId: "",
+        routeCode: "ROTA-A",
+        stopName: "Largo do Kinaxixi",
+        shift: "both",
+        pinPolicy: "both",
+        guardianName: "",
+        guardianPhone: "+244 9",
+      });
+      showToast(res.message);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao registar educando.");
+    } finally {
+      setCreatingStudent(false);
+    }
+  }
+
+  async function handleSaveVehicle(e: React.FormEvent) {
+    e.preventDefault();
+    const resolvedOwnerId = Number(vehicleForm.ownerId || overview?.vehicleOwners[0]?.id || 0);
+    if (!resolvedOwnerId) {
+      showToast("Selecione um proprietário da viatura.");
+      return;
+    }
+    setSavingVehicle(true);
+    try {
+      if (editingVehicleId) {
+        const res = await apiFetch<{ message: string }>(`/api/v1/admin/vehicles/${editingVehicleId}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            plate: vehicleForm.plate.trim().toUpperCase(),
+            ownerId: resolvedOwnerId,
+            routeCode: vehicleForm.routeCode.trim(),
+            capacity: Number(vehicleForm.capacity) || 22,
+            dnvtExpiry: vehicleForm.dnvtExpiry,
+            dnvtStatus: vehicleForm.dnvtStatus,
+            insuranceProvider: vehicleForm.insuranceProvider.trim(),
+            insuranceStatus: vehicleForm.insuranceStatus,
+            status: vehicleForm.status,
+          }),
+        });
+        showToast(res.message);
+      } else {
+        const res = await apiFetch<{ message: string }>("/api/v1/admin/vehicles", {
+          method: "POST",
+          body: JSON.stringify({
+            fleetNumber: Number(vehicleForm.fleetNumber),
+            plate: vehicleForm.plate.trim().toUpperCase(),
+            ownerId: resolvedOwnerId,
+            routeCode: vehicleForm.routeCode.trim(),
+            capacity: Number(vehicleForm.capacity) || 22,
+            dnvtExpiry: vehicleForm.dnvtExpiry,
+            dnvtStatus: vehicleForm.dnvtStatus,
+            insuranceProvider: vehicleForm.insuranceProvider.trim(),
+            insuranceStatus: vehicleForm.insuranceStatus,
+          }),
+        });
+        showToast(res.message);
+      }
+      setVehicleModalOpen(false);
+      setEditingVehicleId(null);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao guardar viatura.");
+    } finally {
+      setSavingVehicle(false);
+    }
+  }
+
+  async function handleSaveDriverEdit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editingDriver) return;
+    setSavingDriver(true);
+    try {
+      const res = await apiFetch<{ message: string }>(`/api/v1/admin/drivers/${editingDriver.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          fullName: editingDriver.fullName.trim(),
+          phone: editingDriver.phone.trim(),
+          licenceCategory: editingDriver.licenceCategory.trim(),
+          licenceNumber: editingDriver.licenceNumber.trim(),
+          licenceExpiry: editingDriver.licenceExpiry.trim(),
+          availabilityStatus: editingDriver.availabilityStatus,
+          monthlyCompensationAoa: Number(editingDriver.monthlyCompensationAoa) || 0,
+        }),
+      });
+      setEditingDriver(null);
+      showToast(res.message);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao atualizar motorista.");
+    } finally {
+      setSavingDriver(false);
+    }
+  }
+
   function handleDownloadReport(name: string) {
     if (name === "Pauta Diária de Presenças e Desembarque") {
       downloadCsv("mobuss-pauta-presencas-oficial.csv", [
@@ -954,11 +1121,11 @@ export function AdminView({ onNavigate }: AdminViewProps) {
         ...(overview?.drivers ?? []).map((d) => [
           d.fullName,
           d.phone,
-          d.licenseCategory,
-          d.rating,
-          d.tripsCompletedMonth,
-          d.monthlySalaryAoa,
-          d.status,
+          d.licenceCategory,
+          d.ratingAvg,
+          d.tripsCompleted,
+          d.monthlyCompensationAoa,
+          d.availabilityStatus,
         ]),
       ]);
     } else if (name === "Relatório mensal de viagens") {
@@ -1494,20 +1661,52 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                 </div>
               </Card>
 
-              <Table head={["Autocarro", "Matrícula", "Proprietário", "Corredor", "Motorista Alocado", "DNVT / Seguro", "Atribuir Motorista"]}>
+              <div className="flex flex-wrap justify-between items-center gap-3">
+                <span className="text-xs text-slide-dim">
+                  Frota registada e alocação de motoristas verificados ({vehiclesList.length} viatura(s)).
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingVehicleId(null);
+                    setVehicleForm({
+                      fleetNumber: String((overview?.vehicles.length ?? 0) + 1),
+                      plate: "",
+                      ownerId: overview?.vehicleOwners[0]?.id ?? "",
+                      routeCode: "ROTA-A",
+                      capacity: 22,
+                      dnvtExpiry: "2027-12-31",
+                      dnvtStatus: "valid",
+                      insuranceProvider: "ENSA Seguros de Angola",
+                      insuranceStatus: "valid",
+                      status: "available",
+                    });
+                    setVehicleModalOpen(true);
+                  }}
+                  className="rounded-xl bg-slide-accent text-white px-3.5 py-2 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Registar Nova Viatura</span>
+                </button>
+              </div>
+
+              <Table head={["Autocarro", "Matrícula", "Proprietário", "Corredor", "Motorista Alocado", "DNVT / Seguro", "Ações"]}>
                 {vehiclesList.map((v) => (
                   <tr key={v.id} className="hover:bg-white/[0.03] text-xs">
-                    <td className="p-3.5 font-bold text-white">Autocarro {v.fleetNumber}</td>
+                    <td className="p-3.5 font-bold text-white">
+                      <div>Autocarro {v.fleetNumber}</div>
+                      <div className="text-[10px] text-slide-dim font-normal">{v.capacity} lugares · {v.status}</div>
+                    </td>
                     <td className="p-3.5 font-mono font-bold">{v.plate}</td>
                     <td className="p-3.5 text-slide-dim">{v.ownerName}</td>
                     <td className="p-3.5 text-slide-accent font-semibold">{v.routeCode}</td>
                     <td className="p-3.5 font-medium">{v.driverName}</td>
                     <td className="p-3.5 text-[11px] text-slide-dim">
-                      <div>DNVT: {v.dnvtStatus}</div>
+                      <div>DNVT: {v.dnvtStatus} ({v.dnvtExpiry})</div>
                       <div>{v.insuranceProvider}</div>
                     </td>
                     <td className="p-3.5">
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex flex-wrap items-center gap-1.5">
                         <select
                           value={assignDriverSelection[v.id] ?? v.assignedDriverId ?? ""}
                           onChange={(e) =>
@@ -1526,10 +1725,34 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                           ))}
                         </select>
                         <button
+                          type="button"
                           onClick={() => void handleAssignDriver(v.id, v.assignedDriverId ?? 0)}
                           className="px-2.5 py-1 rounded-lg bg-slide-accent text-white font-bold cursor-pointer"
                         >
                           Alocar
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingVehicleId(v.id);
+                            setVehicleForm({
+                              fleetNumber: String(v.fleetNumber),
+                              plate: v.plate,
+                              ownerId: v.ownerId,
+                              routeCode: v.routeCode || "ROTA-A",
+                              capacity: v.capacity,
+                              dnvtExpiry: v.dnvtExpiry,
+                              dnvtStatus: (v.dnvtStatus === "expiring_soon" || v.dnvtStatus === "expired" ? v.dnvtStatus : "valid"),
+                              insuranceProvider: v.insuranceProvider,
+                              insuranceStatus: (v.insuranceStatus === "pending" || v.insuranceStatus === "expired" ? v.insuranceStatus : "valid"),
+                              status: v.status,
+                            });
+                            setVehicleModalOpen(true);
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-slide-bg border border-white/15 hover:bg-white/10 font-semibold cursor-pointer inline-flex items-center gap-1"
+                        >
+                          <Pencil className="w-3 h-3 text-emerald-300" />
+                          <span>Editar</span>
                         </button>
                       </div>
                     </td>
@@ -1553,17 +1776,53 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                 </button>
               </div>
 
-              <Table head={["Motorista", "Contacto", "Categoria", "Avaliação", "Viagens Mês", "Salário Bruto", "Estado"]}>
+              <Table head={["Motorista", "Contacto", "Categoria", "Avaliação", "Viagens Mês", "Salário Bruto", "Estado", "Ações"]}>
                 {driversList.map((d) => (
                   <tr key={d.id} className="hover:bg-white/[0.03] text-xs">
                     <td className="p-3.5 font-bold text-white">{d.fullName}</td>
                     <td className="p-3.5 font-mono text-slide-dim">{d.phone}</td>
-                    <td className="p-3.5 text-slide-dim">{d.licenseCategory}</td>
-                    <td className="p-3.5 text-amber-400 font-bold tabular-nums">★ {d.rating}</td>
-                    <td className="p-3.5 font-mono tabular-nums">{d.tripsCompletedMonth}</td>
-                    <td className="p-3.5 font-mono font-bold">{formatAOA(d.monthlySalaryAoa)}</td>
+                    <td className="p-3.5 text-slide-dim">
+                      <div>{d.licenceCategory}</div>
+                      <div className="text-[10px] font-mono">{d.licenceNumber} · val. {d.licenceExpiry}</div>
+                    </td>
+                    <td className="p-3.5 text-amber-400 font-bold tabular-nums">★ {d.ratingAvg}</td>
+                    <td className="p-3.5 font-mono tabular-nums">{d.tripsCompleted}</td>
+                    <td className="p-3.5 font-mono font-bold">{formatAOA(d.monthlyCompensationAoa)}</td>
                     <td className="p-3.5">
-                      <StatusBadge s={d.status === "on_duty" ? "Em serviço" : d.status === "available" ? "Disponível" : "De folga"} />
+                      <StatusBadge
+                        s={
+                          d.availabilityStatus === "in_service"
+                            ? "Em serviço"
+                            : d.availabilityStatus === "available"
+                            ? "Disponível"
+                            : "De folga"
+                        }
+                      />
+                    </td>
+                    <td className="p-3.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditingDriver({
+                            id: d.id,
+                            fullName: d.fullName,
+                            phone: d.phone,
+                            licenceCategory: d.licenceCategory,
+                            licenceNumber: d.licenceNumber,
+                            licenceExpiry: d.licenceExpiry,
+                            availabilityStatus: (
+                              d.availabilityStatus === "in_service" || d.availabilityStatus === "off_duty"
+                                ? d.availabilityStatus
+                                : "available"
+                            ),
+                            monthlyCompensationAoa: d.monthlyCompensationAoa,
+                          })
+                        }
+                        className="px-2.5 py-1 rounded-lg bg-slide-bg border border-white/15 hover:bg-white/10 font-semibold cursor-pointer inline-flex items-center gap-1"
+                      >
+                        <Pencil className="w-3 h-3 text-emerald-300" />
+                        <span>Editar</span>
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -1576,13 +1835,26 @@ export function AdminView({ onNavigate }: AdminViewProps) {
             <div className="space-y-4">
               <div className="flex flex-wrap justify-between items-center gap-3 text-xs text-slide-dim">
                 <span>Diretório nominal de educandos. Códigos PIN são armazenados em hash e nunca são exibidos em texto simples.</span>
-                <button
-                  onClick={() => handleDownloadReport("Pauta Diária de Presenças e Desembarque")}
-                  className="bg-slide-surface border border-white/10 text-slide-paper px-3.5 py-2 rounded-xl font-semibold cursor-pointer inline-flex items-center gap-2"
-                >
-                  <ClipboardList className="w-3.5 h-3.5" />
-                  <span>Exportar Pauta Segura CSV</span>
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNewStudentForm((f) => ({ ...f, schoolId: f.schoolId || overview?.schools[0]?.id || "" }));
+                      setNewStudentModalOpen(true);
+                    }}
+                    className="bg-slide-accent text-white px-3.5 py-2 rounded-xl font-bold cursor-pointer inline-flex items-center gap-1.5"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Registar Novo Aluno</span>
+                  </button>
+                  <button
+                    onClick={() => handleDownloadReport("Pauta Diária de Presenças e Desembarque")}
+                    className="bg-slide-surface border border-white/10 text-slide-paper px-3.5 py-2 rounded-xl font-semibold cursor-pointer inline-flex items-center gap-2"
+                  >
+                    <ClipboardList className="w-3.5 h-3.5" />
+                    <span>Exportar Pauta Segura CSV</span>
+                  </button>
+                </div>
               </div>
 
               <Table head={["Aluno(a)", "Escola", "Rota / Paragem", "Encarregado", "PIN", "Estado", "Ações"]}>
@@ -1831,7 +2103,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                               guardian: inv.guardianName,
                               phone: inv.phone,
                               amountValue: inv.amountAoa,
-                              date: new Date(inv.issuedAt).toLocaleDateString("pt-AO"),
+                              date: new Date(inv.createdAt).toLocaleDateString("pt-AO"),
                               emisRef: inv.providerReference ?? "PENDENTE",
                               agtCert: inv.fiscalStatus,
                               status: inv.status === "confirmed" ? "Validado" : "Pendente",
@@ -1875,9 +2147,9 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                     <td className="p-3.5 font-bold text-white">Autocarro {v.fleetNumber}</td>
                     <td className="p-3.5 font-mono">{v.plate}</td>
                     <td className="p-3.5"><StatusBadge s={v.dnvtStatus === "valid" ? "Válido" : "A renovar"} /></td>
-                    <td className="p-3.5 font-mono text-slide-dim">{v.dnvtExpiresAt}</td>
+                    <td className="p-3.5 font-mono text-slide-dim">{v.dnvtExpiry}</td>
                     <td className="p-3.5 text-slide-dim">{v.insuranceProvider}</td>
-                    <td className="p-3.5"><StatusBadge s={v.insuranceStatus === "active" ? "Válido" : "Pendente"} /></td>
+                    <td className="p-3.5"><StatusBadge s={v.insuranceStatus === "valid" || v.insuranceStatus === "active" ? "Válido" : "Pendente"} /></td>
                   </tr>
                 ))}
               </Table>
@@ -2802,6 +3074,336 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                 Cancelar
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Registar Novo Educando (Admin) */}
+      {newStudentModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-lg rounded-2xl bg-slide-paper-ink text-slide-paper p-6 border border-white/15 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-black">Registar Novo Educando</h3>
+              <button type="button" onClick={() => setNewStudentModalOpen(false)} className="p-1.5 rounded-full bg-slide-surface cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleCreateStudent} className="space-y-3 text-xs">
+              <input
+                required
+                value={newStudentForm.fullName}
+                onChange={(e) => setNewStudentForm({ ...newStudentForm, fullName: e.target.value })}
+                placeholder="Nome completo do aluno"
+                className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+              />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <select
+                  required
+                  value={newStudentForm.schoolId}
+                  onChange={(e) => setNewStudentForm({ ...newStudentForm, schoolId: Number(e.target.value) })}
+                  className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                >
+                  <option value="">Selecionar escola...</option>
+                  {(overview?.schools ?? []).map((sc) => (
+                    <option key={sc.id} value={sc.id}>
+                      {sc.name}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  required
+                  value={newStudentForm.routeCode}
+                  onChange={(e) => setNewStudentForm({ ...newStudentForm, routeCode: e.target.value })}
+                  placeholder="Rota (ex: ROTA-A)"
+                  className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
+                />
+              </div>
+              <input
+                required
+                value={newStudentForm.stopName}
+                onChange={(e) => setNewStudentForm({ ...newStudentForm, stopName: e.target.value })}
+                placeholder="Paragem de embarque / entrega"
+                className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+              />
+              <div className="grid grid-cols-2 gap-3">
+                <select
+                  value={newStudentForm.shift}
+                  onChange={(e) => setNewStudentForm({ ...newStudentForm, shift: e.target.value as "morning" | "afternoon" | "both" })}
+                  className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                >
+                  <option value="both">Manhã + Tarde</option>
+                  <option value="morning">Manhã</option>
+                  <option value="afternoon">Tarde</option>
+                </select>
+                <select
+                  value={newStudentForm.pinPolicy}
+                  onChange={(e) => setNewStudentForm({ ...newStudentForm, pinPolicy: e.target.value as "boarding" | "dropoff" | "both" })}
+                  className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                >
+                  <option value="both">PIN Embarque + Desembarque</option>
+                  <option value="boarding">Só Embarque</option>
+                  <option value="dropoff">Só Desembarque</option>
+                </select>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <input
+                  value={newStudentForm.guardianName}
+                  onChange={(e) => setNewStudentForm({ ...newStudentForm, guardianName: e.target.value })}
+                  placeholder="Nome do Encarregado (opcional)"
+                  className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                />
+                <input
+                  value={newStudentForm.guardianPhone}
+                  onChange={(e) => setNewStudentForm({ ...newStudentForm, guardianPhone: e.target.value })}
+                  placeholder="Telefone Encarregado"
+                  className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={creatingStudent}
+                className="w-full rounded-xl bg-slide-ok text-white py-3 font-bold cursor-pointer disabled:opacity-50"
+              >
+                {creatingStudent ? "A registar..." : "Registar Educando & Gerar PIN"}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Criar / Editar Viatura */}
+      {vehicleModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-lg rounded-2xl bg-slide-paper-ink text-slide-paper p-6 border border-white/15 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-black">{editingVehicleId ? "Editar Viatura da Frota" : "Registar Nova Viatura"}</h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setVehicleModalOpen(false);
+                  setEditingVehicleId(null);
+                }}
+                className="p-1.5 rounded-full bg-slide-surface cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveVehicle} className="space-y-3 text-xs">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Nº Frota</label>
+                  <input
+                    required
+                    type="number"
+                    min={1}
+                    disabled={Boolean(editingVehicleId)}
+                    value={vehicleForm.fleetNumber}
+                    onChange={(e) => setVehicleForm({ ...vehicleForm, fleetNumber: e.target.value })}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none disabled:opacity-50"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Matrícula</label>
+                  <input
+                    required
+                    value={vehicleForm.plate}
+                    onChange={(e) => setVehicleForm({ ...vehicleForm, plate: e.target.value })}
+                    placeholder="LD-99-88-AB"
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono uppercase outline-none"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Proprietário</label>
+                  <select
+                    required
+                    value={vehicleForm.ownerId}
+                    onChange={(e) => setVehicleForm({ ...vehicleForm, ownerId: Number(e.target.value) })}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                  >
+                    <option value="">Selecionar proprietário...</option>
+                    {(overview?.vehicleOwners ?? []).map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.fullName}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Corredor / Rota</label>
+                  <input
+                    required
+                    value={vehicleForm.routeCode}
+                    onChange={(e) => setVehicleForm({ ...vehicleForm, routeCode: e.target.value })}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Lugares</label>
+                  <input
+                    type="number"
+                    min={8}
+                    value={vehicleForm.capacity}
+                    onChange={(e) => setVehicleForm({ ...vehicleForm, capacity: Number(e.target.value) || 22 })}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white font-mono outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Validade DNVT</label>
+                  <input
+                    required
+                    value={vehicleForm.dnvtExpiry}
+                    onChange={(e) => setVehicleForm({ ...vehicleForm, dnvtExpiry: e.target.value })}
+                    placeholder="2027-12-31"
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white font-mono outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Estado DNVT</label>
+                  <select
+                    value={vehicleForm.dnvtStatus}
+                    onChange={(e) => setVehicleForm({ ...vehicleForm, dnvtStatus: e.target.value as "valid" | "expiring_soon" | "expired" })}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white outline-none"
+                  >
+                    <option value="valid">Válido</option>
+                    <option value="expiring_soon">A expirar</option>
+                    <option value="expired">Expirado</option>
+                  </select>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Seguradora</label>
+                  <input
+                    value={vehicleForm.insuranceProvider}
+                    onChange={(e) => setVehicleForm({ ...vehicleForm, insuranceProvider: e.target.value })}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Estado Seguro</label>
+                  <select
+                    value={vehicleForm.insuranceStatus}
+                    onChange={(e) => setVehicleForm({ ...vehicleForm, insuranceStatus: e.target.value as "valid" | "pending" | "expired" })}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                  >
+                    <option value="valid">Válido</option>
+                    <option value="pending">Pendente</option>
+                    <option value="expired">Expirado</option>
+                  </select>
+                </div>
+              </div>
+              <button
+                type="submit"
+                disabled={savingVehicle}
+                className="w-full rounded-xl bg-slide-ok text-white py-3 font-bold cursor-pointer disabled:opacity-50"
+              >
+                {savingVehicle ? "A guardar..." : editingVehicleId ? "Guardar Alterações da Viatura" : "Registar Viatura"}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Editar Motorista */}
+      {editingDriver && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-lg rounded-2xl bg-slide-paper-ink text-slide-paper p-6 border border-white/15 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-black">Editar Dados do Motorista</h3>
+              <button type="button" onClick={() => setEditingDriver(null)} className="p-1.5 rounded-full bg-slide-surface cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveDriverEdit} className="space-y-3 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Nome Completo</label>
+                  <input
+                    required
+                    value={editingDriver.fullName}
+                    onChange={(e) => setEditingDriver({ ...editingDriver, fullName: e.target.value })}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Telefone</label>
+                  <input
+                    required
+                    value={editingDriver.phone}
+                    onChange={(e) => setEditingDriver({ ...editingDriver, phone: e.target.value })}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Categoria Carta</label>
+                  <input
+                    value={editingDriver.licenceCategory}
+                    onChange={(e) => setEditingDriver({ ...editingDriver, licenceCategory: e.target.value })}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Nº Carta</label>
+                  <input
+                    value={editingDriver.licenceNumber}
+                    onChange={(e) => setEditingDriver({ ...editingDriver, licenceNumber: e.target.value })}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white font-mono outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Validade Carta</label>
+                  <input
+                    value={editingDriver.licenceExpiry}
+                    onChange={(e) => setEditingDriver({ ...editingDriver, licenceExpiry: e.target.value })}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white font-mono outline-none"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Disponibilidade</label>
+                  <select
+                    value={editingDriver.availabilityStatus}
+                    onChange={(e) =>
+                      setEditingDriver({
+                        ...editingDriver,
+                        availabilityStatus: e.target.value as "in_service" | "available" | "off_duty",
+                      })
+                    }
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                  >
+                    <option value="in_service">Em serviço</option>
+                    <option value="available">Disponível</option>
+                    <option value="off_duty">De folga</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Compensação Mensal (Kz)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={editingDriver.monthlyCompensationAoa}
+                    onChange={(e) =>
+                      setEditingDriver({ ...editingDriver, monthlyCompensationAoa: Number(e.target.value) || 0 })
+                    }
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
+                  />
+                </div>
+              </div>
+              <button
+                type="submit"
+                disabled={savingDriver}
+                className="w-full rounded-xl bg-slide-ok text-white py-3 font-bold cursor-pointer disabled:opacity-50"
+              >
+                {savingDriver ? "A guardar..." : "Guardar Dados do Motorista"}
+              </button>
+            </form>
           </div>
         </div>
       )}
