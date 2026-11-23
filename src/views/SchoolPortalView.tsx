@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { useAuth, ROLE_LABELS } from '@/contexts/AuthContext';
 import { AuthGatePanel } from '@/components/AuthGatePanel';
+import { APP_TARGET } from '@/lib/runtime-config';
 import { useTelemetrySocket } from '@/hooks/useTelemetrySocket';
 import { downloadCsv } from '@/lib/operations';
 import { formatAOA } from '@/lib/mobuss-sync';
@@ -391,19 +392,29 @@ export function SchoolPortalView() {
           </nav>
         </div>
 
-        <div className="rounded-2xl bg-slide-bg border border-white/10 p-3.5 text-[11px] text-slide-dim space-y-1.5">
-          <div className="font-bold text-slide-paper flex items-center gap-1.5">
-            <ShieldCheck className="w-3.5 h-3.5 text-slide-ok shrink-0" />
-            <span>Limites de Operação</span>
+        <div className="space-y-3">
+          <div className="rounded-2xl bg-slide-bg border border-white/10 p-3.5 text-[11px] text-slide-dim space-y-1.5">
+            <div className="font-bold text-slide-paper flex items-center gap-1.5">
+              <ShieldCheck className="w-3.5 h-3.5 text-slide-ok shrink-0" />
+              <span>Limites de Operação</span>
+            </div>
+            <p className="leading-relaxed">
+              A escola gere a sua pauta e solicita alterações; a MôBuss controla motoristas, viaturas e despacho.
+            </p>
           </div>
-          <p className="leading-relaxed">
-            A escola gere a sua pauta e solicita alterações; a MôBuss controla motoristas, viaturas e despacho.
-          </p>
+          <button
+            type="button"
+            onClick={() => void signOut()}
+            className="w-full flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-semibold text-red-300 hover:text-white hover:bg-red-500/10 transition cursor-pointer text-left"
+          >
+            <LogOut className="w-3.5 h-3.5 shrink-0" />
+            <span>Terminar Sessão (Sair)</span>
+          </button>
         </div>
       </aside>
 
       {/* Mobile Tabs */}
-      <div className="lg:hidden border-b border-white/10 bg-slide-paper-ink px-4 py-2 overflow-x-auto no-scrollbar flex gap-1.5">
+      <div className="lg:hidden border-b border-white/10 bg-slide-paper-ink px-4 py-2 overflow-x-auto no-scrollbar flex items-center gap-1.5">
         {SCHOOL_TABS.map(({ id, Icon }) => (
           <button
             key={id}
@@ -416,6 +427,16 @@ export function SchoolPortalView() {
             <span>{id}</span>
           </button>
         ))}
+        {APP_TARGET !== 'hub' && (
+          <button
+            type="button"
+            onClick={() => void signOut()}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer bg-red-500/15 text-red-300 hover:text-white ml-auto"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Sair</span>
+          </button>
+        )}
       </div>
 
       {/* Main Content */}

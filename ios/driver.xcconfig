@@ -1,0 +1,3 @@
+MOBUSS_BUNDLE_ID = ao.mobuss.driver
+PRODUCT_BUNDLE_IDENTIFIER = ao.mobuss.driver
+MOBUSS_DISPLAY_NAME = MôBuss Motorista

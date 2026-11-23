@@ -81,7 +81,10 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "revision": "1872c500de691dce40960bb85481de07"
   }, {
     "url": "index.html",
-    "revision": "10f060a9d95c33b0c376ffe486249a0b"
+    "revision": "db2bdf7ec3a3d1280967725c4cdb6b9f"
+  }, {
+    "url": "assets/wifi-BzLOVOsC.js",
+    "revision": null
   }, {
     "url": "assets/web-w3LekBH0.js",
     "revision": null
@@ -89,19 +92,31 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "url": "assets/web-3i_PcZjY.js",
     "revision": null
   }, {
+    "url": "assets/useTelemetrySocket-D5bNwQgK.js",
+    "revision": null
+  }, {
+    "url": "assets/siren-DdisCRIE.js",
+    "revision": null
+  }, {
     "url": "assets/rolldown-runtime-BWaJ3C7D.js",
+    "revision": null
+  }, {
+    "url": "assets/refresh-cw-Hwsijae9.js",
     "revision": null
   }, {
     "url": "assets/plus-Bime9_k7.js",
     "revision": null
   }, {
+    "url": "assets/phone-BfeQIEPB.js",
+    "revision": null
+  }, {
     "url": "assets/leaflet-src-Dyou-yFy.js",
     "revision": null
   }, {
-    "url": "assets/index-BrKQlDUV.css",
+    "url": "assets/index-hmnBcQdN.js",
     "revision": null
   }, {
-    "url": "assets/index-BUgJ8Y2C.js",
+    "url": "assets/index-BMHRqL8o.css",
     "revision": null
   }, {
     "url": "assets/dist-CMedSjkm.js",
@@ -110,19 +125,43 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "url": "assets/createLucideIcon-Bdr3QCoh.js",
     "revision": null
   }, {
-    "url": "assets/SchoolPortalView-BpD8CKM7.js",
+    "url": "assets/clipboard-list-B0Hm81oq.js",
     "revision": null
   }, {
-    "url": "assets/MockupView-BUC7KMfc.js",
+    "url": "assets/circle-check-DGmBudT0.js",
     "revision": null
   }, {
-    "url": "assets/DeckView-CKoMvEg2.js",
+    "url": "assets/check-DU0JO3A9.js",
     "revision": null
   }, {
-    "url": "assets/ContractRequestPage-DdxEsESF.js",
+    "url": "assets/SchoolPortalView-c0cV_xzy.js",
     "revision": null
   }, {
-    "url": "assets/AdminView-CSkil5Wp.js",
+    "url": "assets/NativeMobileApp-YSzav3U8.js",
+    "revision": null
+  }, {
+    "url": "assets/MockupView-BfCqjsHF.js",
+    "revision": null
+  }, {
+    "url": "assets/MobileAppEntry-ByPM0fo2.js",
+    "revision": null
+  }, {
+    "url": "assets/LuandaMap-vh-t_kPv.css",
+    "revision": null
+  }, {
+    "url": "assets/LuandaMap-CF8_MuBq.js",
+    "revision": null
+  }, {
+    "url": "assets/DeckView-BYslM_Rq.js",
+    "revision": null
+  }, {
+    "url": "assets/ContractRequestPage-Bd3AjgsF.js",
+    "revision": null
+  }, {
+    "url": "assets/AuthGatePanel-8t_vpjmw.js",
+    "revision": null
+  }, {
+    "url": "assets/AdminView-CvvhuwP_.js",
     "revision": null
   }, {
     "url": "apple-touch-icon.png",
@@ -141,7 +180,7 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "revision": "8b3691cc1dd889d79a58975eed8224ec"
   }, {
     "url": "manifest.webmanifest",
-    "revision": "5edb1c646164b9854e989b2169605806"
+    "revision": "7a7238a68ea70ad54cb1599123fd57a5"
   }], {});
   workbox.cleanupOutdatedCaches();
   workbox.registerRoute(new workbox.NavigationRoute(workbox.createHandlerBoundToURL("index.html"), {

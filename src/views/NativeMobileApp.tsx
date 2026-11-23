@@ -1850,7 +1850,7 @@ export function NativeMobileApp({
                       </span>
                     </div>
                     <div className="text-[11px] text-zinc-600">
-                      3 autocarros dedicados · 75 alunos · 1 050 000 Kz/mês · Talatona
+                      3 autocarros / motoristas · 75 alunos · 324 000 Kz/mês · Talatona
                     </div>
                   </div>
 

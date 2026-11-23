@@ -1,13 +1,26 @@
 import { Capacitor } from '@capacitor/core';
 
-export type AppTarget = 'hub' | 'client' | 'driver';
+export type AppTarget = 'hub' | 'client' | 'driver' | 'admin' | 'school';
 
-export const APP_TARGET: AppTarget = (() => {
-  const raw = (import.meta.env.VITE_APP_TARGET as string | undefined)?.toLowerCase().trim();
-  if (raw === 'client') return 'client';
-  if (raw === 'driver') return 'driver';
-  return 'hub';
-})();
+export const APP_TARGET: AppTarget =
+  typeof __MOBUSS_APP_TARGET__ !== 'undefined'
+    ? __MOBUSS_APP_TARGET__
+    : (() => {
+        const raw = (import.meta.env.VITE_APP_TARGET as string | undefined)?.toLowerCase().trim();
+        if (raw === 'client') return 'client';
+        if (raw === 'driver') return 'driver';
+        if (raw === 'admin') return 'admin';
+        if (raw === 'school') return 'school';
+        return 'hub';
+      })();
+
+export const APP_TARGET_TITLE: Record<AppTarget, string> = {
+  hub: 'MôBuss — Transporte Escolar Inteligente',
+  client: 'MôBuss Cliente — Encarregados & Parceiros',
+  driver: 'MôBuss Motorista — App Oficial',
+  admin: 'MôBuss Admin — Central de Operações',
+  school: 'MôBuss Portal Escolar',
+};
 
 function sanitizeApiBaseUrl(raw?: string): string {
   let candidate = (raw || '').trim();

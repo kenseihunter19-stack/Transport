@@ -58,6 +58,7 @@ export interface SyncedAlert {
 
 export interface SyncedPricingConfig {
   studentMonthlyFee: number;
+  driverMonthlyFee: number;
   schoolBusSingleShift: number;
   schoolBusDoubleShift: number;
   ivaPercent: number;
@@ -93,7 +94,7 @@ export interface MoBussSyncState {
   payments: SyncedPayment[];
 }
 
-const STORAGE_KEY = "mobuss_platform_sync_v2";
+const STORAGE_KEY = "mobuss_platform_sync_v3";
 const SYNC_EVENT = "mobuss:sync";
 
 export function formatAOA(amount: number): string {
@@ -101,9 +102,10 @@ export function formatAOA(amount: number): string {
 }
 
 export const DEFAULT_PRICING: SyncedPricingConfig = {
-  studentMonthlyFee: 45000,
-  schoolBusSingleShift: 250000,
-  schoolBusDoubleShift: 350000,
+  studentMonthlyFee: 3000,
+  driverMonthlyFee: 33000,
+  schoolBusSingleShift: 33000,
+  schoolBusDoubleShift: 33000,
   ivaPercent: 14,
   companyName: "MôBuss Angola Transporte Escolar Lda.",
   companyNif: "5417209418",
@@ -118,8 +120,8 @@ export const INITIAL_PAYMENTS: SyncedPayment[] = [
     student: "Maria Domingos",
     guardian: "Sra. Luísa Domingos",
     phone: "+244 923 456 789",
-    amount: "45 000 Kz",
-    amountValue: 45000,
+    amount: "3 000 Kz",
+    amountValue: 3000,
     date: "27 Out 2026",
     time: "07:15",
     status: "Validado",
@@ -133,8 +135,8 @@ export const INITIAL_PAYMENTS: SyncedPayment[] = [
     student: "Edson Manuel",
     guardian: "Sr. Manuel Neto",
     phone: "+244 912 345 678",
-    amount: "45 000 Kz",
-    amountValue: 45000,
+    amount: "3 000 Kz",
+    amountValue: 3000,
     date: "27 Out 2026",
     time: "07:22",
     status: "Validado",
@@ -148,8 +150,8 @@ export const INITIAL_PAYMENTS: SyncedPayment[] = [
     student: "Sofia Pedro",
     guardian: "Sra. Isabel Pedro",
     phone: "+244 923 888 777",
-    amount: "45 000 Kz",
-    amountValue: 45000,
+    amount: "3 000 Kz",
+    amountValue: 3000,
     date: "26 Out 2026",
     time: "18:40",
     status: "Validado",
@@ -163,8 +165,8 @@ export const INITIAL_PAYMENTS: SyncedPayment[] = [
     student: "Bruno Neto",
     guardian: "Sr. Carlos Neto",
     phone: "+244 945 678 901",
-    amount: "45 000 Kz",
-    amountValue: 45000,
+    amount: "3 000 Kz",
+    amountValue: 3000,
     date: "26 Out 2026",
     time: "20:05",
     status: "Pendente",
@@ -181,7 +183,7 @@ export const INITIAL_CONTRACTS: SyncedContract[] = [
     location: "Morro Bento, Luanda",
     buses: 4,
     students: 90,
-    value: "1 200 000 Kz",
+    value: "402 000 Kz",
     status: "Ativo",
     contact: "Director Pedagógico Alberto",
     phone: "+244 923 111 222",
@@ -192,7 +194,7 @@ export const INITIAL_CONTRACTS: SyncedContract[] = [
     location: "Maianga, Luanda",
     buses: 2,
     students: 45,
-    value: "650 000 Kz",
+    value: "201 000 Kz",
     status: "Ativo",
     contact: "Irmã Graça (Secretaria)",
     phone: "+244 912 333 444",
@@ -203,7 +205,7 @@ export const INITIAL_CONTRACTS: SyncedContract[] = [
     location: "Talatona, Luanda",
     buses: 3,
     students: 75,
-    value: "1 050 000 Kz",
+    value: "324 000 Kz",
     status: "Pedido",
     contact: "Dr. Manuel Ferreira",
     phone: "+244 934 555 666",
@@ -214,7 +216,7 @@ export const INITIAL_CONTRACTS: SyncedContract[] = [
     location: "Cidade do Kilamba",
     buses: 3,
     students: 80,
-    value: "900 000 Kz",
+    value: "339 000 Kz",
     status: "Pedido",
     contact: "Prof. António Luvualu",
     phone: "+244 945 777 888",
@@ -225,7 +227,7 @@ export const INITIAL_CONTRACTS: SyncedContract[] = [
     location: "Talatona Sul",
     buses: 5,
     students: 120,
-    value: "1 600 000 Kz",
+    value: "525 000 Kz",
     status: "Ativo",
     contact: "Dra. Nicole Santos",
     phone: "+244 928 999 000",
@@ -236,7 +238,7 @@ export const INITIAL_CONTRACTS: SyncedContract[] = [
     location: "Miramar, Luanda",
     buses: 2,
     students: 40,
-    value: "700 000 Kz",
+    value: "186 000 Kz",
     status: "Recusado",
     contact: "Secretariat de Gestion",
     phone: "+244 918 000 111",
@@ -311,7 +313,7 @@ const DEFAULT_SYNC_STATE: MoBussSyncState = {
 
 export function readMoBussSync(): MoBussSyncState {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem("mobuss_platform_sync_v1");
+    const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULT_SYNC_STATE;
     const parsed = JSON.parse(raw) as Partial<MoBussSyncState>;
     return {

@@ -131,7 +131,7 @@ export const drivers = pgTable('drivers', {
   availabilityStatus: text('availability_status').notNull().default('in_service'), // in_service | available | off_duty
   ratingAvg: text('rating_avg').notNull().default('4.9'),
   tripsCompleted: integer('trips_completed').notNull().default(0),
-  monthlyCompensationAoa: integer('monthly_compensation_aoa').notNull().default(210000),
+  monthlyCompensationAoa: integer('monthly_compensation_aoa').notNull().default(33000),
   lastCheckInTime: text('last_check_in_time'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
@@ -145,6 +145,7 @@ export const vehicles = pgTable('vehicles', {
     .references(() => vehicleOwners.id)
     .notNull(),
   assignedDriverId: integer('assigned_driver_id').references(() => drivers.id),
+  assignedSchoolId: integer('assigned_school_id').references(() => schools.id),
   routeCode: text('route_code'),
   routeName: text('route_name'),
   capacity: integer('capacity').notNull().default(22),
@@ -248,6 +249,26 @@ export const trips = pgTable('trips', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
+export const recurringRouteSchedules = pgTable('recurring_route_schedules', {
+  id: serial('id').primaryKey(),
+  schoolId: integer('school_id')
+    .references(() => schools.id, { onDelete: 'cascade' })
+    .notNull(),
+  vehicleId: integer('vehicle_id').references(() => vehicles.id, { onDelete: 'set null' }),
+  driverId: integer('driver_id').references(() => drivers.id, { onDelete: 'set null' }),
+  routeCode: text('route_code').notNull(),
+  routeName: text('route_name').notNull(),
+  daysOfWeek: text('days_of_week').notNull().default('mon,tue,wed,thu,fri'),
+  shiftType: text('shift_type').notNull().default('morning'), // morning | afternoon
+  departureTime: text('departure_time').notNull(), // HH:MM
+  arrivalTime: text('arrival_time').notNull(), // HH:MM
+  active: boolean('active').notNull().default(true),
+  notes: text('notes'),
+  createdByUid: text('created_by_uid'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
 export const attendanceEvents = pgTable('attendance_events', {
   id: serial('id').primaryKey(),
   eventId: text('event_id').notNull().unique(), // Client idempotency UUID
@@ -307,9 +328,10 @@ export const incidents = pgTable('incidents', {
 
 export const pricingConfigs = pgTable('pricing_configs', {
   id: serial('id').primaryKey(),
-  studentMonthlyFeeAoa: integer('student_monthly_aoa').notNull().default(45000),
-  schoolBusSingleShiftAoa: integer('school_bus_single_shift_aoa').notNull().default(250000),
-  schoolBusDoubleShiftAoa: integer('school_bus_double_shift_aoa').notNull().default(350000),
+  studentMonthlyFeeAoa: integer('student_monthly_aoa').notNull().default(3000),
+  driverMonthlyFeeAoa: integer('driver_monthly_fee_aoa').notNull().default(33000),
+  schoolBusSingleShiftAoa: integer('school_bus_single_shift_aoa').notNull().default(33000),
+  schoolBusDoubleShiftAoa: integer('school_bus_double_shift_aoa').notNull().default(33000),
   ivaPercent: integer('iva_percent').notNull().default(14),
   companyName: text('company_name').notNull().default('MôBuss Angola Transporte Escolar Lda.'),
   companyNif: text('company_nif').notNull().default('5417209418'),
@@ -395,6 +417,25 @@ export const vehiclesRelations = relations(vehicles, ({ one }) => ({
   }),
   driver: one(drivers, {
     fields: [vehicles.assignedDriverId],
+    references: [drivers.id],
+  }),
+  school: one(schools, {
+    fields: [vehicles.assignedSchoolId],
+    references: [schools.id],
+  }),
+}));
+
+export const recurringRouteSchedulesRelations = relations(recurringRouteSchedules, ({ one }) => ({
+  school: one(schools, {
+    fields: [recurringRouteSchedules.schoolId],
+    references: [schools.id],
+  }),
+  vehicle: one(vehicles, {
+    fields: [recurringRouteSchedules.vehicleId],
+    references: [vehicles.id],
+  }),
+  driver: one(drivers, {
+    fields: [recurringRouteSchedules.driverId],
     references: [drivers.id],
   }),
 }));

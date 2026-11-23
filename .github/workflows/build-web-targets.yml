@@ -1,0 +1,66 @@
+name: Build All MôBuss Web Targets (Client, Driver, Admin, School)
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Production target to build'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - client
+          - driver
+          - admin
+          - school
+
+jobs:
+  typecheck:
+    name: TypeScript Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+      - run: npm ci || npm install
+      - run: npm run lint
+
+  build-target:
+    name: Build dist/${{ matrix.target }}
+    needs: typecheck
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.target == 'all' || github.event.inputs.target == matrix.target
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [client, driver, admin, school]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - run: npm ci || npm install
+
+      - name: Build MôBuss ${{ matrix.target }}
+        env:
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+        run: npm run build:${{ matrix.target }}
+
+      - name: Verify isolated output directory
+        run: test -f "dist/${{ matrix.target }}/index.html"
+
+      - name: Upload dist/${{ matrix.target }} artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobuss-web-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/
+          if-no-files-found: error

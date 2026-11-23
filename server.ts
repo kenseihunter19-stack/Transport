@@ -18,6 +18,7 @@ import {
   incidents,
   invoices,
   pricingConfigs,
+  recurringRouteSchedules,
   schoolContractRequests,
   schools,
   students,
@@ -161,16 +162,18 @@ async function createApp() {
       const rows = await db.select().from(pricingConfigs).orderBy(desc(pricingConfigs.id)).limit(1);
       res.json({
         pricing: rows[0] ?? {
-          studentMonthlyFeeAoa: 45000,
-          schoolBusSingleShiftAoa: 250000,
-          schoolBusDoubleShiftAoa: 350000,
+          studentMonthlyFeeAoa: 3000,
+          driverMonthlyFeeAoa: 33000,
+          schoolBusSingleShiftAoa: 33000,
+          schoolBusDoubleShiftAoa: 33000,
           ivaPercent: 14,
           companyName: 'MôBuss Angola Transporte Escolar Lda.',
           companyNif: '5417209418',
           fiscalIntegrationStatus: 'sandbox_pending_agt_certification',
         },
+        calculationFormula: '3 000 Kz por aluno + 33 000 Kz por motorista',
         pricingNote:
-          'Estimativa indicativa configurada pela MôBuss; sujeita a proposta formal e contrato aprovado.',
+          'Estimativa indicativa configurada pela MôBuss (por aluno + por motorista); sujeita a proposta formal e contrato aprovado.',
       });
     } catch (error) {
       console.error('Failed to fetch public pricing:', error);
@@ -188,6 +191,7 @@ async function createApp() {
         ? String(body.shiftRegime)
         : 'both';
       const busesRequested = Math.max(1, Number(body.busesRequested) || 1);
+      const driversRequested = Math.max(1, Number(body.driversRequested) || busesRequested);
       const studentsEstimate = Math.max(1, Number(body.studentsEstimate) || 20);
       const payerPreference = ['school', 'parent', 'mixed', 'configurable'].includes(body.payerPreference)
         ? String(body.payerPreference)
@@ -206,11 +210,9 @@ async function createApp() {
 
       const pricingRows = await db.select().from(pricingConfigs).orderBy(desc(pricingConfigs.id)).limit(1);
       const pricing = pricingRows[0];
-      const perBus =
-        shiftRegime === 'both'
-          ? pricing?.schoolBusDoubleShiftAoa ?? 350000
-          : pricing?.schoolBusSingleShiftAoa ?? 250000;
-      const estimatedMonthlyAoa = busesRequested * perBus;
+      const studentFeeAoa = pricing?.studentMonthlyFeeAoa ?? 3000;
+      const driverFeeAoa = pricing?.driverMonthlyFeeAoa ?? 33000;
+      const estimatedMonthlyAoa = studentsEstimate * studentFeeAoa + driversRequested * driverFeeAoa;
       const referenceCode = `REQ-2026-${crypto.randomInt(1000, 9999)}`;
 
       const inserted = await db
@@ -239,12 +241,19 @@ async function createApp() {
         action: 'contract_request.submitted',
         targetEntity: 'school_contract_requests',
         targetId: inserted[0]?.id,
-        summary: `Novo pedido público de contrato (${referenceCode}) submetido por ${schoolName}.`,
+        summary: `Novo pedido público de contrato (${referenceCode}) submetido por ${schoolName} (${studentsEstimate} alunos × ${studentFeeAoa} Kz + ${driversRequested} motoristas × ${driverFeeAoa} Kz = ${estimatedMonthlyAoa} Kz/mês).`,
       });
 
       res.status(201).json({
         request: inserted[0],
         referenceCode,
+        breakdown: {
+          studentsEstimate,
+          studentFeeAoa,
+          driversRequested,
+          driverFeeAoa,
+          totalMonthlyAoa: estimatedMonthlyAoa,
+        },
         message: 'Pedido registado e encaminhado para a equipa comercial MôBuss.',
       });
     } catch (error) {
@@ -712,7 +721,7 @@ async function createApp() {
       const phone = String(req.body?.phone ?? dbUser.phone ?? '+244 923 456 789').trim();
 
       const pricingRows = await db.select().from(pricingConfigs).orderBy(desc(pricingConfigs.id)).limit(1);
-      const amountAoa = pricingRows[0]?.studentMonthlyFeeAoa ?? 45000;
+      const amountAoa = pricingRows[0]?.studentMonthlyFeeAoa ?? 3000;
       const paymentEntity = (pricingRows[0]?.multicaixaEntityCode || '00845').trim();
       const p1 = String(crypto.randomInt(100, 999));
       const p2 = String(crypto.randomInt(100, 999));
@@ -1719,6 +1728,7 @@ async function createApp() {
         allAuditLogs,
         allUsers,
         allAttendance,
+        allRouteSchedules,
       ] = await Promise.all([
         db.select().from(schools).orderBy(schools.id),
         db.select().from(contracts).orderBy(desc(contracts.id)),
@@ -1737,12 +1747,14 @@ async function createApp() {
         db.select().from(auditLogs).orderBy(desc(auditLogs.id)).limit(40),
         db.select().from(users).orderBy(users.id),
         db.select().from(attendanceEvents).orderBy(desc(attendanceEvents.id)).limit(30),
+        db.select().from(recurringRouteSchedules).orderBy(recurringRouteSchedules.schoolId, recurringRouteSchedules.departureTime),
       ]);
 
       const schoolMap = new Map(allSchools.map((s) => [s.id, s]));
       const guardianMap = new Map(allGuardians.map((g) => [g.id, g]));
       const ownerMap = new Map(allOwners.map((o) => [o.id, o]));
       const driverMap = new Map(allDrivers.map((d) => [d.id, d]));
+      const vehicleMap = new Map(allVehicles.map((v) => [v.id, v]));
 
       // Strictly mask PIN values in general Admin directory!
       const safeStudents = allStudents.map((st) => {
@@ -1777,12 +1789,25 @@ async function createApp() {
         ...v,
         ownerName: ownerMap.get(v.ownerId)?.fullName ?? 'Proprietário',
         driverName: v.assignedDriverId ? driverMap.get(v.assignedDriverId)?.fullName ?? '—' : 'Sem motorista',
+        schoolName: v.assignedSchoolId ? schoolMap.get(v.assignedSchoolId)?.name ?? null : null,
       }));
 
       const enrichedChangeRequests = allChangeReqs.map((r) => ({
         ...r,
         schoolName: schoolMap.get(r.schoolId)?.name ?? `Escola #${r.schoolId}`,
       }));
+
+      const enrichedSchedules = allRouteSchedules.map((sch) => {
+        const veh = sch.vehicleId ? vehicleMap.get(sch.vehicleId) : undefined;
+        const drv = sch.driverId ? driverMap.get(sch.driverId) : veh?.assignedDriverId ? driverMap.get(veh.assignedDriverId) : undefined;
+        return {
+          ...sch,
+          schoolName: schoolMap.get(sch.schoolId)?.name ?? `Escola #${sch.schoolId}`,
+          vehicleFleetNumber: veh?.fleetNumber ?? null,
+          vehiclePlate: veh?.plate ?? null,
+          driverName: drv?.fullName ?? 'Sem motorista',
+        };
+      });
 
       res.json({
         schools: allSchools,
@@ -1800,6 +1825,7 @@ async function createApp() {
         auditLogs: allAuditLogs,
         staffUsers: allUsers.map(toSafeDbUser),
         attendanceEvents: allAttendance,
+        routeSchedules: enrichedSchedules,
       });
     } catch (error) {
       console.error('Admin overview failed:', error);
@@ -1810,9 +1836,10 @@ async function createApp() {
   app.put('/api/v1/admin/pricing', requireAuth, requireRoles(['mobuss_super_admin', 'finance_officer']), async (req: AuthRequest, res: Response) => {
     try {
       const dbUser = req.dbUser!;
-      const studentMonthlyFeeAoa = Math.max(1000, Number(req.body?.studentMonthlyFeeAoa) || 45000);
-      const schoolBusSingleShiftAoa = Math.max(50000, Number(req.body?.schoolBusSingleShiftAoa) || 250000);
-      const schoolBusDoubleShiftAoa = Math.max(50000, Number(req.body?.schoolBusDoubleShiftAoa) || 350000);
+      const studentMonthlyFeeAoa = Math.max(500, Number(req.body?.studentMonthlyFeeAoa) || 3000);
+      const driverMonthlyFeeAoa = Math.max(1000, Number(req.body?.driverMonthlyFeeAoa) || 33000);
+      const schoolBusSingleShiftAoa = Math.max(1000, Number(req.body?.schoolBusSingleShiftAoa) || driverMonthlyFeeAoa);
+      const schoolBusDoubleShiftAoa = Math.max(1000, Number(req.body?.schoolBusDoubleShiftAoa) || driverMonthlyFeeAoa);
       const ivaPercent = Math.max(0, Math.min(30, Number(req.body?.ivaPercent ?? 14)));
       const companyNif = String(req.body?.companyNif ?? '5417209418').trim();
       const companyName = String(req.body?.companyName ?? 'MôBuss Angola Transporte Escolar Lda.').trim();
@@ -1825,6 +1852,7 @@ async function createApp() {
           .update(pricingConfigs)
           .set({
             studentMonthlyFeeAoa,
+            driverMonthlyFeeAoa,
             schoolBusSingleShiftAoa,
             schoolBusDoubleShiftAoa,
             ivaPercent,
@@ -1842,6 +1870,7 @@ async function createApp() {
           .insert(pricingConfigs)
           .values({
             studentMonthlyFeeAoa,
+            driverMonthlyFeeAoa,
             schoolBusSingleShiftAoa,
             schoolBusDoubleShiftAoa,
             ivaPercent,
@@ -1861,7 +1890,7 @@ async function createApp() {
         action: 'pricing.updated',
         targetEntity: 'pricing_configs',
         targetId: updated?.id,
-        summary: `Tarifário atualizado: mensalidade aluno ${studentMonthlyFeeAoa} Kz, autocarro duplo ${schoolBusDoubleShiftAoa} Kz.`,
+        summary: `Tarifário atualizado: ${studentMonthlyFeeAoa} Kz por aluno, ${driverMonthlyFeeAoa} Kz por motorista.`,
         before: existing[0] ?? null,
         after: updated,
       });
@@ -1978,8 +2007,15 @@ async function createApp() {
         ? String(body.payerModel)
         : 'school';
       const busesAllocated = Math.max(1, Number(body.busesAllocated) || 2);
+      const driversAllocated = Math.max(1, Number(body.driversAllocated) || busesAllocated);
       const studentsCovered = Math.max(1, Number(body.studentsCovered) || busesAllocated * 25);
-      const monthlyValueAoa = Math.max(50000, Number(body.monthlyValueAoa) || busesAllocated * 350000);
+      const pricingRows = await db.select().from(pricingConfigs).orderBy(desc(pricingConfigs.id)).limit(1);
+      const studentFee = pricingRows[0]?.studentMonthlyFeeAoa ?? 3000;
+      const driverFee = pricingRows[0]?.driverMonthlyFeeAoa ?? 33000;
+      const computedDefaultMonthly = studentsCovered * studentFee + driversAllocated * driverFee;
+      const rawMonthly = Number(body.monthlyValueAoa);
+      const monthlyValueAoa =
+        Number.isFinite(rawMonthly) && rawMonthly >= 1000 ? Math.round(rawMonthly) : computedDefaultMonthly;
       const contactName = String(body.contactName ?? 'Secretaria Escolar').trim();
       const contactPhone = String(body.contactPhone ?? '+244 923 000 000').trim();
 
@@ -2128,6 +2164,10 @@ async function createApp() {
       const fleetNumber = Number(req.body?.fleetNumber);
       const plate = String(req.body?.plate ?? '').trim().toUpperCase();
       const ownerId = Number(req.body?.ownerId);
+      const assignedSchoolId =
+        req.body?.assignedSchoolId !== undefined && req.body?.assignedSchoolId !== null && req.body?.assignedSchoolId !== ''
+          ? Number(req.body.assignedSchoolId)
+          : null;
       const routeCode = String(req.body?.routeCode ?? 'ROTA-A').trim();
       const routeName = String(req.body?.routeName ?? routeCode).trim();
       const capacity = Math.max(8, Number(req.body?.capacity) || 22);
@@ -2145,6 +2185,12 @@ async function createApp() {
       }
       if (plate.length < 4) {
         return res.status(400).json({ error: 'Matrícula da viatura obrigatória.' });
+      }
+      if (assignedSchoolId !== null) {
+        const sRows = await db.select().from(schools).where(eq(schools.id, assignedSchoolId)).limit(1);
+        if (!sRows[0]) {
+          return res.status(400).json({ error: 'Escola selecionada não encontrada.' });
+        }
       }
 
       const ownerRows = await db.select().from(vehicleOwners).where(eq(vehicleOwners.id, ownerId)).limit(1);
@@ -2169,6 +2215,7 @@ async function createApp() {
           plate,
           ownershipType: owner.ownerType === 'mobuss' ? 'mobuss_owned' : 'partner_owned',
           ownerId: owner.id,
+          assignedSchoolId,
           routeCode,
           routeName,
           capacity,
@@ -2218,6 +2265,12 @@ async function createApp() {
 
       const plate = String(req.body?.plate ?? existing.plate).trim().toUpperCase();
       const ownerId = req.body?.ownerId != null ? Number(req.body.ownerId) : existing.ownerId;
+      const assignedSchoolId =
+        req.body?.assignedSchoolId === undefined
+          ? existing.assignedSchoolId
+          : req.body.assignedSchoolId === null || req.body.assignedSchoolId === ''
+          ? null
+          : Number(req.body.assignedSchoolId);
       const routeCode = String(req.body?.routeCode ?? existing.routeCode ?? 'ROTA-A').trim();
       const capacity = Math.max(8, Number(req.body?.capacity ?? existing.capacity) || existing.capacity);
       const dnvtExpiry = String(req.body?.dnvtExpiry ?? existing.dnvtExpiry).trim();
@@ -2232,6 +2285,13 @@ async function createApp() {
         ? String(req.body.status)
         : existing.status;
 
+      if (assignedSchoolId !== null) {
+        const sRows = await db.select().from(schools).where(eq(schools.id, assignedSchoolId)).limit(1);
+        if (!sRows[0]) {
+          return res.status(400).json({ error: 'Escola selecionada não encontrada.' });
+        }
+      }
+
       const ownerRows = await db.select().from(vehicleOwners).where(eq(vehicleOwners.id, ownerId)).limit(1);
       if (!ownerRows[0]) {
         return res.status(400).json({ error: 'Proprietário não encontrado.' });
@@ -2242,6 +2302,7 @@ async function createApp() {
         .set({
           plate,
           ownerId,
+          assignedSchoolId,
           ownershipType: ownerRows[0].ownerType === 'mobuss' ? 'mobuss_owned' : 'partner_owned',
           routeCode,
           capacity,
@@ -2271,6 +2332,330 @@ async function createApp() {
     } catch (error) {
       console.error('Update vehicle failed:', error);
       res.status(500).json({ error: 'Erro ao atualizar viatura.' });
+    }
+  });
+
+  // Recurring School Route Schedules (Time Slots & Vehicle Assignment)
+  const VALID_WEEKDAYS = new Set(['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']);
+  const TIME_HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+  function normalizeDaysList(raw: unknown): string[] {
+    const arr = Array.isArray(raw)
+      ? raw.map((d) => String(d).trim().toLowerCase())
+      : String(raw ?? '')
+          .split(',')
+          .map((d) => d.trim().toLowerCase());
+    return Array.from(new Set(arr.filter((d) => VALID_WEEKDAYS.has(d))));
+  }
+
+  async function findVehicleScheduleOverlap(params: {
+    vehicleId: number;
+    days: string[];
+    departureTime: string;
+    arrivalTime: string;
+    excludeScheduleId?: number;
+  }) {
+    const existing = await db
+      .select()
+      .from(recurringRouteSchedules)
+      .where(and(eq(recurringRouteSchedules.vehicleId, params.vehicleId), eq(recurringRouteSchedules.active, true)));
+
+    const daySet = new Set(params.days);
+    return existing.find((item) => {
+      if (params.excludeScheduleId && item.id === params.excludeScheduleId) return false;
+      const itemDays = item.daysOfWeek.split(',').map((d) => d.trim().toLowerCase());
+      const sharesDay = itemDays.some((d) => daySet.has(d));
+      if (!sharesDay) return false;
+      return params.departureTime < item.arrivalTime && params.arrivalTime > item.departureTime;
+    });
+  }
+
+  app.post('/api/v1/admin/route-schedules', requireAuth, requireRoles(['mobuss_super_admin', 'operations_manager', 'fleet_manager', 'school_account_manager']), async (req: AuthRequest, res: Response) => {
+    try {
+      const actor = req.dbUser!;
+      const schoolId = Number(req.body?.schoolId);
+      const vehicleId =
+        req.body?.vehicleId !== undefined && req.body?.vehicleId !== null && req.body?.vehicleId !== ''
+          ? Number(req.body.vehicleId)
+          : null;
+      let driverId =
+        req.body?.driverId !== undefined && req.body?.driverId !== null && req.body?.driverId !== ''
+          ? Number(req.body.driverId)
+          : null;
+      const routeCode = String(req.body?.routeCode ?? '').trim().toUpperCase();
+      const routeName = String(req.body?.routeName ?? routeCode).trim();
+      const shiftType = req.body?.shiftType === 'afternoon' ? 'afternoon' : 'morning';
+      const departureTime = String(req.body?.departureTime ?? '').trim();
+      const arrivalTime = String(req.body?.arrivalTime ?? '').trim();
+      const days = normalizeDaysList(req.body?.daysOfWeek ?? 'mon,tue,wed,thu,fri');
+      const active = req.body?.active !== undefined ? Boolean(req.body.active) : true;
+      const notes = req.body?.notes ? String(req.body.notes).trim() : null;
+
+      if (!Number.isInteger(schoolId) || schoolId <= 0) {
+        return res.status(400).json({ error: 'Selecione uma escola contratada válida.' });
+      }
+      if (!routeCode) {
+        return res.status(400).json({ error: 'Código da rota é obrigatório.' });
+      }
+      if (!TIME_HHMM_RE.test(departureTime) || !TIME_HHMM_RE.test(arrivalTime)) {
+        return res.status(400).json({ error: 'Horas inválidas. Utilize o formato HH:MM (ex: 06:30).' });
+      }
+      if (arrivalTime <= departureTime) {
+        return res.status(400).json({ error: 'A hora de chegada prevista deve ser posterior à hora de partida.' });
+      }
+      if (days.length === 0) {
+        return res.status(400).json({ error: 'Selecione pelo menos um dia da semana para a recorrência.' });
+      }
+
+      const schoolRows = await db.select().from(schools).where(eq(schools.id, schoolId)).limit(1);
+      if (!schoolRows[0]) {
+        return res.status(404).json({ error: 'Escola selecionada não encontrada.' });
+      }
+
+      let vehicleLabel = 'Sem viatura atribuída';
+      if (vehicleId !== null) {
+        const vRows = await db.select().from(vehicles).where(eq(vehicles.id, vehicleId)).limit(1);
+        const vehicle = vRows[0];
+        if (!vehicle) {
+          return res.status(404).json({ error: 'Viatura selecionada não encontrada.' });
+        }
+        if (vehicle.verificationStatus !== 'verified' || vehicle.dnvtStatus === 'expired') {
+          return res.status(400).json({ error: 'Viatura inelegível: inspeção DNVT expirada ou não verificada.' });
+        }
+        if (!driverId && vehicle.assignedDriverId) {
+          driverId = vehicle.assignedDriverId;
+        }
+        if (active) {
+          const conflict = await findVehicleScheduleOverlap({
+            vehicleId,
+            days,
+            departureTime,
+            arrivalTime,
+          });
+          if (conflict) {
+            return res.status(409).json({
+              error: `Conflito de horário: o Autocarro ${vehicle.fleetNumber} (${vehicle.plate}) já possui uma escala ativa (${conflict.routeCode} · ${conflict.departureTime}–${conflict.arrivalTime}) num dos dias selecionados.`,
+            });
+          }
+        }
+        vehicleLabel = `Autocarro ${vehicle.fleetNumber} (${vehicle.plate})`;
+      }
+
+      if (driverId !== null) {
+        const dRows = await db.select().from(drivers).where(eq(drivers.id, driverId)).limit(1);
+        if (!dRows[0]) {
+          return res.status(404).json({ error: 'Motorista selecionado não encontrado.' });
+        }
+      }
+
+      const inserted = await db
+        .insert(recurringRouteSchedules)
+        .values({
+          schoolId,
+          vehicleId,
+          driverId,
+          routeCode,
+          routeName: routeName || routeCode,
+          daysOfWeek: days.join(','),
+          shiftType,
+          departureTime,
+          arrivalTime,
+          active,
+          notes,
+          createdByUid: actor.uid,
+        })
+        .returning();
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'route_schedule.created',
+        targetEntity: 'recurring_route_schedules',
+        targetId: inserted[0]!.id,
+        summary: `Escala recorrente criada para ${schoolRows[0].name}: ${routeCode} (${departureTime}–${arrivalTime}) · ${vehicleLabel}.`,
+      });
+
+      res.status(201).json({
+        schedule: inserted[0],
+        message: `Rota recorrente ${routeCode} (${departureTime}–${arrivalTime}) agendada para ${schoolRows[0].name}.`,
+      });
+    } catch (error) {
+      console.error('Create route schedule failed:', error);
+      res.status(500).json({ error: 'Erro ao agendar rota recorrente.' });
+    }
+  });
+
+  app.patch('/api/v1/admin/route-schedules/:id', requireAuth, requireRoles(['mobuss_super_admin', 'operations_manager', 'fleet_manager', 'school_account_manager']), async (req: AuthRequest, res: Response) => {
+    try {
+      const actor = req.dbUser!;
+      const scheduleId = Number(req.params.id);
+      if (!Number.isInteger(scheduleId) || scheduleId <= 0) {
+        return res.status(400).json({ error: 'ID de escala inválido.' });
+      }
+
+      const existingRows = await db
+        .select()
+        .from(recurringRouteSchedules)
+        .where(eq(recurringRouteSchedules.id, scheduleId))
+        .limit(1);
+      const existing = existingRows[0];
+      if (!existing) {
+        return res.status(404).json({ error: 'Escala recorrente não encontrada.' });
+      }
+
+      const schoolId = req.body?.schoolId !== undefined ? Number(req.body.schoolId) : existing.schoolId;
+      const vehicleId =
+        req.body?.vehicleId === undefined
+          ? existing.vehicleId
+          : req.body.vehicleId === null || req.body.vehicleId === ''
+          ? null
+          : Number(req.body.vehicleId);
+      let driverId =
+        req.body?.driverId === undefined
+          ? existing.driverId
+          : req.body.driverId === null || req.body.driverId === ''
+          ? null
+          : Number(req.body.driverId);
+      const routeCode = String(req.body?.routeCode ?? existing.routeCode).trim().toUpperCase();
+      const routeName = String(req.body?.routeName ?? existing.routeName).trim();
+      const shiftType = req.body?.shiftType
+        ? req.body.shiftType === 'afternoon'
+          ? 'afternoon'
+          : 'morning'
+        : existing.shiftType;
+      const departureTime = String(req.body?.departureTime ?? existing.departureTime).trim();
+      const arrivalTime = String(req.body?.arrivalTime ?? existing.arrivalTime).trim();
+      const days =
+        req.body?.daysOfWeek !== undefined
+          ? normalizeDaysList(req.body.daysOfWeek)
+          : normalizeDaysList(existing.daysOfWeek);
+      const active = req.body?.active !== undefined ? Boolean(req.body.active) : existing.active;
+      const notes =
+        req.body?.notes !== undefined ? (req.body.notes ? String(req.body.notes).trim() : null) : existing.notes;
+
+      if (!Number.isInteger(schoolId) || schoolId <= 0) {
+        return res.status(400).json({ error: 'Escola inválida.' });
+      }
+      if (!routeCode) {
+        return res.status(400).json({ error: 'Código da rota é obrigatório.' });
+      }
+      if (!TIME_HHMM_RE.test(departureTime) || !TIME_HHMM_RE.test(arrivalTime) || arrivalTime <= departureTime) {
+        return res.status(400).json({ error: 'Janela horária inválida (HH:MM, chegada após partida).' });
+      }
+      if (days.length === 0) {
+        return res.status(400).json({ error: 'Selecione pelo menos um dia da semana.' });
+      }
+
+      const schoolRows = await db.select().from(schools).where(eq(schools.id, schoolId)).limit(1);
+      if (!schoolRows[0]) {
+        return res.status(404).json({ error: 'Escola selecionada não encontrada.' });
+      }
+
+      if (vehicleId !== null) {
+        const vRows = await db.select().from(vehicles).where(eq(vehicles.id, vehicleId)).limit(1);
+        const vehicle = vRows[0];
+        if (!vehicle) {
+          return res.status(404).json({ error: 'Viatura selecionada não encontrada.' });
+        }
+        if (vehicle.verificationStatus !== 'verified' || vehicle.dnvtStatus === 'expired') {
+          return res.status(400).json({ error: 'Viatura inelegível: inspeção DNVT expirada ou não verificada.' });
+        }
+        if (driverId === null && vehicle.assignedDriverId && req.body?.driverId === undefined) {
+          driverId = vehicle.assignedDriverId;
+        }
+        if (active) {
+          const conflict = await findVehicleScheduleOverlap({
+            vehicleId,
+            days,
+            departureTime,
+            arrivalTime,
+            excludeScheduleId: scheduleId,
+          });
+          if (conflict) {
+            return res.status(409).json({
+              error: `Conflito de horário: o Autocarro ${vehicle.fleetNumber} (${vehicle.plate}) já possui escala ativa (${conflict.routeCode} · ${conflict.departureTime}–${conflict.arrivalTime}).`,
+            });
+          }
+        }
+      }
+
+      const updated = await db
+        .update(recurringRouteSchedules)
+        .set({
+          schoolId,
+          vehicleId,
+          driverId,
+          routeCode,
+          routeName: routeName || routeCode,
+          daysOfWeek: days.join(','),
+          shiftType,
+          departureTime,
+          arrivalTime,
+          active,
+          notes,
+          updatedAt: new Date(),
+        })
+        .where(eq(recurringRouteSchedules.id, scheduleId))
+        .returning();
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'route_schedule.updated',
+        targetEntity: 'recurring_route_schedules',
+        targetId: scheduleId,
+        summary: `Escala recorrente #${scheduleId} (${routeCode} · ${departureTime}–${arrivalTime}) atualizada (${active ? 'Ativa' : 'Pausada'}).`,
+      });
+
+      res.json({
+        schedule: updated[0],
+        message: `Escala ${routeCode} (${departureTime}–${arrivalTime}) atualizada.`,
+      });
+    } catch (error) {
+      console.error('Update route schedule failed:', error);
+      res.status(500).json({ error: 'Erro ao atualizar escala recorrente.' });
+    }
+  });
+
+  app.delete('/api/v1/admin/route-schedules/:id', requireAuth, requireRoles(['mobuss_super_admin', 'operations_manager', 'fleet_manager', 'school_account_manager']), async (req: AuthRequest, res: Response) => {
+    try {
+      const actor = req.dbUser!;
+      const scheduleId = Number(req.params.id);
+      if (!Number.isInteger(scheduleId) || scheduleId <= 0) {
+        return res.status(400).json({ error: 'ID de escala inválido.' });
+      }
+
+      const existingRows = await db
+        .select()
+        .from(recurringRouteSchedules)
+        .where(eq(recurringRouteSchedules.id, scheduleId))
+        .limit(1);
+      const existing = existingRows[0];
+      if (!existing) {
+        return res.status(404).json({ error: 'Escala recorrente não encontrada.' });
+      }
+
+      await db.delete(recurringRouteSchedules).where(eq(recurringRouteSchedules.id, scheduleId));
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'route_schedule.deleted',
+        targetEntity: 'recurring_route_schedules',
+        targetId: scheduleId,
+        summary: `Escala recorrente #${scheduleId} (${existing.routeCode} · ${existing.departureTime}–${existing.arrivalTime}) removida.`,
+      });
+
+      res.json({
+        deletedId: scheduleId,
+        message: `Escala recorrente ${existing.routeCode} removida com sucesso.`,
+      });
+    } catch (error) {
+      console.error('Delete route schedule failed:', error);
+      res.status(500).json({ error: 'Erro ao remover escala recorrente.' });
     }
   });
 
@@ -3375,7 +3760,19 @@ async function createApp() {
     });
     app.use(vite.middlewares);
   } else {
-    const distDir = path.resolve(__dirname, 'dist');
+    const fs = await import('node:fs');
+    const validTargets = new Set(['hub', 'client', 'driver', 'admin', 'school']);
+    const rawTarget = (process.env.MOBUSS_WEB_TARGET || process.env.VITE_APP_TARGET || 'hub').toLowerCase().trim();
+    const activeTarget = validTargets.has(rawTarget) ? rawTarget : 'hub';
+    const targetDistDir = path.resolve(__dirname, 'dist', activeTarget);
+    const hubDistDir = path.resolve(__dirname, 'dist', 'hub');
+    const legacyDistDir = path.resolve(__dirname, 'dist');
+    const distDir = fs.existsSync(path.join(targetDistDir, 'index.html'))
+      ? targetDistDir
+      : fs.existsSync(path.join(hubDistDir, 'index.html'))
+      ? hubDistDir
+      : legacyDistDir;
+
     app.use(express.static(distDir));
     app.get('*', (_req: Request, res: Response) => {
       res.sendFile(path.join(distDir, 'index.html'));

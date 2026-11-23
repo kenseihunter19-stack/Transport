@@ -34,6 +34,7 @@ export function ContractRequestPage({
   const [schoolName, setSchoolName] = useState("");
   const [district, setDistrict] = useState("Talatona");
   const [buses, setBuses] = useState(3);
+  const [driversCount, setDriversCount] = useState(3);
   const [students, setStudents] = useState(75);
   const [shift, setShift] = useState<"morning" | "afternoon" | "both">("both");
   const [payerPreference, setPayerPreference] = useState<"school" | "parent" | "mixed" | "configurable">("configurable");
@@ -57,6 +58,7 @@ export function ContractRequestPage({
           setPricing((prev) => ({
             ...prev,
             studentMonthlyFee: data.pricing.studentMonthlyFeeAoa ?? prev.studentMonthlyFee,
+            driverMonthlyFee: data.pricing.driverMonthlyFeeAoa ?? prev.driverMonthlyFee,
             schoolBusSingleShift: data.pricing.schoolBusSingleShiftAoa ?? prev.schoolBusSingleShift,
             schoolBusDoubleShift: data.pricing.schoolBusDoubleShiftAoa ?? prev.schoolBusDoubleShift,
             ivaPercent: data.pricing.ivaPercent ?? prev.ivaPercent,
@@ -69,9 +71,14 @@ export function ContractRequestPage({
     return unsubscribe;
   }, []);
 
-  const pricePerBus = shift === "both" ? pricing.schoolBusDoubleShift : pricing.schoolBusSingleShift;
-  const estimatedTotal = buses * pricePerBus;
-  const pricePerStudent = Math.round(estimatedTotal / Math.max(1, students));
+  const safeStudents = Math.max(1, students);
+  const safeDrivers = Math.max(1, driversCount);
+  const studentUnitFee = pricing.studentMonthlyFee;
+  const driverUnitFee = pricing.driverMonthlyFee;
+  const studentsSubtotal = safeStudents * studentUnitFee;
+  const driversSubtotal = safeDrivers * driverUnitFee;
+  const estimatedTotal = studentsSubtotal + driversSubtotal;
+  const pricePerStudent = Math.round(estimatedTotal / safeStudents);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -90,7 +97,8 @@ export function ContractRequestPage({
           municipality: district,
           shiftRegime: shift,
           busesRequested: buses,
-          studentsEstimate: students,
+          driversRequested: safeDrivers,
+          studentsEstimate: safeStudents,
           payerPreference,
           contactName: contactName.trim() || "Direcção Geral",
           contactPhone: contactPhone.trim(),
@@ -109,7 +117,7 @@ export function ContractRequestPage({
           client: schoolName.trim(),
           location: `${district}, Luanda`,
           buses,
-          students,
+          students: safeStudents,
           value: valueStr,
           contact: contactName.trim() || "Direcção Geral",
           phone: contactPhone.trim(),
@@ -144,15 +152,17 @@ Email: ${contactEmail}
 
 ESPECIFICAÇÕES SOLICITADAS:
 - Número de Autocarros Solicitados: ${buses} autocarro(s)
-- Estimativa de Alunos: ${students} alunos
+- Motoristas Alocados: ${safeDrivers} motorista(s)
+- Estimativa de Alunos: ${safeStudents} alunos
 - Regime de Turnos: ${shift === "both" ? "Duplo (Manhã e Tarde)" : shift === "morning" ? "Manhã" : "Tarde"}
 - Política de Segurança: PIN de validação no embarque e no desembarque
 
 ESTIMATIVA INDICATIVA (NÃO VINCULATIVA):
-- Valor mensal base por autocarro: ${pricePerBus.toLocaleString("pt-AO")} Kz
+- Tarifa por aluno (${safeStudents} × ${studentUnitFee.toLocaleString("pt-AO")} Kz): ${studentsSubtotal.toLocaleString("pt-AO")} Kz
+- Tarifa por motorista (${safeDrivers} × ${driverUnitFee.toLocaleString("pt-AO")} Kz): ${driversSubtotal.toLocaleString("pt-AO")} Kz
 -----------------------------------------------------
 ESTIMATIVA MENSAL INDICATIVA: ${estimatedTotal.toLocaleString("pt-AO")} Kz / mês
-Custo médio estimado por aluno: ${pricePerStudent.toLocaleString("pt-AO")} Kz / mês
+Custo médio efetivo por aluno: ${pricePerStudent.toLocaleString("pt-AO")} Kz / mês
 -----------------------------------------------------
 Nota: Os valores acima constituem estimativa indicativa sujeita a análise operacional e aprovação contratual da MôBuss Angola.
 Contacto Comercial: comercial@mobuss.ao | +244 923 000 000
@@ -223,8 +233,12 @@ Contacto Comercial: comercial@mobuss.ao | +244 923 000 000
 
             <div className="rounded-xl bg-slide-bg p-4 text-left text-xs space-y-2 mb-6 font-mono tabular-nums border border-white/10">
               <div className="flex justify-between">
-                <span className="text-slide-dim">Autocarros Solicitados:</span>
-                <span className="font-bold">{buses} autocarros</span>
+                <span className="text-slide-dim">Autocarros / Motoristas:</span>
+                <span className="font-bold">{buses} autocarros · {safeDrivers} motoristas</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slide-dim">Alunos Cobertos:</span>
+                <span className="font-bold">{safeStudents} alunos</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-slide-dim">Estimativa Indicativa:</span>
@@ -321,23 +335,41 @@ Contacto Comercial: comercial@mobuss.ao | +244 923 000 000
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <div>
                     <label className="block font-semibold text-slide-paper mb-1.5 tabular-nums">
-                      Autocarros Necessários ({buses})
+                      Autocarros ({buses})
                     </label>
                     <input
                       type="range"
                       min={1}
                       max={12}
                       value={buses}
-                      onChange={(e) => setBuses(Number(e.target.value))}
+                      onChange={(e) => {
+                        const next = Number(e.target.value);
+                        setBuses(next);
+                        setDriversCount(next);
+                      }}
                       className="w-full accent-[#e11d2e] cursor-pointer"
                     />
                     <div className="flex justify-between text-[11px] text-slide-dim mt-1 tabular-nums">
-                      <span>1 autocarro</span>
+                      <span>1</span>
                       <span>12 autocarros</span>
                     </div>
+                  </div>
+
+                  <div>
+                    <label className="block font-semibold text-slide-paper mb-1.5">
+                      Motoristas Alocados
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={24}
+                      value={driversCount}
+                      onChange={(e) => setDriversCount(Math.max(1, Number(e.target.value) || 1))}
+                      className="w-full rounded-xl bg-slide-bg px-4 py-2 text-xs text-slide-paper outline-none border border-white/15 focus:border-slide-accent font-mono tabular-nums"
+                    />
                   </div>
 
                   <div>
@@ -346,10 +378,10 @@ Contacto Comercial: comercial@mobuss.ao | +244 923 000 000
                     </label>
                     <input
                       type="number"
-                      min={10}
+                      min={1}
                       max={600}
                       value={students}
-                      onChange={(e) => setStudents(Number(e.target.value))}
+                      onChange={(e) => setStudents(Math.max(1, Number(e.target.value) || 1))}
                       className="w-full rounded-xl bg-slide-bg px-4 py-2 text-xs text-slide-paper outline-none border border-white/15 focus:border-slide-accent font-mono tabular-nums"
                     />
                   </div>
@@ -447,15 +479,23 @@ Contacto Comercial: comercial@mobuss.ao | +244 923 000 000
 
                 <div className="my-5 pt-4 border-t border-white/10 space-y-2.5 text-xs tabular-nums">
                   <div className="flex justify-between">
+                    <span className="text-slide-dim">
+                      Alunos ({safeStudents} × {studentUnitFee.toLocaleString("pt-AO")} Kz)
+                    </span>
+                    <span className="font-bold font-mono">{studentsSubtotal.toLocaleString("pt-AO")} Kz</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slide-dim">
+                      Motoristas ({safeDrivers} × {driverUnitFee.toLocaleString("pt-AO")} Kz)
+                    </span>
+                    <span className="font-bold font-mono">{driversSubtotal.toLocaleString("pt-AO")} Kz</span>
+                  </div>
+                  <div className="flex justify-between pt-2 border-t border-white/10">
                     <span className="text-slide-dim">Frota alocada</span>
-                    <span className="font-bold">{buses} autocarros dedicados</span>
+                    <span className="font-bold">{buses} autocarros · {safeDrivers} motoristas</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slide-dim">Capacidade total</span>
-                    <span className="font-bold">{students} lugares garantidos</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slide-dim">Custo médio por aluno</span>
+                    <span className="text-slide-dim">Custo médio efetivo por aluno</span>
                     <span className="font-mono text-slide-ok font-bold">
                       ~{pricePerStudent.toLocaleString("pt-AO")} Kz/mês
                     </span>

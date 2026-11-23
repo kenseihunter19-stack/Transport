@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import {
   AlertTriangle,
   Bus,
@@ -21,8 +21,11 @@ import { useAuth, ROLE_LABELS } from '@/contexts/AuthContext';
 import { AuthGatePanel } from '@/components/AuthGatePanel';
 import { LegalComplianceModal, type LegalTab } from '@/components/LegalComplianceModal';
 import { LuandaMap } from '@/components/LuandaMap';
-import { NativeMobileApp } from '@/views/NativeMobileApp';
 import { useTelemetrySocket } from '@/hooks/useTelemetrySocket';
+
+const NativeMobileApp = lazy(() =>
+  import('@/views/NativeMobileApp').then((m) => ({ default: m.NativeMobileApp }))
+);
 import { estimateRouteProgressFromCoords, getRouteConfigByCode } from '@/lib/luanda-geofence';
 import {
   initNativeStatusBar,
@@ -364,6 +367,14 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
           <p className="text-xs text-slide-dim">
             O seu perfil atual ({dbUser ? ROLE_LABELS[dbUser.primaryRole] : 'Utilizador'}) não tem permissão de condução ativa.
           </p>
+          <button
+            type="button"
+            onClick={() => void signOut()}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-slide-accent text-white px-4 py-2 text-xs font-bold cursor-pointer"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Terminar Sessão (Sair)</span>
+          </button>
         </div>
       </div>
     );
@@ -582,7 +593,9 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
           )}
 
           <div className="flex-1 min-h-0">
-            <NativeMobileApp initialRole={mode === 'driver' ? 'driver' : clientProfile} />
+            <Suspense fallback={<div className="h-full grid place-items-center text-xs text-slide-dim">A carregar pré-visualização...</div>}>
+              <NativeMobileApp initialRole={mode === 'driver' ? 'driver' : clientProfile} />
+            </Suspense>
           </div>
         </div>
       )}
@@ -968,7 +981,7 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
                   onClick={handleCreatePaymentIntent}
                   className="rounded-xl bg-slide-accent text-white px-4 py-2 font-bold cursor-pointer shrink-0"
                 >
-                  Gerar PIN Multicaixa ({formatAOA(guardianData?.pricing?.studentMonthlyFeeAoa ?? 45000)})
+                  Gerar PIN Multicaixa ({formatAOA(guardianData?.pricing?.studentMonthlyFeeAoa ?? 3000)})
                 </button>
               </div>
 

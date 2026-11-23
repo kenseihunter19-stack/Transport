@@ -11,6 +11,7 @@ import {
   incidents,
   invoices,
   pricingConfigs,
+  recurringRouteSchedules,
   schoolContractRequests,
   schools,
   students,
@@ -40,9 +41,10 @@ async function runStagingSeed() {
   const existingPricing = await db.select({ total: count() }).from(pricingConfigs);
   if (Number(existingPricing[0]?.total ?? 0) === 0) {
     await db.insert(pricingConfigs).values({
-      studentMonthlyFeeAoa: 45000,
-      schoolBusSingleShiftAoa: 250000,
-      schoolBusDoubleShiftAoa: 350000,
+      studentMonthlyFeeAoa: 3000,
+      driverMonthlyFeeAoa: 33000,
+      schoolBusSingleShiftAoa: 33000,
+      schoolBusDoubleShiftAoa: 33000,
       ivaPercent: 14,
       companyName: 'MôBuss Angola Transporte Escolar Lda.',
       companyNif: '5417209418',
@@ -52,6 +54,82 @@ async function runStagingSeed() {
 
   const existingSchools = await db.select({ total: count() }).from(schools);
   if (Number(existingSchools[0]?.total ?? 0) > 0) {
+    // Ensure idempotent backfill for newly added recurring_route_schedules & vehicle school link on existing staging DBs
+    const existingSchedules = await db.select({ total: count() }).from(recurringRouteSchedules);
+    if (Number(existingSchedules[0]?.total ?? 0) === 0) {
+      const existingVehicles = await db.select().from(vehicles);
+      const existingTrips = await db.select().from(trips);
+
+      for (const v of existingVehicles) {
+        if (v.assignedSchoolId == null) {
+          const matchedTrip = existingTrips.find((t) => t.vehicleId === v.id && t.schoolId != null);
+          if (matchedTrip?.schoolId) {
+            await db
+              .update(vehicles)
+              .set({ assignedSchoolId: matchedTrip.schoolId })
+              .where(eq(vehicles.id, v.id));
+          }
+        }
+      }
+
+      const busA = existingVehicles.find((v) => v.routeCode === 'ROTA-A');
+      const busB = existingVehicles.find((v) => v.routeCode === 'ROTA-B');
+      const tripA = existingTrips.find((t) => t.routeCode === 'ROTA-A' && t.schoolId != null);
+      const tripB = existingTrips.find((t) => t.routeCode === 'ROTA-B' && t.schoolId != null);
+
+      const initialSchedules: Array<typeof recurringRouteSchedules.$inferInsert> = [];
+      if (tripA?.schoolId && busA) {
+        initialSchedules.push(
+          {
+            schoolId: tripA.schoolId,
+            vehicleId: busA.id,
+            driverId: busA.assignedDriverId,
+            routeCode: 'ROTA-A',
+            routeName: 'Rota A · Mutamba → Morro Bento',
+            daysOfWeek: 'mon,tue,wed,thu,fri',
+            shiftType: 'morning',
+            departureTime: '06:30',
+            arrivalTime: '07:30',
+            active: true,
+            notes: 'Recolha matinal corredor Mutamba–Kinaxixi–Morro Bento.',
+            createdByUid: 'system-seed',
+          },
+          {
+            schoolId: tripA.schoolId,
+            vehicleId: busA.id,
+            driverId: busA.assignedDriverId,
+            routeCode: 'ROTA-A',
+            routeName: 'Rota A · Morro Bento → Mutamba (Regresso)',
+            daysOfWeek: 'mon,tue,wed,thu,fri',
+            shiftType: 'afternoon',
+            departureTime: '12:45',
+            arrivalTime: '13:45',
+            active: true,
+            notes: 'Regresso vespertino com entrega via PIN obrigatório.',
+            createdByUid: 'system-seed',
+          }
+        );
+      }
+      if (tripB?.schoolId && busB) {
+        initialSchedules.push({
+          schoolId: tripB.schoolId,
+          vehicleId: busB.id,
+          driverId: busB.assignedDriverId,
+          routeCode: 'ROTA-B',
+          routeName: 'Rota B · Talatona Express',
+          daysOfWeek: 'mon,tue,wed,thu,fri',
+          shiftType: 'morning',
+          departureTime: '06:45',
+          arrivalTime: '07:45',
+          active: true,
+          notes: 'Recolha corredor Kilamba–Belas–Maianga.',
+          createdByUid: 'system-seed',
+        });
+      }
+      if (initialSchedules.length > 0) {
+        await db.insert(recurringRouteSchedules).values(initialSchedules);
+      }
+    }
     return;
   }
 
@@ -107,7 +185,7 @@ async function runStagingSeed() {
         pinPolicy: 'both',
         busesAllocated: 4,
         studentsCovered: 90,
-        monthlyValueAoa: 1400000,
+        monthlyValueAoa: 402000,
         shiftRegime: 'both',
         status: 'active',
         notes: 'Encarregados pagam diretamente via Multicaixa Express; PIN obrigatório no embarque e desembarque.',
@@ -119,7 +197,7 @@ async function runStagingSeed() {
         pinPolicy: 'both',
         busesAllocated: 2,
         studentsCovered: 45,
-        monthlyValueAoa: 700000,
+        monthlyValueAoa: 201000,
         shiftRegime: 'both',
         status: 'active',
         notes: 'Faturação mensal institucional à escola; PIN obrigatório no embarque e desembarque.',
@@ -131,7 +209,7 @@ async function runStagingSeed() {
         pinPolicy: 'both',
         busesAllocated: 5,
         studentsCovered: 120,
-        monthlyValueAoa: 1750000,
+        monthlyValueAoa: 525000,
         shiftRegime: 'both',
         status: 'active',
         notes: 'Modelo misto: escola comparticipa 40% e encarregados 60%.',
@@ -148,7 +226,7 @@ async function runStagingSeed() {
       shiftRegime: 'both',
       busesRequested: 3,
       studentsEstimate: 75,
-      estimatedMonthlyAoa: 1050000,
+      estimatedMonthlyAoa: 324000,
       payerPreference: 'configurable',
       contactName: 'Dr. Manuel Ferreira',
       contactPhone: '+244 934 555 666',
@@ -163,7 +241,7 @@ async function runStagingSeed() {
       shiftRegime: 'both',
       busesRequested: 3,
       studentsEstimate: 80,
-      estimatedMonthlyAoa: 1050000,
+      estimatedMonthlyAoa: 339000,
       payerPreference: 'school',
       contactName: 'Prof. António Luvualu',
       contactPhone: '+244 945 777 888',
@@ -225,7 +303,7 @@ async function runStagingSeed() {
         availabilityStatus: 'in_service',
         ratingAvg: '4.9',
         tripsCompleted: 44,
-        monthlyCompensationAoa: 220000,
+        monthlyCompensationAoa: 33000,
         lastCheckInTime: '06:45',
       },
       {
@@ -239,7 +317,7 @@ async function runStagingSeed() {
         availabilityStatus: 'in_service',
         ratingAvg: '4.8',
         tripsCompleted: 42,
-        monthlyCompensationAoa: 210000,
+        monthlyCompensationAoa: 33000,
         lastCheckInTime: '06:50',
       },
       {
@@ -253,7 +331,7 @@ async function runStagingSeed() {
         availabilityStatus: 'in_service',
         ratingAvg: '4.9',
         tripsCompleted: 45,
-        monthlyCompensationAoa: 225000,
+        monthlyCompensationAoa: 33000,
         lastCheckInTime: '06:40',
       },
       {
@@ -267,7 +345,7 @@ async function runStagingSeed() {
         availabilityStatus: 'in_service',
         ratingAvg: '4.7',
         tripsCompleted: 40,
-        monthlyCompensationAoa: 200000,
+        monthlyCompensationAoa: 33000,
         lastCheckInTime: '06:55',
       },
       {
@@ -281,7 +359,7 @@ async function runStagingSeed() {
         availabilityStatus: 'available',
         ratingAvg: '4.8',
         tripsCompleted: 38,
-        monthlyCompensationAoa: 190000,
+        monthlyCompensationAoa: 33000,
         lastCheckInTime: '07:00',
       },
     ])
@@ -297,6 +375,7 @@ async function runStagingSeed() {
         ownershipType: 'mobuss_owned',
         ownerId: insertedOwners[0]!.id,
         assignedDriverId: insertedDrivers[0]!.id,
+        assignedSchoolId: schoolMorroBento.id,
         routeCode: 'ROTA-A',
         routeName: 'Rota A · Mutamba → Morro Bento',
         capacity: 22,
@@ -314,6 +393,7 @@ async function runStagingSeed() {
         ownershipType: 'partner_owned',
         ownerId: insertedOwners[1]!.id,
         assignedDriverId: insertedDrivers[1]!.id,
+        assignedSchoolId: schoolSaoPaulo.id,
         routeCode: 'ROTA-B',
         routeName: 'Rota B · Talatona Express',
         capacity: 25,
@@ -554,6 +634,52 @@ async function runStagingSeed() {
     ])
     .returning();
 
+  // 8b. Seed initial recurring route schedules linked to actual schools & vehicles
+  await db.insert(recurringRouteSchedules).values([
+    {
+      schoolId: schoolMorroBento.id,
+      vehicleId: insertedVehicles[0]!.id,
+      driverId: insertedDrivers[0]!.id,
+      routeCode: 'ROTA-A',
+      routeName: 'Rota A · Mutamba → Morro Bento',
+      daysOfWeek: 'mon,tue,wed,thu,fri',
+      shiftType: 'morning',
+      departureTime: '06:30',
+      arrivalTime: '07:30',
+      active: true,
+      notes: 'Recolha matinal corredor Mutamba–Kinaxixi–Morro Bento.',
+      createdByUid: 'system-seed',
+    },
+    {
+      schoolId: schoolMorroBento.id,
+      vehicleId: insertedVehicles[0]!.id,
+      driverId: insertedDrivers[0]!.id,
+      routeCode: 'ROTA-A',
+      routeName: 'Rota A · Morro Bento → Mutamba (Regresso)',
+      daysOfWeek: 'mon,tue,wed,thu,fri',
+      shiftType: 'afternoon',
+      departureTime: '12:45',
+      arrivalTime: '13:45',
+      active: true,
+      notes: 'Regresso vespertino com entrega via PIN obrigatório.',
+      createdByUid: 'system-seed',
+    },
+    {
+      schoolId: schoolSaoPaulo.id,
+      vehicleId: insertedVehicles[1]!.id,
+      driverId: insertedDrivers[1]!.id,
+      routeCode: 'ROTA-B',
+      routeName: 'Rota B · Talatona Express',
+      daysOfWeek: 'mon,tue,wed,thu,fri',
+      shiftType: 'morning',
+      departureTime: '06:45',
+      arrivalTime: '07:45',
+      active: true,
+      notes: 'Recolha corredor Kilamba–Belas–Maianga.',
+      createdByUid: 'system-seed',
+    },
+  ]);
+
   // 9. Append-only Attendance Events
   await db.insert(attendanceEvents).values([
     {
@@ -624,7 +750,7 @@ async function runStagingSeed() {
       guardianName: 'Sra. Luísa Domingos',
       payerType: 'guardian',
       phone: '+244 923 456 789',
-      amountAoa: 45000,
+      amountAoa: 3000,
       paymentMethod: 'multicaixa_express',
       status: 'confirmed',
       providerReference: 'MCX-SANDBOX-8192',
@@ -638,7 +764,7 @@ async function runStagingSeed() {
       guardianName: 'Sr. Carlos Neto',
       payerType: 'guardian',
       phone: '+244 945 678 901',
-      amountAoa: 45000,
+      amountAoa: 3000,
       paymentMethod: 'multicaixa_express',
       status: 'pending_provider',
       providerReference: 'MCX-PENDING-8195',

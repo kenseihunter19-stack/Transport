@@ -1,7 +1,7 @@
 {
 	"appId": "ao.mobuss.driver",
 	"appName": "MôBuss Motorista",
-	"webDir": "dist",
+	"webDir": "dist/driver",
 	"server": {
 		"androidScheme": "https",
 		"cleartext": false

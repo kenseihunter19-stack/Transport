@@ -2,13 +2,16 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   AlertTriangle,
+  ArrowUpRight,
   BarChart3,
   Bell,
   Building2,
   Bus,
+  CalendarClock,
   Check,
   CheckCircle2,
   ClipboardList,
+  Clock,
   CloudRain,
   Construction,
   CreditCard,
@@ -23,7 +26,9 @@ import {
   LayoutDashboard,
   Lock,
   LogOut,
+  MapPin,
   Minus,
+  Navigation,
   Pencil,
   Phone,
   Plus,
@@ -41,17 +46,32 @@ import {
   Star,
   Trash2,
   UserCheck,
+  UserPlus,
   Users,
   Wrench,
   X,
   type LucideIcon,
 } from "lucide-react";
-import { LuandaMap } from "@/components/LuandaMap";
+import { LuandaMap, type LuandaFleetMarker } from "@/components/LuandaMap";
 import { AuthGatePanel } from "@/components/AuthGatePanel";
 import { ROLE_LABELS, useAuth, type MoBussRole } from "@/contexts/AuthContext";
+import { APP_TARGET } from "@/lib/runtime-config";
 import { useTelemetrySocket } from "@/hooks/useTelemetrySocket";
 import { downloadCsv, downloadDocument } from "@/lib/operations";
 import { LUANDA_ROUTES } from "@/lib/route-luanda";
+import {
+  ACTIVE_TRIP_STATES,
+  buildLiveFleetVehicles,
+  deriveLiveOperationsSummary,
+  formatAuditActivity,
+  formatWeekdaysPt,
+  getAdminRolePermissions,
+  ROUTE_CODE_TO_ID,
+  translateTripState,
+  translateVehicleStatus,
+  WEEKDAY_OPTIONS,
+  type RecurringRouteScheduleItem,
+} from "@/lib/admin-dashboard";
 import {
   clearHazardForBus,
   DEFAULT_PRICING,
@@ -68,6 +88,7 @@ export type AdminTab =
   | "Painel"
   | "Contratos"
   | "Frota"
+  | "Rotas & Escalas"
   | "Motoristas"
   | "Alunos"
   | "Finanças"
@@ -80,6 +101,7 @@ const ADMIN_TABS: Array<{ id: AdminTab; Icon: LucideIcon; desc: string }> = [
   { id: "Painel", Icon: LayoutDashboard, desc: "Visão Geral das Operações" },
   { id: "Contratos", Icon: FileSignature, desc: "Pedidos, Escolas & Contratos" },
   { id: "Frota", Icon: Bus, desc: "Proprietários, Autocarros & Alocação" },
+  { id: "Rotas & Escalas", Icon: CalendarClock, desc: "Horários Recorrentes & Viaturas" },
   { id: "Motoristas", Icon: UserCheck, desc: "Equipa & Verificação" },
   { id: "Alunos", Icon: GraduationCap, desc: "Diretório & Segurança PIN" },
   { id: "Finanças", Icon: CreditCard, desc: "Tarifário, Faturas & Parceiros" },
@@ -147,8 +169,11 @@ interface AdminOverviewData {
     ownerId: number;
     ownerName: string;
     assignedDriverId: number | null;
+    assignedSchoolId: number | null;
+    schoolName: string | null;
     driverName: string;
     routeCode: string;
+    routeName?: string | null;
     capacity: number;
     dnvtStatus: string;
     dnvtExpiry: string;
@@ -191,13 +216,21 @@ interface AdminOverviewData {
     routeCode: string;
     routeName: string;
     legType: string;
+    serviceDate: string;
+    schoolId: number | null;
+    vehicleId: number | null;
+    driverId: number | null;
     state: string;
+    lastLat: string | null;
+    lastLng: string | null;
+    lastLocationAt: string | null;
     gpsStatus: string;
     emptyBusSweepVerified: boolean;
   }>;
   incidents: Array<{
     id: number;
     tripId: number | null;
+    schoolId: number | null;
     busNumber: number | null;
     routeCode: string | null;
     category: string;
@@ -230,6 +263,7 @@ interface AdminOverviewData {
   pricing: {
     id: number;
     studentMonthlyFeeAoa: number;
+    driverMonthlyFeeAoa?: number;
     schoolBusSingleShiftAoa: number;
     schoolBusDoubleShiftAoa: number;
     ivaPercent: number;
@@ -270,6 +304,7 @@ interface AdminOverviewData {
     schoolId: number | null;
     active: boolean;
   }>;
+  routeSchedules: RecurringRouteScheduleItem[];
 }
 
 const PAYER_LABELS: Record<string, string> = {
@@ -280,7 +315,7 @@ const PAYER_LABELS: Record<string, string> = {
 };
 
 interface AdminViewProps {
-  onNavigate: (view: "mockup" | "admin" | "deck" | "landing" | "client" | "driver" | "school") => void;
+  onNavigate?: (view: "mockup" | "admin" | "deck" | "landing" | "client" | "driver" | "school") => void;
 }
 
 export function AdminView({ onNavigate }: AdminViewProps) {
@@ -288,6 +323,12 @@ export function AdminView({ onNavigate }: AdminViewProps) {
   const [tab, setTab] = useState<AdminTab>("Painel");
   const [search, setSearch] = useState("");
   const [selectedRouteId, setSelectedRouteId] = useState<string>("route_a");
+  const [selectedSchoolFilter, setSelectedSchoolFilter] = useState<"all" | number>("all");
+  const [fleetStatusFilter, setFleetStatusFilter] = useState<"all" | "active" | "available" | "maintenance">("all");
+  const [fleetTripFilter, setFleetTripFilter] = useState<"all" | "active" | "delayed" | "idle">("all");
+  const [fleetRouteFilter, setFleetRouteFilter] = useState<string>("all");
+  const [selectedFleetVehicleId, setSelectedFleetVehicleId] = useState<number | null>(null);
+  const [showTechnicalAudit, setShowTechnicalAudit] = useState(false);
   const [progress, setProgress] = useState(0.42);
 
   // Real DB state & Health Probe
@@ -308,9 +349,10 @@ export function AdminView({ onNavigate }: AdminViewProps) {
   const [newLocation, setNewLocation] = useState("Talatona, Luanda");
   const [newPayerModel, setNewPayerModel] = useState<"school" | "parent" | "mixed">("school");
   const [newBuses, setNewBuses] = useState(2);
+  const [newStudents, setNewStudents] = useState(50);
   const [newContact, setNewContact] = useState("");
   const [newPhone, setNewPhone] = useState("+244 923 000 000");
-  const [newMonthlyAoa, setNewMonthlyAoa] = useState(700000);
+  const [newMonthlyAoa, setNewMonthlyAoa] = useState(216000);
 
   // New Partner Vehicle Owner Modal
   const [ownerModalOpen, setOwnerModalOpen] = useState(false);
@@ -396,6 +438,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
     fleetNumber: "",
     plate: "",
     ownerId: "" as number | "",
+    assignedSchoolId: "" as number | "",
     routeCode: "ROTA-A",
     capacity: 22,
     dnvtExpiry: "2027-12-31",
@@ -405,6 +448,28 @@ export function AdminView({ onNavigate }: AdminViewProps) {
     status: "available",
   });
   const [savingVehicle, setSavingVehicle] = useState(false);
+
+  // Admin Create / Edit Recurring Route Schedule Modal
+  const [routeScheduleModalOpen, setRouteScheduleModalOpen] = useState(false);
+  const [editingScheduleId, setEditingScheduleId] = useState<number | null>(null);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const [savingSchedule, setSavingSchedule] = useState(false);
+  const [scheduleSchoolFilter, setScheduleSchoolFilter] = useState<"all" | number>("all");
+  const [deleteScheduleTarget, setDeleteScheduleTarget] = useState<RecurringRouteScheduleItem | null>(null);
+  const [deletingSchedule, setDeletingSchedule] = useState(false);
+  const [scheduleForm, setScheduleForm] = useState({
+    schoolId: "" as number | "",
+    vehicleId: "" as number | "",
+    driverId: "" as number | "",
+    routeCode: "ROTA-A",
+    routeName: "Rota A · Morro Bento",
+    days: ["mon", "tue", "wed", "thu", "fri"] as string[],
+    shiftType: "morning" as "morning" | "afternoon",
+    departureTime: "06:30",
+    arrivalTime: "07:30",
+    active: true,
+    notes: "",
+  });
 
   // Admin Edit Driver Modal
   const [editingDriver, setEditingDriver] = useState<{
@@ -459,6 +524,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
       if (data.pricing) {
         const syncedPricing: SyncedPricingConfig = {
           studentMonthlyFee: data.pricing.studentMonthlyFeeAoa,
+          driverMonthlyFee: data.pricing.driverMonthlyFeeAoa ?? DEFAULT_PRICING.driverMonthlyFee,
           schoolBusSingleShift: data.pricing.schoolBusSingleShiftAoa,
           schoolBusDoubleShift: data.pricing.schoolBusDoubleShiftAoa,
           ivaPercent: data.pricing.ivaPercent,
@@ -627,14 +693,208 @@ export function AdminView({ onNavigate }: AdminViewProps) {
   );
 
   const activeHazards = syncState.hazards.filter((h) => h.active);
+  const rolePerms = getAdminRolePermissions(dbUser?.primaryRole);
+
+  // Contracted / Active Schools Selector Options (real records only)
+  const activeContractSchoolIds = new Set(
+    (overview?.contracts ?? []).filter((c) => c.status === "active").map((c) => c.schoolId)
+  );
+  const selectableSchools = (overview?.schools ?? []).filter(
+    (s) => s.status === "active" || activeContractSchoolIds.has(s.id)
+  );
+  const selectedSchoolObj =
+    selectedSchoolFilter === "all"
+      ? null
+      : selectableSchools.find((s) => s.id === selectedSchoolFilter) ??
+        (overview?.schools ?? []).find((s) => s.id === selectedSchoolFilter) ??
+        null;
+
+  const allSchedules = overview?.routeSchedules ?? [];
+  const allLiveFleetVehicles = buildLiveFleetVehicles({
+    schools: overview?.schools ?? [],
+    vehicles: overview?.vehicles ?? [],
+    drivers: overview?.drivers ?? [],
+    students: overview?.students ?? [],
+    trips: overview?.trips ?? [],
+    routeSchedules: allSchedules,
+  });
+
+  // School-scoped records (All Schools vs Individual School)
+  const scopedVehicles =
+    selectedSchoolFilter === "all"
+      ? allLiveFleetVehicles
+      : allLiveFleetVehicles.filter((v) => v.associatedSchoolIds.includes(selectedSchoolFilter));
+  const scopedVehicleIds = new Set(scopedVehicles.map((v) => v.id));
+  const scopedVehicleRouteCodes = new Set(scopedVehicles.map((v) => v.routeCode).filter((c) => c && c !== "—"));
+  const scopedVehicleFleetNumbers = new Set(scopedVehicles.map((v) => v.fleetNumber));
+
+  const scopedSchedules =
+    selectedSchoolFilter === "all"
+      ? allSchedules
+      : allSchedules.filter((s) => s.schoolId === selectedSchoolFilter);
+
+  const scopedTrips =
+    selectedSchoolFilter === "all"
+      ? overview?.trips ?? []
+      : (overview?.trips ?? []).filter(
+          (t) => t.schoolId === selectedSchoolFilter || (t.vehicleId != null && scopedVehicleIds.has(t.vehicleId))
+        );
+
+  const scopedStudents =
+    selectedSchoolFilter === "all"
+      ? overview?.students ?? []
+      : (overview?.students ?? []).filter((s) => s.schoolId === selectedSchoolFilter);
+
+  const scopedContracts =
+    selectedSchoolFilter === "all"
+      ? overview?.contracts ?? []
+      : (overview?.contracts ?? []).filter((c) => c.schoolId === selectedSchoolFilter);
+
+  const scopedIncidents =
+    selectedSchoolFilter === "all"
+      ? overview?.incidents ?? []
+      : (overview?.incidents ?? []).filter(
+          (inc) =>
+            inc.schoolId === selectedSchoolFilter ||
+            (inc.busNumber != null && scopedVehicleFleetNumbers.has(inc.busNumber)) ||
+            (inc.routeCode != null && scopedVehicleRouteCodes.has(inc.routeCode))
+        );
+
+  const scopedHazards =
+    selectedSchoolFilter === "all"
+      ? activeHazards
+      : activeHazards.filter(
+          (h) => scopedVehicleFleetNumbers.has(h.busNumber) || scopedVehicleRouteCodes.has(h.routeCode)
+        );
+
   const openIncidentsCount = (overview?.incidents ?? []).filter(
+    (i) => i.status !== "resolved" && i.status !== "closed"
+  ).length;
+  const scopedOpenIncidentsCount = scopedIncidents.filter(
     (i) => i.status !== "resolved" && i.status !== "closed"
   ).length;
   const pendingLeadsCount = (overview?.contractRequests ?? []).filter(
     (r) => r.status === "request_received" || r.status === "under_review"
   ).length;
-  const activeContractsCount = (overview?.contracts ?? []).filter((c) => c.status === "active").length;
-  const busesOnRoadCount = (overview?.vehicles ?? []).filter((v) => v.status === "assigned").length;
+  const activeContractsCount = scopedContracts.filter((c) => c.status === "active").length;
+  const busesOnRoadCount = scopedVehicles.filter(
+    (v) => v.status === "assigned" || v.status === "on_trip"
+  ).length;
+
+  const scopedDriversMap = new Map((overview?.drivers ?? []).map((d) => [d.id, d]));
+  const scopedDriverList =
+    selectedSchoolFilter === "all"
+      ? overview?.drivers ?? []
+      : (overview?.vehicles ?? [])
+          .filter((v) => scopedVehicleIds.has(v.id) && v.assignedDriverId != null)
+          .map((v) => scopedDriversMap.get(v.assignedDriverId!))
+          .filter((d): d is NonNullable<typeof d> => Boolean(d))
+          .filter((d, idx, arr) => arr.findIndex((x) => x.id === d.id) === idx);
+
+  const liveOps = deriveLiveOperationsSummary({
+    trips: scopedTrips,
+    vehicles: scopedVehicles.map((v) => ({ id: v.id, status: v.status })),
+    drivers: scopedDriverList,
+    students: scopedStudents,
+    openIncidentsCount: scopedOpenIncidentsCount,
+    activeHazardsCount: scopedHazards.length,
+  });
+
+  const availableRouteFilterOptions = Array.from(
+    new Set(
+      [
+        ...scopedVehicles.map((v) => v.routeCode),
+        ...scopedTrips.map((t) => t.routeCode),
+        ...scopedSchedules.filter((s) => s.active).map((s) => s.routeCode),
+      ].filter((code) => Boolean(code) && code !== "—" && code !== "RESERVA")
+    )
+  ).sort();
+
+  const filteredLiveFleet = scopedVehicles.filter((v) => {
+    const matchesSearch =
+      !q ||
+      v.plate.toLowerCase().includes(q) ||
+      v.driverName.toLowerCase().includes(q) ||
+      v.routeCode.toLowerCase().includes(q) ||
+      v.primarySchoolName.toLowerCase().includes(q) ||
+      String(v.fleetNumber).includes(q);
+    if (!matchesSearch) return false;
+    if (fleetStatusFilter === "active" && v.status !== "on_trip" && !(v.activeTrip && v.hasLiveGps)) return false;
+    if (fleetStatusFilter === "available" && v.status !== "available" && v.status !== "assigned") return false;
+    if (
+      fleetStatusFilter === "maintenance" &&
+      v.status !== "maintenance" &&
+      v.status !== "out_of_service" &&
+      v.status !== "suspended"
+    ) {
+      return false;
+    }
+    if (fleetTripFilter !== "all" && v.tripFilterCategory !== fleetTripFilter) return false;
+    if (fleetRouteFilter !== "all" && v.routeCode !== fleetRouteFilter) return false;
+    return true;
+  });
+
+  const fleetMapMarkers: LuandaFleetMarker[] = filteredLiveFleet
+    .filter((v): v is typeof v & { lat: number; lng: number } => v.hasCoordinates && v.lat != null && v.lng != null)
+    .map((v) => ({
+      id: v.id,
+      fleetNumber: v.fleetNumber,
+      plate: v.plate,
+      routeCode: v.routeCode,
+      driverName: v.driverName,
+      schoolName: v.primarySchoolName,
+      statusLabel: translateVehicleStatus(v.status),
+      lat: v.lat,
+      lng: v.lng,
+      isLiveGps: v.hasLiveGps,
+      gpsStatus: v.gpsStatus,
+    }));
+
+  // Derive relevant real routes on the monitoring map without ever inventing routes for idle schools
+  const activeRouteIdsOnMap = Array.from(
+    new Set(
+      [
+        ...scopedTrips
+          .filter((t) => ACTIVE_TRIP_STATES.has(t.state) || t.state === "delayed" || t.state === "incident" || t.lastLat != null)
+          .map((t) => ROUTE_CODE_TO_ID[t.routeCode]),
+        ...filteredLiveFleet
+          .filter((v) => v.hasCoordinates || v.status === "on_trip" || v.status === "assigned")
+          .map((v) => v.routeId),
+        ...scopedSchedules.filter((s) => s.active).map((s) => ROUTE_CODE_TO_ID[s.routeCode]),
+      ]
+        .filter((id): id is string => Boolean(id && LUANDA_ROUTES[id]))
+        .filter((id) => fleetRouteFilter === "all" || LUANDA_ROUTES[id]?.code === fleetRouteFilter)
+    )
+  );
+
+  const inspectedVehicle =
+    filteredLiveFleet.find((v) => v.id === selectedFleetVehicleId) ??
+    scopedVehicles.find((v) => v.id === selectedFleetVehicleId) ??
+    filteredLiveFleet[0] ??
+    null;
+
+  const formattedAuditLogs = (overview?.auditLogs ?? [])
+    .map(formatAuditActivity)
+    .filter(
+      (item) =>
+        !q ||
+        item.title.toLowerCase().includes(q) ||
+        item.summary.toLowerCase().includes(q) ||
+        item.actorDisplay.toLowerCase().includes(q) ||
+        item.rawAction.toLowerCase().includes(q)
+    );
+
+  const schedulesTabList = allSchedules.filter((sch) => {
+    if (scheduleSchoolFilter !== "all" && sch.schoolId !== scheduleSchoolFilter) return false;
+    if (!q) return true;
+    return (
+      sch.schoolName.toLowerCase().includes(q) ||
+      sch.routeCode.toLowerCase().includes(q) ||
+      sch.routeName.toLowerCase().includes(q) ||
+      sch.driverName.toLowerCase().includes(q) ||
+      (sch.vehiclePlate ?? "").toLowerCase().includes(q)
+    );
+  });
 
   async function handleSavePricing() {
     try {
@@ -642,8 +902,9 @@ export function AdminView({ onNavigate }: AdminViewProps) {
         method: "PUT",
         body: JSON.stringify({
           studentMonthlyFeeAoa: pricingDraft.studentMonthlyFee,
-          schoolBusSingleShiftAoa: pricingDraft.schoolBusSingleShift,
-          schoolBusDoubleShiftAoa: pricingDraft.schoolBusDoubleShift,
+          driverMonthlyFeeAoa: pricingDraft.driverMonthlyFee,
+          schoolBusSingleShiftAoa: pricingDraft.driverMonthlyFee,
+          schoolBusDoubleShiftAoa: pricingDraft.driverMonthlyFee,
           ivaPercent: pricingDraft.ivaPercent,
           companyName: pricingDraft.companyName,
           companyNif: pricingDraft.companyNif,
@@ -651,7 +912,9 @@ export function AdminView({ onNavigate }: AdminViewProps) {
         }),
       });
       updatePricingConfig(pricingDraft);
-      showToast(`Tarifário guardado em PostgreSQL: ${formatAOA(pricingDraft.studentMonthlyFee)}/mês.`);
+      showToast(
+        `Tarifário guardado em PostgreSQL: ${formatAOA(pricingDraft.studentMonthlyFee)}/aluno · ${formatAOA(pricingDraft.driverMonthlyFee)}/motorista.`
+      );
       await loadOverview();
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Sem permissão para editar tarifário.");
@@ -700,7 +963,8 @@ export function AdminView({ onNavigate }: AdminViewProps) {
           municipality: newLocation.trim(),
           payerModel: newPayerModel,
           busesAllocated: newBuses,
-          studentsCovered: newBuses * 25,
+          driversAllocated: newBuses,
+          studentsCovered: newStudents,
           monthlyValueAoa: newMonthlyAoa,
           contactName: newContact.trim() || "Direcção Escolar",
           contactPhone: newPhone.trim(),
@@ -1017,12 +1281,14 @@ export function AdminView({ onNavigate }: AdminViewProps) {
     }
     setSavingVehicle(true);
     try {
+      const assignedSchoolId = vehicleForm.assignedSchoolId ? Number(vehicleForm.assignedSchoolId) : null;
       if (editingVehicleId) {
         const res = await apiFetch<{ message: string }>(`/api/v1/admin/vehicles/${editingVehicleId}`, {
           method: "PATCH",
           body: JSON.stringify({
             plate: vehicleForm.plate.trim().toUpperCase(),
             ownerId: resolvedOwnerId,
+            assignedSchoolId,
             routeCode: vehicleForm.routeCode.trim(),
             capacity: Number(vehicleForm.capacity) || 22,
             dnvtExpiry: vehicleForm.dnvtExpiry,
@@ -1040,6 +1306,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
             fleetNumber: Number(vehicleForm.fleetNumber),
             plate: vehicleForm.plate.trim().toUpperCase(),
             ownerId: resolvedOwnerId,
+            assignedSchoolId,
             routeCode: vehicleForm.routeCode.trim(),
             capacity: Number(vehicleForm.capacity) || 22,
             dnvtExpiry: vehicleForm.dnvtExpiry,
@@ -1057,6 +1324,129 @@ export function AdminView({ onNavigate }: AdminViewProps) {
       showToast(err instanceof Error ? err.message : "Erro ao guardar viatura.");
     } finally {
       setSavingVehicle(false);
+    }
+  }
+
+  function openNewRouteScheduleModal(preselectedSchoolId?: number) {
+    const defaultSchoolId =
+      preselectedSchoolId ??
+      (selectedSchoolFilter !== "all" ? selectedSchoolFilter : selectableSchools[0]?.id ?? overview?.schools[0]?.id ?? "");
+    setEditingScheduleId(null);
+    setScheduleError(null);
+    setScheduleForm({
+      schoolId: defaultSchoolId,
+      vehicleId: "",
+      driverId: "",
+      routeCode: "ROTA-A",
+      routeName: LUANDA_ROUTES.route_a.name,
+      days: ["mon", "tue", "wed", "thu", "fri"],
+      shiftType: "morning",
+      departureTime: "06:30",
+      arrivalTime: "07:30",
+      active: true,
+      notes: "",
+    });
+    setRouteScheduleModalOpen(true);
+  }
+
+  function openEditRouteScheduleModal(sch: RecurringRouteScheduleItem) {
+    setEditingScheduleId(sch.id);
+    setScheduleError(null);
+    setScheduleForm({
+      schoolId: sch.schoolId,
+      vehicleId: sch.vehicleId ?? "",
+      driverId: sch.driverId ?? "",
+      routeCode: sch.routeCode,
+      routeName: sch.routeName,
+      days: sch.daysOfWeek
+        .split(",")
+        .map((d) => d.trim().toLowerCase())
+        .filter(Boolean),
+      shiftType: sch.shiftType === "afternoon" ? "afternoon" : "morning",
+      departureTime: sch.departureTime,
+      arrivalTime: sch.arrivalTime,
+      active: sch.active,
+      notes: sch.notes ?? "",
+    });
+    setRouteScheduleModalOpen(true);
+  }
+
+  async function handleSaveRouteSchedule(e: React.FormEvent) {
+    e.preventDefault();
+    setScheduleError(null);
+    const resolvedSchoolId = Number(scheduleForm.schoolId);
+    if (!resolvedSchoolId) {
+      setScheduleError("Selecione uma escola contratada.");
+      return;
+    }
+    if (scheduleForm.days.length === 0) {
+      setScheduleError("Selecione pelo menos um dia da semana.");
+      return;
+    }
+    setSavingSchedule(true);
+    try {
+      const payload = {
+        schoolId: resolvedSchoolId,
+        vehicleId: scheduleForm.vehicleId ? Number(scheduleForm.vehicleId) : null,
+        driverId: scheduleForm.driverId ? Number(scheduleForm.driverId) : null,
+        routeCode: scheduleForm.routeCode.trim().toUpperCase(),
+        routeName: scheduleForm.routeName.trim() || scheduleForm.routeCode.trim().toUpperCase(),
+        daysOfWeek: scheduleForm.days,
+        shiftType: scheduleForm.shiftType,
+        departureTime: scheduleForm.departureTime,
+        arrivalTime: scheduleForm.arrivalTime,
+        active: scheduleForm.active,
+        notes: scheduleForm.notes.trim() || null,
+      };
+      const res = editingScheduleId
+        ? await apiFetch<{ message: string }>(`/api/v1/admin/route-schedules/${editingScheduleId}`, {
+            method: "PATCH",
+            body: JSON.stringify(payload),
+          })
+        : await apiFetch<{ message: string }>("/api/v1/admin/route-schedules", {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+      setRouteScheduleModalOpen(false);
+      setEditingScheduleId(null);
+      showToast(res.message);
+      await loadOverview();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Erro ao guardar escala de rota.";
+      setScheduleError(msg);
+      showToast(msg);
+    } finally {
+      setSavingSchedule(false);
+    }
+  }
+
+  async function handleToggleRouteSchedule(sch: RecurringRouteScheduleItem) {
+    try {
+      const res = await apiFetch<{ message: string }>(`/api/v1/admin/route-schedules/${sch.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ active: !sch.active }),
+      });
+      showToast(res.message);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao atualizar estado da escala.");
+    }
+  }
+
+  async function handleConfirmDeleteSchedule() {
+    if (!deleteScheduleTarget) return;
+    setDeletingSchedule(true);
+    try {
+      const res = await apiFetch<{ message: string }>(`/api/v1/admin/route-schedules/${deleteScheduleTarget.id}`, {
+        method: "DELETE",
+      });
+      setDeleteScheduleTarget(null);
+      showToast(res.message);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao remover escala de rota.");
+    } finally {
+      setDeletingSchedule(false);
     }
   }
 
@@ -1225,28 +1615,32 @@ export function AdminView({ onNavigate }: AdminViewProps) {
         </div>
 
         <div className="space-y-1.5 pt-4 border-t border-white/10 text-xs">
-          <div className="text-[11px] font-semibold text-slide-dim mb-2">Atalhos da Plataforma</div>
-          <button
-            onClick={() => onNavigate("school")}
-            className="w-full flex items-center gap-2 text-slide-paper hover:text-slide-accent font-semibold transition cursor-pointer text-left py-1.5"
-          >
-            <Building2 className="w-3.5 h-3.5 text-slide-accent shrink-0" />
-            <span>Portal Escola</span>
-          </button>
-          <button
-            onClick={() => onNavigate("mockup")}
-            className="w-full flex items-center gap-2 text-slide-dim hover:text-slide-paper transition cursor-pointer text-left py-1.5"
-          >
-            <Smartphone className="w-3.5 h-3.5 shrink-0" />
-            <span>Simulador iPhone</span>
-          </button>
-          <button
-            onClick={() => onNavigate("deck")}
-            className="w-full flex items-center gap-2 text-slide-dim hover:text-slide-paper transition cursor-pointer text-left py-1.5"
-          >
-            <Presentation className="w-3.5 h-3.5 shrink-0" />
-            <span>Slides</span>
-          </button>
+          {APP_TARGET === "hub" && onNavigate && (
+            <>
+              <div className="text-[11px] font-semibold text-slide-dim mb-2">Atalhos da Plataforma</div>
+              <button
+                onClick={() => onNavigate("school")}
+                className="w-full flex items-center gap-2 text-slide-paper hover:text-slide-accent font-semibold transition cursor-pointer text-left py-1.5"
+              >
+                <Building2 className="w-3.5 h-3.5 text-slide-accent shrink-0" />
+                <span>Portal Escola</span>
+              </button>
+              <button
+                onClick={() => onNavigate("mockup")}
+                className="w-full flex items-center gap-2 text-slide-dim hover:text-slide-paper transition cursor-pointer text-left py-1.5"
+              >
+                <Smartphone className="w-3.5 h-3.5 shrink-0" />
+                <span>Simulador iPhone</span>
+              </button>
+              <button
+                onClick={() => onNavigate("deck")}
+                className="w-full flex items-center gap-2 text-slide-dim hover:text-slide-paper transition cursor-pointer text-left py-1.5"
+              >
+                <Presentation className="w-3.5 h-3.5 shrink-0" />
+                <span>Slides</span>
+              </button>
+            </>
+          )}
           <button
             type="button"
             onClick={() => void signOut()}
@@ -1258,216 +1652,1036 @@ export function AdminView({ onNavigate }: AdminViewProps) {
         </div>
       </aside>
 
-      {/* Mobile Tab Strip */}
-      <div className="lg:hidden border-b border-white/10 bg-slide-paper-ink px-4 py-2 overflow-x-auto no-scrollbar flex items-center gap-1.5">
-        {ADMIN_TABS.map(({ id, Icon }) => (
+      {/* Mobile Responsive Top Bar & Navigation */}
+      <div className="lg:hidden border-b border-white/10 bg-slide-paper-ink">
+        <div className="px-4 py-2.5 flex items-center justify-between gap-2 border-b border-white/10">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <img
+              src="/assets/aistudio/20261117_030824_57b8de0b.jpg"
+              alt="MôBuss Logo"
+              className="w-7 h-7 rounded-lg object-cover bg-black border border-white/10 shrink-0"
+            />
+            <div className="min-w-0">
+              <div className="font-extrabold text-xs tracking-tight text-white truncate" style={{ fontFamily: "var(--font-display)" }}>
+                MôBuss Admin
+              </div>
+              <div className="text-[10px] text-slide-dim truncate">
+                {dbUser?.fullName} · {dbUser ? ROLE_LABELS[dbUser.primaryRole] : ""}
+              </div>
+            </div>
+          </div>
           <button
-            key={id}
-            onClick={() => setTab(id)}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer transition ${
-              tab === id ? "bg-slide-accent text-white" : "text-slide-dim hover:text-white bg-white/5"
-            }`}
+            type="button"
+            onClick={() => void signOut()}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold whitespace-nowrap shrink-0 cursor-pointer bg-red-500/15 text-red-300 hover:text-white"
           >
-            <Icon className="w-3.5 h-3.5" />
-            <span>{id}</span>
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Sair</span>
           </button>
-        ))}
+        </div>
+        <div className="px-4 py-2 overflow-x-auto no-scrollbar flex items-center gap-1.5">
+          {ADMIN_TABS.map(({ id, Icon }) => (
+            <button
+              key={id}
+              onClick={() => setTab(id)}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer transition ${
+                tab === id ? "bg-slide-accent text-white" : "text-slide-dim hover:text-white bg-white/5"
+              }`}
+            >
+              <Icon className="w-3.5 h-3.5" />
+              <span>{id === "Painel" ? "Dashboard" : id}</span>
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Main Content */}
-      <main className="flex-1 min-w-0 p-5 sm:p-6 lg:p-8 overflow-y-auto">
-        <header className="flex flex-wrap justify-between items-center gap-4 mb-6 pb-4 border-b border-white/10">
-          <div>
-            <div className="text-xs font-medium text-slide-dim flex items-center gap-2 flex-wrap">
-              <span>Angola · Luanda</span>
-              <span aria-hidden="true">·</span>
-              <span className={`inline-flex items-center gap-1.5 font-semibold ${health.dbConnected ? "text-slide-ok" : "text-amber-400"}`}>
-                <Database className="w-3.5 h-3.5" />
-                <span>
+      <main className="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 overflow-y-auto">
+        <header className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 mb-6 pb-5 border-b border-white/10">
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-slide-dim flex items-center gap-x-2.5 gap-y-1 flex-wrap">
+              <span className="text-slide-paper/90 font-semibold">Angola · Luanda</span>
+              <span aria-hidden="true" className="text-white/25">·</span>
+              <span className={`inline-flex items-center gap-1.5 font-semibold ${health.dbConnected ? "text-emerald-400" : "text-amber-400"}`}>
+                <Database className="w-3.5 h-3.5 shrink-0" />
+                <span className="tabular-nums">
                   {health.dbConnected
                     ? `PostgreSQL Online (${health.latencyMs ?? 0}ms)`
                     : "A verificar PostgreSQL..."}
                 </span>
               </span>
-              <span aria-hidden="true">·</span>
-              <span className={`inline-flex items-center gap-1.5 font-semibold ${wsConnected ? "text-emerald-300" : "text-amber-300"}`}>
-                <Radio className="w-3.5 h-3.5" />
-                <span>{wsConnected ? `WS Ao Vivo (${simConnectedClients} cliente(s))` : "A ligar WS..."}</span>
+              <span aria-hidden="true" className="text-white/25">·</span>
+              <span className={`inline-flex items-center gap-1.5 font-semibold ${wsConnected ? "text-emerald-400" : "text-amber-400"}`}>
+                <Radio className={`w-3.5 h-3.5 shrink-0 ${wsConnected ? "animate-pulse" : ""}`} />
+                <span className="tabular-nums">
+                  {wsConnected ? `WebSocket Ao Vivo (${simConnectedClients} ligação(ões))` : "WebSocket a ligar..."}
+                </span>
               </span>
             </div>
-            <h1 className="text-2xl sm:text-3xl font-black text-slide-paper mt-1" style={{ fontFamily: "var(--font-display)" }}>
-              {tab}
-            </h1>
+
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 mt-1.5">
+              <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-slide-paper" style={{ fontFamily: "var(--font-display)" }}>
+                {tab === "Painel" ? "Dashboard" : tab}
+              </h1>
+              <span className="text-xs text-slide-dim font-medium">
+                {tab === "Painel"
+                  ? "Central Operacional de Transporte Escolar"
+                  : ADMIN_TABS.find((item) => item.id === tab)?.desc}
+              </span>
+            </div>
           </div>
 
-          <div className="flex items-center gap-3 flex-wrap">
-            <div className="relative">
+          <div className="flex items-center gap-2.5 flex-wrap">
+            <div className="relative flex-1 sm:flex-initial min-w-[210px]">
               <Search className="w-3.5 h-3.5 text-slide-dim absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Pesquisar frota, alunos, contratos..."
-                className="rounded-xl bg-slide-surface pl-9 pr-4 py-2 text-xs text-slide-paper placeholder:text-slide-dim outline-none w-52 sm:w-64 border border-white/10 focus:border-slide-accent"
+                aria-label="Pesquisa global no painel administrativo"
+                className="rounded-xl bg-slide-surface pl-9 pr-8 py-2 text-xs text-slide-paper placeholder:text-slide-dim outline-none w-full sm:w-64 border border-white/10 focus:border-slide-accent transition-colors"
               />
+              {search && (
+                <button
+                  type="button"
+                  onClick={() => setSearch("")}
+                  aria-label="Limpar pesquisa"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slide-dim hover:text-white cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
             </div>
 
             <button
+              type="button"
               onClick={() => {
                 void checkHealth();
                 void loadOverview();
               }}
-              className="rounded-xl bg-slide-surface border border-white/10 px-3 py-2 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer hover:bg-white/10"
+              className="rounded-xl bg-slide-surface border border-white/10 px-3.5 py-2 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer hover:bg-white/[0.06] hover:border-white/20 transition whitespace-nowrap"
             >
-              <RefreshCw className={`w-3.5 h-3.5 ${loadingOverview ? "animate-spin" : ""}`} />
+              <RefreshCw className={`w-3.5 h-3.5 ${loadingOverview ? "animate-spin text-slide-accent" : ""}`} />
               <span>Atualizar</span>
             </button>
 
-            <div className="flex items-center gap-2 bg-slide-surface px-3 py-1.5 rounded-xl border border-white/10">
-              <div className="w-7 h-7 rounded-lg bg-slide-accent text-white grid place-items-center font-black text-xs">
+            <div className="hidden sm:flex items-center gap-2.5 bg-slide-surface px-3 py-1.5 rounded-xl border border-white/10">
+              <div className="w-7 h-7 rounded-lg bg-slide-accent text-white grid place-items-center font-black text-xs shrink-0">
                 {(dbUser?.fullName || "MB").slice(0, 2).toUpperCase()}
               </div>
-              <div className="text-left hidden sm:block">
-                <div className="text-[11px] font-bold text-slide-paper leading-none">{dbUser?.fullName}</div>
-                <div className="text-[10px] text-slide-dim mt-0.5">{dbUser ? ROLE_LABELS[dbUser.primaryRole] : ""}</div>
+              <div className="text-left min-w-0">
+                <div className="text-xs font-bold text-slide-paper leading-tight truncate max-w-[160px]">
+                  {dbUser?.fullName}
+                </div>
+                <div className="text-[11px] text-slide-dim leading-tight truncate">
+                  {dbUser ? ROLE_LABELS[dbUser.primaryRole] : ""}
+                </div>
               </div>
             </div>
           </div>
         </header>
 
         <motion.div key={tab} initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.15 }}>
-          {/* ================= PAINEL ================= */}
+          {/* ================= PAINEL (DASHBOARD) ================= */}
           {tab === "Painel" && (
             <div className="space-y-6">
               {activeHazards.length > 0 && (
-                <div className="rounded-2xl bg-slide-accent/15 border border-slide-accent/40 p-4 flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex items-center gap-3">
-                    <AlertTriangle className="w-5 h-5 text-slide-accent shrink-0" />
-                    <div>
-                      <div className="text-xs font-extrabold text-white">
+                <div className="rounded-xl bg-slide-accent/10 border border-slide-accent/35 p-4 flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-9 h-9 rounded-lg bg-slide-accent/20 text-slide-accent grid place-items-center shrink-0">
+                      <AlertTriangle className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-white">
                         Alerta de Via Reportado ({activeHazards[0]!.label})
                       </div>
-                      <div className="text-xs text-slide-dim">
+                      <div className="text-xs text-slide-dim truncate">
                         {activeHazards[0]!.driver} · {activeHazards[0]!.routeCode} · Autocarro {activeHazards[0]!.busNumber}
                       </div>
                     </div>
                   </div>
-                  <button
-                    onClick={() => {
-                      clearHazardForBus(activeHazards[0]!.busNumber);
-                      showToast("Alerta de via limpo.");
-                    }}
-                    className="px-3 py-1.5 rounded-lg bg-slide-surface text-xs font-semibold border border-white/10 cursor-pointer"
-                  >
-                    Limpar
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setTab("Emergências")}
+                      className="px-3 py-1.5 rounded-lg bg-slide-accent text-white text-xs font-bold cursor-pointer hover:opacity-95 whitespace-nowrap"
+                    >
+                      Ver Ocorrências
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        clearHazardForBus(activeHazards[0]!.busNumber);
+                        showToast("Alerta de via limpo.");
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-slide-surface text-xs font-semibold border border-white/10 cursor-pointer hover:bg-white/10 whitespace-nowrap"
+                    >
+                      Limpar
+                    </button>
+                  </div>
                 </div>
               )}
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                <Stat
-                  label="Contratos Escolares Ativos"
+              {/* 4 Redesigned Statistics Cards (Dynamically scoped by selected school or All Schools) */}
+              <section aria-label="Resumo operacional" className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+                <DashboardKpiCard
+                  title={selectedSchoolObj ? "Contratos da Escola" : "Contratos Escolares Ativos"}
                   value={activeContractsCount}
-                  sub={pendingLeadsCount > 0 ? `${pendingLeadsCount} pedido(s) públicos por rever` : "Carteira PostgreSQL ativa"}
+                  subtitle={
+                    selectedSchoolObj
+                      ? `${selectedSchoolObj.name} · ${selectedSchoolObj.municipality}`
+                      : `${selectableSchools.length} escola(s) · ${pendingLeadsCount} pedido(s) por rever`
+                  }
+                  statusLabel={pendingLeadsCount > 0 && !selectedSchoolObj ? "Requer revisão" : "Ativo"}
+                  statusTone={pendingLeadsCount > 0 && !selectedSchoolObj ? "warn" : "ok"}
+                  Icon={FileSignature}
+                  onClick={() => setTab("Contratos")}
                 />
-                <Stat
-                  label="Viaturas Alocadas"
-                  value={`${busesOnRoadCount}/${overview?.vehicles.length ?? 0}`}
-                  sub={`${overview?.vehicleOwners.length ?? 0} proprietário(s) registados`}
-                  accent
+                <DashboardKpiCard
+                  title={selectedSchoolObj ? "Viaturas Atribuídas" : "Visão Geral da Frota"}
+                  value={scopedVehicles.length}
+                  secondaryValue={`${busesOnRoadCount} alocadas`}
+                  subtitle={
+                    selectedSchoolObj
+                      ? `${scopedVehicles.filter((v) => v.hasLiveGps).length} c/ GPS ao vivo · ${scopedSchedules.filter((s) => s.active).length} escala(s)`
+                      : `${scopedVehicles.filter((v) => v.status === "available").length} disponíveis · ${overview?.vehicleOwners.length ?? 0} proprietário(s)`
+                  }
+                  statusLabel={scopedVehicles.length > 0 ? "Operacional" : "Sem viaturas"}
+                  statusTone={scopedVehicles.length > 0 ? "ok" : "warn"}
+                  Icon={Bus}
+                  onClick={() => setTab("Frota")}
                 />
-                <Stat
-                  label="Educandos Monitorizados"
-                  value={overview?.students.length ?? 0}
-                  sub="Política PIN: Embarque + Desembarque"
+                <DashboardKpiCard
+                  title={selectedSchoolObj ? "Alunos da Escola" : "Alunos Registados"}
+                  value={scopedStudents.length}
+                  secondaryValue={`${scopedStudents.filter((s) => s.enrollmentStatus === "active").length} ativos`}
+                  subtitle={`${liveOps.studentsAwaitingPickupCount} a aguardar embarque · ${liveOps.studentsOnBoardCount} a bordo`}
+                  statusLabel="PIN Obrigatório"
+                  statusTone="neutral"
+                  Icon={GraduationCap}
+                  onClick={() => setTab("Alunos")}
                 />
-                <Stat
-                  label="Ocorrências em Aberto"
-                  value={openIncidentsCount}
-                  sub={openIncidentsCount > 0 ? "Requer atenção" : "Sem incidentes abertos"}
-                  danger={openIncidentsCount > 0}
+                <DashboardKpiCard
+                  title={selectedSchoolObj ? "Ocorrências da Escola" : "Ocorrências em Aberto"}
+                  value={scopedOpenIncidentsCount}
+                  secondaryValue={`${scopedIncidents.length} total`}
+                  subtitle={
+                    scopedHazards.length > 0
+                      ? `${scopedHazards.length} alerta(s) de via em curso`
+                      : scopedOpenIncidentsCount > 0
+                      ? "Ocorrências em aberto na central"
+                      : "Sem ocorrências pendentes"
+                  }
+                  statusLabel={scopedOpenIncidentsCount > 0 ? "Atenção requerida" : "Normal"}
+                  statusTone={scopedOpenIncidentsCount > 0 ? "danger" : "ok"}
+                  Icon={Siren}
+                  onClick={() => setTab("Emergências")}
                 />
-              </div>
+              </section>
 
-              {/* Server-Backed Live Simulation Bar */}
-              <div className="rounded-2xl bg-slide-surface border border-white/10 p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
-                <div>
-                  <div className="font-bold text-white flex items-center gap-2">
-                    <Radio className={`w-4 h-4 ${simStatus?.running ? "text-slide-ok animate-pulse" : "text-slide-accent"}`} />
-                    <span>Simulação de Rota Real em PostgreSQL + WebSocket</span>
+              {/* Quick Actions (Authorized Only) + Live Operations Overview */}
+              <div className="grid grid-cols-1 xl:grid-cols-[1.5fr_1fr] gap-4 items-stretch">
+                {/* Real Live Operations Overview */}
+                <div className="rounded-2xl bg-slide-surface border border-white/10 p-5 flex flex-col justify-between gap-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h2 className="font-bold text-sm text-slide-paper flex items-center gap-2" style={{ fontFamily: "var(--font-display)" }}>
+                        <Navigation className="w-4 h-4 text-slide-accent" />
+                        <span>
+                          {selectedSchoolObj ? `Operações Ao Vivo · ${selectedSchoolObj.name}` : "Operações Ao Vivo · Toda a Frota"}
+                        </span>
+                      </h2>
+                      <p className="text-xs text-slide-dim mt-0.5">
+                        Telemetria operacional em tempo real proveniente do PostgreSQL e WebSocket.
+                      </p>
+                    </div>
+                    <span className="text-[11px] font-semibold text-slide-dim tabular-nums">
+                      {scopedTrips.length} registo(s) de viagem hoje
+                    </span>
                   </div>
-                  <div className="text-[11px] text-slide-dim mt-0.5">
-                    {simStatus
-                      ? `Rota ${simStatus.routeCode} · Progresso ${Math.round(simStatus.progress * 100)}% · Paragem próxima: ${simStatus.nearestStopName}`
-                      : "Movimenta a viatura real no PostgreSQL e transmite GPS + alertas de 500m em tempo real a todas as apps."}
-                  </div>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  {simStatus?.running ? (
-                    <button
-                      onClick={() => void handleSimulationAction("pause")}
-                      className="rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-200 px-3 py-1.5 font-bold cursor-pointer"
-                    >
-                      Pausar Simulação
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => void handleSimulationAction("start")}
-                      className="rounded-xl bg-slide-ok text-white px-3 py-1.5 font-bold cursor-pointer"
-                    >
-                      Iniciar Simulação Ao Vivo
-                    </button>
-                  )}
-                  <button
-                    onClick={() => void handleSimulationAction("step")}
-                    className="rounded-xl bg-slide-bg border border-white/15 px-3 py-1.5 font-semibold cursor-pointer hover:bg-white/10"
-                  >
-                    +1 Passo (500m)
-                  </button>
-                  <button
-                    onClick={() => void handleSimulationAction("reset")}
-                    className="rounded-xl bg-slide-bg border border-white/15 px-3 py-1.5 font-semibold cursor-pointer hover:bg-white/10"
-                  >
-                    Reiniciar Rota
-                  </button>
-                </div>
-              </div>
 
-              <div className="grid grid-cols-1 lg:grid-cols-[1.6fr_1fr] gap-6">
-                <Card
-                  title="Corredores de Luanda"
-                  action={
-                    <div className="flex items-center gap-1.5">
-                      {Object.values(LUANDA_ROUTES).map((r) => (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 border border-white/10 rounded-xl bg-slide-bg overflow-hidden divide-x divide-y divide-white/10">
+                    <div className="p-3.5">
+                      <div className="text-[11px] font-medium text-slide-dim">Viagens Ativas</div>
+                      <div className="text-xl font-black text-white tabular-nums mt-0.5">{liveOps.activeTripsCount}</div>
+                      <div className="text-[11px] text-slide-dim mt-0.5 tabular-nums">
+                        {liveOps.scheduledTripsCount} agendada(s)
+                      </div>
+                    </div>
+                    <div className="p-3.5">
+                      <div className="text-[11px] font-medium text-slide-dim">Viaturas em Movimento</div>
+                      <div className="text-xl font-black text-white tabular-nums mt-0.5">{liveOps.vehiclesMovingCount}</div>
+                      <div className="text-[11px] text-slide-dim mt-0.5">
+                        {liveOps.vehiclesMovingCount > 0 ? "GPS ou estado em rota" : "Sem viaturas em rota"}
+                      </div>
+                    </div>
+                    <div className="p-3.5">
+                      <div className="text-[11px] font-medium text-slide-dim">Motoristas em Serviço</div>
+                      <div className="text-xl font-black text-white tabular-nums mt-0.5">
+                        {liveOps.driversOnDutyCount}
+                        <span className="text-xs font-semibold text-slide-dim">/{liveOps.totalDriversCount}</span>
+                      </div>
+                      <div className="text-[11px] text-slide-dim mt-0.5">Equipa ativa no turno</div>
+                    </div>
+                    <div className="p-3.5">
+                      <div className="text-[11px] font-medium text-slide-dim">Viagens com Atraso</div>
+                      <div className={`text-xl font-black tabular-nums mt-0.5 ${liveOps.delayedTripsCount > 0 ? "text-amber-400" : "text-white"}`}>
+                        {liveOps.delayedTripsCount}
+                      </div>
+                      <div className="text-[11px] text-slide-dim mt-0.5">Atrasos ou ocorrências</div>
+                    </div>
+                    <div className="p-3.5">
+                      <div className="text-[11px] font-medium text-slide-dim">Alunos por Recolher</div>
+                      <div className="text-xl font-black text-white tabular-nums mt-0.5">
+                        {liveOps.studentsAwaitingPickupCount}
+                      </div>
+                      <div className="text-[11px] text-slide-dim mt-0.5 tabular-nums">
+                        {liveOps.studentsOnBoardCount} a bordo neste momento
+                      </div>
+                    </div>
+                    <div className="p-3.5">
+                      <div className="text-[11px] font-medium text-slide-dim">Alertas Operacionais</div>
+                      <div className={`text-xl font-black tabular-nums mt-0.5 ${liveOps.activeAlertsCount > 0 ? "text-slide-accent" : "text-emerald-400"}`}>
+                        {liveOps.activeAlertsCount}
+                      </div>
+                      <div className="text-[11px] text-slide-dim mt-0.5">Ocorrências e avisos de via</div>
+                    </div>
+                  </div>
+
+                  {/* Real PostgreSQL Active / Scheduled Trips List or Honest Empty State */}
+                  {scopedTrips.length === 0 ? (
+                    <div className="rounded-xl bg-slide-bg border border-white/10 px-4 py-3 text-xs text-slide-dim flex flex-wrap items-center justify-between gap-3">
+                      <span>
+                        {selectedSchoolObj
+                          ? `Sem viagens ativas registadas para ${selectedSchoolObj.name}. Nenhuma rota simulada será exibida como operação real.`
+                          : "Sem viagens registadas no PostgreSQL para este turno. Os dados reais serão apresentados assim que um motorista iniciar viagem."}
+                      </span>
+                      {rolePerms.canManageRouteSchedules && (
                         <button
-                          key={r.id}
-                          onClick={() => setSelectedRouteId(r.id)}
-                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer ${
-                            selectedRouteId === r.id
-                              ? "bg-slide-accent text-white"
-                              : "bg-slide-bg text-slide-dim border border-white/10"
-                          }`}
+                          type="button"
+                          onClick={() => openNewRouteScheduleModal(selectedSchoolFilter !== "all" ? selectedSchoolFilter : undefined)}
+                          className="text-[11px] font-bold text-slide-accent hover:underline cursor-pointer shrink-0"
                         >
-                          {r.code}
+                          + Agendar escala recorrente
                         </button>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-white/10 border border-white/10 rounded-xl bg-slide-bg overflow-hidden">
+                      {scopedTrips.slice(0, 4).map((trip) => (
+                        <div key={trip.id} className="px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <span className="font-mono font-bold text-white">{trip.tripCode}</span>
+                            <span className="text-slide-accent font-semibold">{trip.routeCode}</span>
+                            <span className="text-slide-dim truncate hidden sm:inline">· {trip.routeName}</span>
+                          </div>
+                          <div className="flex items-center gap-3 text-[11px] tabular-nums">
+                            <span className="font-semibold text-slide-paper">{translateTripState(trip.state)}</span>
+                            <span className={trip.gpsStatus === "live" ? "text-emerald-400 font-semibold" : "text-slide-dim"}>
+                              GPS: {trip.gpsStatus === "live" ? "Ao vivo" : trip.gpsStatus === "stale" ? "Desatualizado" : "Indisponível"}
+                            </span>
+                            {trip.lastLocationAt && (
+                              <span className="text-slide-dim font-mono hidden md:inline">
+                                {new Date(trip.lastLocationAt).toLocaleTimeString("pt-AO", { hour: "2-digit", minute: "2-digit" })}
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Compact Authorized Quick Actions */}
+                <div className="rounded-2xl bg-slide-surface border border-white/10 p-5 flex flex-col justify-between gap-4">
+                  <div>
+                    <h2 className="font-bold text-sm text-slide-paper" style={{ fontFamily: "var(--font-display)" }}>
+                      Ações Rápidas
+                    </h2>
+                    <p className="text-xs text-slide-dim mt-0.5">
+                      Atalhos autorizados para o perfil <span className="text-slide-paper font-semibold">{dbUser ? ROLE_LABELS[dbUser.primaryRole] : ""}</span>.
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-1 gap-2">
+                    {rolePerms.canManageRouteSchedules && (
+                      <button
+                        type="button"
+                        onClick={() => openNewRouteScheduleModal()}
+                        className="w-full rounded-xl bg-slide-bg border border-white/10 hover:border-slide-accent/60 hover:bg-white/[0.04] px-3.5 py-2.5 flex items-center justify-between text-xs font-semibold text-slide-paper transition cursor-pointer"
+                      >
+                        <span className="flex items-center gap-2.5">
+                          <CalendarClock className="w-4 h-4 text-slide-accent shrink-0" />
+                          <span>Agendar Rota Recorrente</span>
+                        </span>
+                        <Plus className="w-3.5 h-3.5 text-slide-dim" />
+                      </button>
+                    )}
+
+                    {rolePerms.canManageVehicles && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingVehicleId(null);
+                          setVehicleForm({
+                            fleetNumber: String((overview?.vehicles.length ?? 0) + 1),
+                            plate: "",
+                            ownerId: overview?.vehicleOwners[0]?.id ?? "",
+                            assignedSchoolId: selectedSchoolFilter !== "all" ? selectedSchoolFilter : "",
+                            routeCode: "ROTA-A",
+                            capacity: 22,
+                            dnvtExpiry: "2027-12-31",
+                            dnvtStatus: "valid",
+                            insuranceProvider: "ENSA Seguros de Angola",
+                            insuranceStatus: "valid",
+                            status: "available",
+                          });
+                          setVehicleModalOpen(true);
+                        }}
+                        className="w-full rounded-xl bg-slide-bg border border-white/10 hover:border-slide-accent/60 hover:bg-white/[0.04] px-3.5 py-2.5 flex items-center justify-between text-xs font-semibold text-slide-paper transition cursor-pointer"
+                      >
+                        <span className="flex items-center gap-2.5">
+                          <Bus className="w-4 h-4 text-slide-accent shrink-0" />
+                          <span>Registar Viatura</span>
+                        </span>
+                        <Plus className="w-3.5 h-3.5 text-slide-dim" />
+                      </button>
+                    )}
+
+                    {rolePerms.canCreateUsers ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setNewUserRole("driver");
+                          setUserModalOpen(true);
+                        }}
+                        className="w-full rounded-xl bg-slide-bg border border-white/10 hover:border-slide-accent/60 hover:bg-white/[0.04] px-3.5 py-2.5 flex items-center justify-between text-xs font-semibold text-slide-paper transition cursor-pointer"
+                      >
+                        <span className="flex items-center gap-2.5">
+                          <UserPlus className="w-4 h-4 text-slide-accent shrink-0" />
+                          <span>Registar Motorista</span>
+                        </span>
+                        <Plus className="w-3.5 h-3.5 text-slide-dim" />
+                      </button>
+                    ) : rolePerms.canEditDrivers ? (
+                      <button
+                        type="button"
+                        onClick={() => setTab("Motoristas")}
+                        className="w-full rounded-xl bg-slide-bg border border-white/10 hover:border-white/25 hover:bg-white/[0.04] px-3.5 py-2.5 flex items-center justify-between text-xs font-semibold text-slide-paper transition cursor-pointer"
+                      >
+                        <span className="flex items-center gap-2.5">
+                          <UserCheck className="w-4 h-4 text-slide-accent shrink-0" />
+                          <span>Gerir Motoristas</span>
+                        </span>
+                        <ArrowUpRight className="w-3.5 h-3.5 text-slide-dim" />
+                      </button>
+                    ) : null}
+
+                    <button
+                      type="button"
+                      onClick={() => setTab("Contratos")}
+                      className="w-full rounded-xl bg-slide-bg border border-white/10 hover:border-white/25 hover:bg-white/[0.04] px-3.5 py-2.5 flex items-center justify-between text-xs font-semibold text-slide-paper transition cursor-pointer"
+                    >
+                      <span className="flex items-center gap-2.5">
+                        <FileSignature className="w-4 h-4 text-slide-accent shrink-0" />
+                        <span>Ver Contratos Escolares</span>
+                      </span>
+                      <span className="text-[11px] font-mono text-slide-dim tabular-nums">
+                        {pendingLeadsCount > 0 ? `${pendingLeadsCount} pend.` : activeContractsCount}
+                      </span>
+                    </button>
+
+                    {rolePerms.canCreateStudents ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setNewStudentForm((f) => ({
+                            ...f,
+                            schoolId:
+                              selectedSchoolFilter !== "all"
+                                ? selectedSchoolFilter
+                                : f.schoolId || overview?.schools[0]?.id || "",
+                          }));
+                          setNewStudentModalOpen(true);
+                        }}
+                        className="w-full rounded-xl bg-slide-bg border border-white/10 hover:border-slide-accent/60 hover:bg-white/[0.04] px-3.5 py-2.5 flex items-center justify-between text-xs font-semibold text-slide-paper transition cursor-pointer"
+                      >
+                        <span className="flex items-center gap-2.5">
+                          <GraduationCap className="w-4 h-4 text-slide-accent shrink-0" />
+                          <span>Registar / Gerir Alunos</span>
+                        </span>
+                        <Plus className="w-3.5 h-3.5 text-slide-dim" />
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setTab("Alunos")}
+                        className="w-full rounded-xl bg-slide-bg border border-white/10 hover:border-white/25 hover:bg-white/[0.04] px-3.5 py-2.5 flex items-center justify-between text-xs font-semibold text-slide-paper transition cursor-pointer"
+                      >
+                        <span className="flex items-center gap-2.5">
+                          <GraduationCap className="w-4 h-4 text-slide-accent shrink-0" />
+                          <span>Gerir Alunos</span>
+                        </span>
+                        <ArrowUpRight className="w-3.5 h-3.5 text-slide-dim" />
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => setTab("Emergências")}
+                      className="w-full rounded-xl bg-slide-bg border border-white/10 hover:border-white/25 hover:bg-white/[0.04] px-3.5 py-2.5 flex items-center justify-between text-xs font-semibold text-slide-paper transition cursor-pointer"
+                    >
+                      <span className="flex items-center gap-2.5">
+                        <Siren className="w-4 h-4 text-slide-accent shrink-0" />
+                        <span>Ver Ocorrências</span>
+                      </span>
+                      <span className={`text-[11px] font-mono tabular-nums ${openIncidentsCount > 0 ? "text-slide-accent font-bold" : "text-slide-dim"}`}>
+                        {openIncidentsCount} aberta(s)
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Preserved Hub Route Simulator (Strict Separation from Real Live Operations) */}
+              {APP_TARGET === "hub" && (
+                <div className="rounded-2xl bg-slide-surface border border-white/10 p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <div>
+                    <div className="font-bold text-white flex items-center gap-2 flex-wrap">
+                      <Radio className={`w-4 h-4 ${simStatus?.running ? "text-amber-400 animate-pulse" : "text-slide-dim"}`} />
+                      <span>Modo de Simulação (Ambiente Hub · PostgreSQL + WebSocket)</span>
+                      <span className="text-[11px] font-medium text-amber-300">
+                        · Ferramenta de demonstração separada da monitorização real da frota
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-slide-dim mt-0.5 tabular-nums">
+                      {simStatus
+                        ? `Simulador: ${simStatus.routeCode} · Progresso ${Math.round(simStatus.progress * 100)}% · Paragem simulada: ${simStatus.nearestStopName}`
+                        : "Controla o marcador de demonstração no simulador iPhone e emite eventos de teste de 500m."}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      value={selectedRouteId}
+                      onChange={(e) => setSelectedRouteId(e.target.value)}
+                      aria-label="Rota de simulação"
+                      className="rounded-xl bg-slide-bg border border-white/15 px-2.5 py-1.5 text-xs text-white outline-none"
+                    >
+                      {Object.values(LUANDA_ROUTES).map((r) => (
+                        <option key={r.id} value={r.id}>
+                          Simular {r.code}
+                        </option>
+                      ))}
+                    </select>
+                    {simStatus?.running ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleSimulationAction("pause")}
+                        className="rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-200 px-3 py-1.5 font-bold cursor-pointer whitespace-nowrap"
+                      >
+                        Pausar Simulação
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void handleSimulationAction("start")}
+                        className="rounded-xl bg-slide-ok text-white px-3 py-1.5 font-bold cursor-pointer whitespace-nowrap"
+                      >
+                        Iniciar Simulação Hub
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void handleSimulationAction("step")}
+                      className="rounded-xl bg-slide-bg border border-white/15 px-3 py-1.5 font-semibold cursor-pointer hover:bg-white/10 whitespace-nowrap"
+                    >
+                      +1 Passo (500m)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleSimulationAction("reset")}
+                      className="rounded-xl bg-slide-bg border border-white/15 px-3 py-1.5 font-semibold cursor-pointer hover:bg-white/10 whitespace-nowrap"
+                    >
+                      Reiniciar Rota
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Multi-School Fleet Monitoring Center + Recent Administrative Activity */}
+              <div className="grid grid-cols-1 xl:grid-cols-[1.65fr_1fr] gap-6 items-start">
+                <Card
+                  title="Centro de Monitorização Multi-Escola · Luanda"
+                  action={
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-emerald-400">
+                        <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                        <span>GPS Ao Vivo ({fleetMapMarkers.filter((m) => m.isLiveGps).length})</span>
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-amber-400">
+                        <span className="w-2 h-2 rounded-full bg-amber-400" />
+                        <span>Última Posição ({fleetMapMarkers.filter((m) => !m.isLiveGps).length})</span>
+                      </span>
                     </div>
                   }
                 >
-                  <LuandaMap progress={progress} routeId={selectedRouteId} className="h-[360px] rounded-xl border border-white/10" />
+                  <div className="space-y-4">
+                    {/* Prominent School Selector + Multi-Criteria Fleet Filters */}
+                    <div className="rounded-xl bg-slide-bg border border-white/10 p-3.5 space-y-3">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="flex-1 min-w-0">
+                          <label
+                            htmlFor="multi-school-selector"
+                            className="text-[11px] font-bold text-slide-dim flex items-center gap-1.5 mb-1.5"
+                          >
+                            <Building2 className="w-3.5 h-3.5 text-slide-accent" />
+                            <span>Selecionar Escola / Âmbito da Frota</span>
+                          </label>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <select
+                              id="multi-school-selector"
+                              value={selectedSchoolFilter === "all" ? "all" : String(selectedSchoolFilter)}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setSelectedSchoolFilter(val === "all" ? "all" : Number(val));
+                                setFleetRouteFilter("all");
+                                setSelectedFleetVehicleId(null);
+                              }}
+                              className="flex-1 min-w-[230px] rounded-xl bg-slide-surface border border-white/15 focus:border-slide-accent px-3 py-2 text-xs font-bold text-white outline-none"
+                            >
+                              <option value="all">
+                                Todas as Escolas ({selectableSchools.length} parceira(s) · {allLiveFleetVehicles.length} viatura(s))
+                              </option>
+                              {selectableSchools.map((sc) => {
+                                const schoolBusCount = allLiveFleetVehicles.filter((v) =>
+                                  v.associatedSchoolIds.includes(sc.id)
+                                ).length;
+                                return (
+                                  <option key={sc.id} value={sc.id}>
+                                    {sc.name} · {sc.municipality} ({schoolBusCount} viatura(s))
+                                  </option>
+                                );
+                              })}
+                            </select>
+
+                            {selectedSchoolFilter !== "all" && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedSchoolFilter("all");
+                                  setFleetRouteFilter("all");
+                                  setSelectedFleetVehicleId(null);
+                                }}
+                                className="rounded-xl bg-slide-surface border border-white/15 hover:border-white/30 px-3 py-2 text-xs font-semibold text-white cursor-pointer whitespace-nowrap"
+                              >
+                                Todas as Escolas
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {selectedSchoolObj && (
+                          <div className="rounded-xl bg-slide-surface border border-white/10 px-3.5 py-2 text-xs shrink-0">
+                            <div className="font-bold text-white">{selectedSchoolObj.name}</div>
+                            <div className="text-[11px] text-slide-dim tabular-nums mt-0.5">
+                              {scopedVehicles.length} autocarro(s) · {scopedDriverList.length} motorista(s) · {scopedSchedules.filter((s) => s.active).length} escala(s)
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Vehicle Status, Trip Status & Active Corridor Filters */}
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-white/10 text-[11px]">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {[
+                            { id: "all" as const, label: `Todas (${scopedVehicles.length})` },
+                            {
+                              id: "active" as const,
+                              label: `Em Rota (${scopedVehicles.filter((v) => v.status === "on_trip" || Boolean(v.activeTrip && v.hasLiveGps)).length})`,
+                            },
+                            {
+                              id: "available" as const,
+                              label: `Alocadas / Disp. (${scopedVehicles.filter((v) => v.status === "available" || v.status === "assigned").length})`,
+                            },
+                            {
+                              id: "maintenance" as const,
+                              label: `Manutenção (${scopedVehicles.filter((v) => v.status === "maintenance" || v.status === "out_of_service" || v.status === "suspended").length})`,
+                            },
+                          ].map((f) => (
+                            <button
+                              key={f.id}
+                              type="button"
+                              onClick={() => setFleetStatusFilter(f.id)}
+                              className={`px-2.5 py-1 rounded-lg font-semibold cursor-pointer whitespace-nowrap transition border ${
+                                fleetStatusFilter === f.id
+                                  ? "bg-white/15 text-white border-white/25"
+                                  : "bg-slide-surface text-slide-dim border-white/10 hover:text-white"
+                              }`}
+                            >
+                              {f.label}
+                            </button>
+                          ))}
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2">
+                          <select
+                            value={fleetTripFilter}
+                            onChange={(e) => setFleetTripFilter(e.target.value as "all" | "active" | "delayed" | "idle")}
+                            aria-label="Filtrar por estado da viagem"
+                            className="rounded-lg bg-slide-surface border border-white/10 px-2.5 py-1 text-[11px] font-semibold text-white outline-none"
+                          >
+                            <option value="all">Viagens: Todas</option>
+                            <option value="active">Viagens Ativas</option>
+                            <option value="delayed">Viagens com Atraso</option>
+                            <option value="idle">Sem Viagem Ativa</option>
+                          </select>
+
+                          {availableRouteFilterOptions.length > 0 && (
+                            <select
+                              value={fleetRouteFilter}
+                              onChange={(e) => setFleetRouteFilter(e.target.value)}
+                              aria-label="Filtrar por rota"
+                              className="rounded-lg bg-slide-surface border border-white/10 px-2.5 py-1 text-[11px] font-semibold text-white outline-none"
+                            >
+                              <option value="all">Rotas: Todas ({availableRouteFilterOptions.length})</option>
+                              {availableRouteFilterOptions.map((code) => (
+                                <option key={code} value={code}>
+                                  {code}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Empty State Banner when School has 0 vehicles or 0 GPS */}
+                    {scopedVehicles.length === 0 ? (
+                      <div className="rounded-xl bg-slide-bg border border-amber-500/30 p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
+                        <div>
+                          <div className="font-bold text-amber-300">
+                            Nenhuma viatura atribuída a {selectedSchoolObj?.name ?? "esta escola"}
+                          </div>
+                          <div className="text-slide-dim mt-0.5">
+                            Atribua uma viatura na gestão de Frota ou agende uma rota recorrente para iniciar a monitorização neste campus.
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {rolePerms.canManageRouteSchedules && (
+                            <button
+                              type="button"
+                              onClick={() => openNewRouteScheduleModal(selectedSchoolFilter !== "all" ? selectedSchoolFilter : undefined)}
+                              className="rounded-xl bg-slide-accent text-white px-3 py-1.5 font-bold cursor-pointer whitespace-nowrap"
+                            >
+                              + Agendar Rota
+                            </button>
+                          )}
+                          {rolePerms.canManageVehicles && (
+                            <button
+                              type="button"
+                              onClick={() => setTab("Frota")}
+                              className="rounded-xl bg-slide-surface border border-white/15 px-3 py-1.5 font-semibold text-white cursor-pointer whitespace-nowrap"
+                            >
+                              Ir para Frota
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ) : fleetMapMarkers.length === 0 ? (
+                      <div className="rounded-xl bg-slide-bg border border-white/10 p-3.5 text-xs text-slide-dim flex flex-wrap items-center justify-between gap-2">
+                        <span>
+                          Sinal GPS indisponível para as viaturas visíveis no filtro atual ({filteredLiveFleet.length} viatura(s)). Nenhuma coordenada artificial será exibida.
+                        </span>
+                        <span className="font-mono text-[11px] text-amber-300">GPS Indisponível</span>
+                      </div>
+                    ) : null}
+
+                    {/* Multi-Route & Clustered Leaflet Map */}
+                    <LuandaMap
+                      progress={0}
+                      multiRouteMode
+                      visibleRouteIds={activeRouteIdsOnMap}
+                      enableClustering
+                      scopeKey={`${selectedSchoolFilter}-${fleetRouteFilter}-${fleetStatusFilter}-${fleetTripFilter}`}
+                      darkMode
+                      showZoomControl
+                      showBusMarker={false}
+                      fleetMarkers={fleetMapMarkers}
+                      selectedVehicleId={inspectedVehicle?.id ?? null}
+                      onSelectVehicle={(vehicleId) => setSelectedFleetVehicleId(vehicleId)}
+                      className="h-[360px] sm:h-[430px] rounded-xl border border-white/10"
+                    />
+
+                    {/* Selectable Fleet Strip & Detailed Vehicle Inspector */}
+                    <div className="pt-3 border-t border-white/10 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <span className="font-semibold text-slide-paper">
+                          {selectedSchoolObj
+                            ? `Viaturas de ${selectedSchoolObj.name} (${filteredLiveFleet.length})`
+                            : `Frota Filtrada (${filteredLiveFleet.length})`}
+                        </span>
+                        <span className="text-[11px] text-slide-dim tabular-nums">
+                          {fleetMapMarkers.filter((m) => m.isLiveGps).length} GPS ao vivo ·{" "}
+                          {filteredLiveFleet.filter((v) => !v.hasCoordinates).length} sem coordenadas
+                        </span>
+                      </div>
+
+                      {filteredLiveFleet.length === 0 ? (
+                        <div className="rounded-xl bg-slide-bg border border-white/10 p-3.5 text-xs text-slide-dim">
+                          {scopedVehicles.length === 0
+                            ? "Esta escola ainda não tem viaturas alocadas nem viagens em curso."
+                            : "Nenhuma viatura corresponde aos filtros de estado ou pesquisa selecionados."}
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
+                            {filteredLiveFleet.map((v) => {
+                              const selected = inspectedVehicle?.id === v.id;
+                              return (
+                                <button
+                                  key={v.id}
+                                  type="button"
+                                  onClick={() => setSelectedFleetVehicleId(v.id)}
+                                  className={`px-3 py-2 rounded-xl border text-left shrink-0 cursor-pointer transition ${
+                                    selected
+                                      ? "bg-slide-accent/15 border-slide-accent text-white"
+                                      : "bg-slide-bg border-white/10 text-slide-dim hover:text-white hover:border-white/25"
+                                  }`}
+                                >
+                                  <div className="text-xs font-bold flex items-center gap-2">
+                                    <span>Autocarro {v.fleetNumber}</span>
+                                    <span className="font-mono text-[10px] opacity-80">{v.plate}</span>
+                                  </div>
+                                  <div className="text-[11px] mt-0.5 flex items-center gap-1.5">
+                                    <span
+                                      className={
+                                        v.gpsStatus === "live"
+                                          ? "text-emerald-400 font-semibold"
+                                          : v.gpsStatus === "stale"
+                                          ? "text-amber-300 font-semibold"
+                                          : "text-slide-dim"
+                                      }
+                                    >
+                                      {v.gpsStatus === "live"
+                                        ? "GPS Ao Vivo"
+                                        : v.gpsStatus === "stale"
+                                        ? "Última Posição"
+                                        : "Sem GPS"}
+                                    </span>
+                                    <span>·</span>
+                                    <span>{v.routeCode}</span>
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+
+                          {inspectedVehicle && (
+                            <div className="rounded-xl bg-slide-bg border border-white/10 p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 text-xs">
+                              <div>
+                                <div className="text-[11px] text-slide-dim">Viatura & Motorista</div>
+                                <div className="font-bold text-white mt-0.5">
+                                  Autocarro {inspectedVehicle.fleetNumber} · {inspectedVehicle.plate}
+                                </div>
+                                <div className="text-[11px] text-slide-dim mt-0.5">
+                                  Motorista:{" "}
+                                  <span className="text-slide-paper font-medium">{inspectedVehicle.driverName}</span>
+                                  {inspectedVehicle.driverPhone ? ` · ${inspectedVehicle.driverPhone}` : ""}
+                                </div>
+                                <div className="text-[11px] text-slide-dim mt-0.5">
+                                  Escola:{" "}
+                                  <span className="text-slide-paper font-medium">
+                                    {inspectedVehicle.associatedSchoolNames.join(", ") || "Sem escola atribuída"}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div>
+                                <div className="text-[11px] text-slide-dim">Rota & Estado da Viagem</div>
+                                <div className="font-bold text-slide-accent mt-0.5">
+                                  {inspectedVehicle.routeCode}
+                                  {inspectedVehicle.routeName && inspectedVehicle.routeName !== inspectedVehicle.routeCode
+                                    ? ` · ${inspectedVehicle.routeName}`
+                                    : ""}
+                                </div>
+                                <div className="text-[11px] text-slide-paper font-medium mt-0.5">
+                                  {translateVehicleStatus(inspectedVehicle.status)}
+                                  {inspectedVehicle.activeTrip
+                                    ? ` · ${inspectedVehicle.activeTrip.tripCode} (${translateTripState(inspectedVehicle.activeTrip.state)})`
+                                    : " · Sem viagem ativa"}
+                                </div>
+                              </div>
+
+                              <div>
+                                <div className="text-[11px] text-slide-dim">Ocupação de Alunos</div>
+                                <div className="font-bold text-white mt-0.5 tabular-nums">
+                                  {inspectedVehicle.studentsBoardedCount} a bordo ·{" "}
+                                  {inspectedVehicle.studentsAssignedCount}/{inspectedVehicle.capacity} lugares
+                                </div>
+                                <div className="text-[11px] text-slide-dim mt-0.5 tabular-nums">
+                                  {inspectedVehicle.studentsAwaitingCount} a aguardar embarque
+                                </div>
+                              </div>
+
+                              <div>
+                                <div className="text-[11px] text-slide-dim">Última Atualização & Localização GPS</div>
+                                <div
+                                  className={`font-bold mt-0.5 ${
+                                    inspectedVehicle.gpsStatus === "live"
+                                      ? "text-emerald-400"
+                                      : inspectedVehicle.gpsStatus === "stale"
+                                      ? "text-amber-300"
+                                      : "text-slide-dim"
+                                  }`}
+                                >
+                                  {inspectedVehicle.gpsStatus === "live"
+                                    ? "GPS Ao Vivo"
+                                    : inspectedVehicle.gpsStatus === "stale"
+                                    ? "Última Localização (Desatualizado)"
+                                    : "GPS Indisponível"}
+                                </div>
+                                <div className="text-[11px] text-slide-paper mt-0.5 truncate" title={inspectedVehicle.locationLabel}>
+                                  {inspectedVehicle.locationLabel}
+                                </div>
+                                <div className="text-[10px] text-slide-dim mt-0.5 font-mono">
+                                  {inspectedVehicle.lastLocationAt
+                                    ? new Date(inspectedVehicle.lastLocationAt).toLocaleString("pt-AO")
+                                    : "Sem registo de coordenadas"}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Upcoming Recurring Route Schedules inside School / Overview */}
+                          <div className="rounded-xl bg-slide-bg border border-white/10 p-3.5 space-y-2">
+                            <div className="flex items-center justify-between gap-2 text-xs">
+                              <span className="font-bold text-white flex items-center gap-1.5">
+                                <CalendarClock className="w-3.5 h-3.5 text-slide-accent" />
+                                <span>
+                                  Escalas Recorrentes {selectedSchoolObj ? `· ${selectedSchoolObj.name}` : "Ativas"} ({scopedSchedules.filter((s) => s.active).length})
+                                </span>
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => setTab("Rotas & Escalas")}
+                                className="text-[11px] font-bold text-slide-accent hover:underline cursor-pointer"
+                              >
+                                Gerir escalas →
+                              </button>
+                            </div>
+                            {scopedSchedules.length === 0 ? (
+                              <div className="text-[11px] text-slide-dim">
+                                Sem escalas recorrentes configuradas para este âmbito.
+                              </div>
+                            ) : (
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                {scopedSchedules.slice(0, 4).map((sch) => (
+                                  <div
+                                    key={sch.id}
+                                    className="rounded-lg bg-slide-surface border border-white/10 px-3 py-2 text-[11px] flex items-center justify-between gap-2"
+                                  >
+                                    <div className="min-w-0">
+                                      <div className="font-bold text-white truncate">
+                                        <span className="text-slide-accent">{sch.routeCode}</span> · {sch.schoolName}
+                                      </div>
+                                      <div className="text-slide-dim truncate">
+                                        {formatWeekdaysPt(sch.daysOfWeek)} · {sch.departureTime}–{sch.arrivalTime} ·{" "}
+                                        {sch.vehicleFleetNumber ? `Autocarro ${sch.vehicleFleetNumber}` : "Sem viatura"}
+                                      </div>
+                                    </div>
+                                    <span
+                                      className={`font-bold shrink-0 ${
+                                        sch.active ? "text-emerald-400" : "text-slide-dim"
+                                      }`}
+                                    >
+                                      {sch.active ? "Ativa" : "Pausada"}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
                 </Card>
 
-                <Card title="Registo de Auditoria Recente (PostgreSQL)">
-                  <div className="space-y-2 max-h-[360px] overflow-y-auto pr-1">
-                    {(overview?.auditLogs ?? []).slice(0, 10).map((log) => (
-                      <div key={log.id} className="rounded-xl bg-slide-bg p-3 text-xs border border-white/10 space-y-1">
-                        <div className="flex justify-between text-[10px] font-mono text-slide-dim">
-                          <span className="text-slide-accent font-bold">{log.action}</span>
-                          <span>{new Date(log.createdAt).toLocaleTimeString("pt-AO")}</span>
+                {/* Recent Administrative Activity (Humanized PostgreSQL Audit Log) */}
+                <Card
+                  title="Atividade Administrativa Recente"
+                  action={
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowTechnicalAudit((prev) => !prev)}
+                        className="text-[11px] font-semibold text-slide-dim hover:text-white cursor-pointer whitespace-nowrap"
+                      >
+                        {showTechnicalAudit ? "Ocultar detalhes técnicos" : "Detalhes técnicos"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTab("Sistema & Acessos");
+                          setTimeout(() => {
+                            document.getElementById("admin-audit-log-section")?.scrollIntoView({ behavior: "smooth" });
+                          }, 80);
+                        }}
+                        className="inline-flex items-center gap-1 text-[11px] font-bold text-slide-accent hover:underline cursor-pointer whitespace-nowrap"
+                      >
+                        <span>Auditoria completa</span>
+                        <ArrowUpRight className="w-3 h-3" />
+                      </button>
+                    </div>
+                  }
+                >
+                  {formattedAuditLogs.length === 0 ? (
+                    <div className="rounded-xl bg-slide-bg border border-white/10 p-4 text-xs text-slide-dim">
+                      Sem eventos de auditoria correspondentes ao filtro atual.
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-white/10 border border-white/10 rounded-xl bg-slide-bg max-h-[540px] overflow-y-auto">
+                      {formattedAuditLogs.slice(0, 12).map((item) => (
+                        <div key={item.id} className="p-3.5 text-xs space-y-1.5 hover:bg-white/[0.02] transition-colors">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="font-bold text-white leading-snug">{item.title}</div>
+                            <span
+                              className={`text-[10px] font-bold whitespace-nowrap shrink-0 ${
+                                item.severity === "critical"
+                                  ? "text-slide-accent"
+                                  : item.severity === "warn"
+                                  ? "text-amber-400"
+                                  : item.severity === "success"
+                                  ? "text-emerald-400"
+                                  : "text-slide-dim"
+                              }`}
+                            >
+                              {item.category}
+                            </span>
+                          </div>
+                          <div className="text-slide-dim leading-snug">{item.summary}</div>
+                          <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-[11px] text-slide-dim pt-0.5">
+                            <span className="truncate">
+                              <span className="text-slide-paper/90 font-medium">{item.actorDisplay}</span>
+                              {" · "}
+                              <span>{item.actorRoleDisplay}</span>
+                            </span>
+                            <span className="font-mono tabular-nums shrink-0 flex items-center gap-1">
+                              <Clock className="w-3 h-3" />
+                              <span>
+                                {item.dateLabel} · {item.timeLabel}
+                              </span>
+                            </span>
+                          </div>
+                          {showTechnicalAudit && (
+                            <div className="text-[10px] font-mono text-slide-dim/80 pt-1">
+                              {item.rawAction} · {item.targetDisplay}
+                            </div>
+                          )}
                         </div>
-                        <div className="text-slide-paper leading-snug">{log.summary}</div>
-                      </div>
-                    ))}
-                  </div>
+                      ))}
+                    </div>
+                  )}
                 </Card>
               </div>
             </div>
@@ -1481,7 +2695,12 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                   Pedidos públicos de contratação, alterações de escolas e contratos com modelo de pagamento configurável.
                 </span>
                 <button
-                  onClick={() => setContractModalOpen(true)}
+                  onClick={() => {
+                    setNewMonthlyAoa(
+                      newStudents * pricingDraft.studentMonthlyFee + newBuses * pricingDraft.driverMonthlyFee
+                    );
+                    setContractModalOpen(true);
+                  }}
                   className="rounded-xl bg-slide-accent text-white px-4 py-2 font-bold text-xs cursor-pointer inline-flex items-center gap-2"
                 >
                   <Plus className="w-3.5 h-3.5" />
@@ -1667,22 +2886,23 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                 </span>
                 <button
                   type="button"
-                  onClick={() => {
-                    setEditingVehicleId(null);
-                    setVehicleForm({
-                      fleetNumber: String((overview?.vehicles.length ?? 0) + 1),
-                      plate: "",
-                      ownerId: overview?.vehicleOwners[0]?.id ?? "",
-                      routeCode: "ROTA-A",
-                      capacity: 22,
-                      dnvtExpiry: "2027-12-31",
-                      dnvtStatus: "valid",
-                      insuranceProvider: "ENSA Seguros de Angola",
-                      insuranceStatus: "valid",
-                      status: "available",
-                    });
-                    setVehicleModalOpen(true);
-                  }}
+                    onClick={() => {
+                      setEditingVehicleId(null);
+                      setVehicleForm({
+                        fleetNumber: String((overview?.vehicles.length ?? 0) + 1),
+                        plate: "",
+                        ownerId: overview?.vehicleOwners[0]?.id ?? "",
+                        assignedSchoolId: "",
+                        routeCode: "ROTA-A",
+                        capacity: 22,
+                        dnvtExpiry: "2027-12-31",
+                        dnvtStatus: "valid",
+                        insuranceProvider: "ENSA Seguros de Angola",
+                        insuranceStatus: "valid",
+                        status: "available",
+                      });
+                      setVehicleModalOpen(true);
+                    }}
                   className="rounded-xl bg-slide-accent text-white px-3.5 py-2 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
                 >
                   <Plus className="w-3.5 h-3.5" />
@@ -1690,14 +2910,21 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                 </button>
               </div>
 
-              <Table head={["Autocarro", "Matrícula", "Proprietário", "Corredor", "Motorista Alocado", "DNVT / Seguro", "Ações"]}>
+              <Table head={["Autocarro", "Matrícula", "Escola Atribuída", "Proprietário", "Corredor", "Motorista Alocado", "DNVT / Seguro", "Ações"]}>
                 {vehiclesList.map((v) => (
                   <tr key={v.id} className="hover:bg-white/[0.03] text-xs">
                     <td className="p-3.5 font-bold text-white">
                       <div>Autocarro {v.fleetNumber}</div>
-                      <div className="text-[10px] text-slide-dim font-normal">{v.capacity} lugares · {v.status}</div>
+                      <div className="text-[10px] text-slide-dim font-normal">{v.capacity} lugares · {translateVehicleStatus(v.status)}</div>
                     </td>
                     <td className="p-3.5 font-mono font-bold">{v.plate}</td>
+                    <td className="p-3.5 text-slide-dim">
+                      {v.schoolName ? (
+                        <span className="text-slide-paper font-medium">{v.schoolName}</span>
+                      ) : (
+                        <span className="text-slide-dim">—</span>
+                      )}
+                    </td>
                     <td className="p-3.5 text-slide-dim">{v.ownerName}</td>
                     <td className="p-3.5 text-slide-accent font-semibold">{v.routeCode}</td>
                     <td className="p-3.5 font-medium">{v.driverName}</td>
@@ -1739,6 +2966,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                               fleetNumber: String(v.fleetNumber),
                               plate: v.plate,
                               ownerId: v.ownerId,
+                              assignedSchoolId: v.assignedSchoolId ?? "",
                               routeCode: v.routeCode || "ROTA-A",
                               capacity: v.capacity,
                               dnvtExpiry: v.dnvtExpiry,
@@ -1759,6 +2987,119 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                   </tr>
                 ))}
               </Table>
+            </div>
+          )}
+
+          {/* ================= ROTAS & ESCALAS RECORRENTES ================= */}
+          {tab === "Rotas & Escalas" && (
+            <div className="space-y-6">
+              <div className="flex flex-wrap justify-between items-center gap-3">
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="text-xs text-slide-dim">
+                    Agendamento recorrente de rotas escolares, faixas horárias e atribuição de viaturas ({schedulesTabList.length} escala(s)).
+                  </span>
+                  <select
+                    value={scheduleSchoolFilter === "all" ? "all" : String(scheduleSchoolFilter)}
+                    onChange={(e) => setScheduleSchoolFilter(e.target.value === "all" ? "all" : Number(e.target.value))}
+                    aria-label="Filtrar escalas por escola"
+                    className="rounded-xl bg-slide-surface border border-white/15 px-3 py-1.5 text-xs text-white outline-none"
+                  >
+                    <option value="all">Todas as Escolas</option>
+                    {selectableSchools.map((sc) => (
+                      <option key={sc.id} value={sc.id}>
+                        {sc.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {rolePerms.canManageRouteSchedules && (
+                  <button
+                    type="button"
+                    onClick={() => openNewRouteScheduleModal(scheduleSchoolFilter !== "all" ? scheduleSchoolFilter : undefined)}
+                    className="rounded-xl bg-slide-accent text-white px-4 py-2 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Agendar Rota Recorrente</span>
+                  </button>
+                )}
+              </div>
+
+              {schedulesTabList.length === 0 ? (
+                <div className="rounded-2xl bg-slide-surface border border-white/10 p-6 text-center space-y-2 text-xs">
+                  <CalendarClock className="w-7 h-7 text-slide-accent mx-auto" />
+                  <div className="font-bold text-white">Sem escalas recorrentes registadas para este filtro</div>
+                  <p className="text-slide-dim">
+                    Defina rotas recorrentes por escola com dias da semana, janela horária e viatura atribuída (com verificação automática de conflitos).
+                  </p>
+                </div>
+              ) : (
+                <Table head={["Escola Contratada", "Rota", "Recorrência & Turno", "Horário", "Viatura & Motorista", "Estado", "Ações"]}>
+                  {schedulesTabList.map((sch) => (
+                    <tr key={sch.id} className="hover:bg-white/[0.03] text-xs">
+                      <td className="p-3.5 font-bold text-white">{sch.schoolName}</td>
+                      <td className="p-3.5">
+                        <div className="text-slide-accent font-bold">{sch.routeCode}</div>
+                        <div className="text-[11px] text-slide-dim">{sch.routeName}</div>
+                      </td>
+                      <td className="p-3.5">
+                        <div className="font-semibold text-white">{formatWeekdaysPt(sch.daysOfWeek)}</div>
+                        <div className="text-[11px] text-slide-dim">
+                          {sch.shiftType === "afternoon" ? "Turno da Tarde" : "Turno da Manhã"}
+                        </div>
+                      </td>
+                      <td className="p-3.5 font-mono font-bold text-white tabular-nums">
+                        {sch.departureTime} – {sch.arrivalTime}
+                      </td>
+                      <td className="p-3.5">
+                        {sch.vehicleFleetNumber ? (
+                          <div>
+                            <span className="font-bold text-white">Autocarro {sch.vehicleFleetNumber}</span>{" "}
+                            <span className="font-mono text-[11px] text-slide-dim">({sch.vehiclePlate})</span>
+                            <div className="text-[11px] text-slide-dim">{sch.driverName}</div>
+                          </div>
+                        ) : (
+                          <span className="text-amber-300 font-semibold">Sem viatura atribuída</span>
+                        )}
+                      </td>
+                      <td className="p-3.5">
+                        <StatusBadge s={sch.active ? "Ativo" : "Pausada"} />
+                      </td>
+                      <td className="p-3.5">
+                        {rolePerms.canManageRouteSchedules ? (
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => void handleToggleRouteSchedule(sch)}
+                              className="px-2.5 py-1 rounded-lg bg-slide-bg border border-white/15 hover:bg-white/10 font-semibold cursor-pointer"
+                            >
+                              {sch.active ? "Pausar" : "Ativar"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => openEditRouteScheduleModal(sch)}
+                              className="px-2.5 py-1 rounded-lg bg-slide-bg border border-white/15 hover:bg-white/10 font-semibold cursor-pointer inline-flex items-center gap-1"
+                            >
+                              <Pencil className="w-3 h-3 text-emerald-300" />
+                              <span>Editar</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setDeleteScheduleTarget(sch)}
+                              className="px-2.5 py-1 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 hover:bg-red-500/20 font-semibold cursor-pointer inline-flex items-center gap-1"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              <span>Remover</span>
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="text-slide-dim">Só leitura</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </Table>
+              )}
             </div>
           )}
 
@@ -1970,13 +3311,13 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
                   <div className="rounded-xl bg-slide-bg p-4 border border-white/10 space-y-2">
                     <div className="text-slide-dim font-semibold flex justify-between">
-                      <span>Mensalidade por Aluno (AOA)</span>
+                      <span>Taxa por Aluno (AOA)</span>
                       <SlidersHorizontal className="w-3.5 h-3.5 text-slide-accent" />
                     </div>
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
-                        onClick={() => setPricingDraft((p) => ({ ...p, studentMonthlyFee: Math.max(5000, p.studentMonthlyFee - 1000) }))}
+                        onClick={() => setPricingDraft((p) => ({ ...p, studentMonthlyFee: Math.max(500, p.studentMonthlyFee - 500) }))}
                         className="w-9 h-9 rounded-lg bg-slide-surface border border-white/10 grid place-items-center cursor-pointer"
                       >
                         <Minus className="w-3.5 h-3.5" />
@@ -1989,7 +3330,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                       />
                       <button
                         type="button"
-                        onClick={() => setPricingDraft((p) => ({ ...p, studentMonthlyFee: p.studentMonthlyFee + 1000 }))}
+                        onClick={() => setPricingDraft((p) => ({ ...p, studentMonthlyFee: p.studentMonthlyFee + 500 }))}
                         className="w-9 h-9 rounded-lg bg-slide-surface border border-white/10 grid place-items-center cursor-pointer"
                       >
                         <Plus className="w-3.5 h-3.5" />
@@ -1998,20 +3339,34 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                   </div>
 
                   <div className="rounded-xl bg-slide-bg p-4 border border-white/10 space-y-2">
-                    <div className="text-slide-dim font-semibold">Autocarro Contratual (Turno Único / Duplo)</div>
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="text-slide-dim font-semibold flex justify-between">
+                      <span>Taxa por Motorista (AOA)</span>
+                      <SlidersHorizontal className="w-3.5 h-3.5 text-slide-accent" />
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setPricingDraft((p) => ({ ...p, driverMonthlyFee: Math.max(1000, p.driverMonthlyFee - 1000) }))}
+                        className="w-9 h-9 rounded-lg bg-slide-surface border border-white/10 grid place-items-center cursor-pointer"
+                      >
+                        <Minus className="w-3.5 h-3.5" />
+                      </button>
                       <input
                         type="number"
-                        value={pricingDraft.schoolBusSingleShift}
-                        onChange={(e) => setPricingDraft((p) => ({ ...p, schoolBusSingleShift: Number(e.target.value) || 0 }))}
-                        className="rounded-lg bg-slide-surface px-2.5 py-2 font-mono font-bold border border-white/10 outline-none"
+                        value={pricingDraft.driverMonthlyFee}
+                        onChange={(e) => setPricingDraft((p) => ({ ...p, driverMonthlyFee: Number(e.target.value) || 0 }))}
+                        className="w-full rounded-lg bg-slide-surface px-3 py-2 text-sm font-mono font-bold text-center border border-white/10 outline-none"
                       />
-                      <input
-                        type="number"
-                        value={pricingDraft.schoolBusDoubleShift}
-                        onChange={(e) => setPricingDraft((p) => ({ ...p, schoolBusDoubleShift: Number(e.target.value) || 0 }))}
-                        className="rounded-lg bg-slide-surface px-2.5 py-2 font-mono font-bold border border-white/10 outline-none"
-                      />
+                      <button
+                        type="button"
+                        onClick={() => setPricingDraft((p) => ({ ...p, driverMonthlyFee: p.driverMonthlyFee + 1000 }))}
+                        className="w-9 h-9 rounded-lg bg-slide-surface border border-white/10 grid place-items-center cursor-pointer"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <div className="text-[11px] text-slide-dim tabular-nums">
+                      Cálculo: (Alunos × {formatAOA(pricingDraft.studentMonthlyFee)}) + (Motoristas × {formatAOA(pricingDraft.driverMonthlyFee)})
                     </div>
                   </div>
 
@@ -2405,24 +3760,32 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                 </div>
               </Card>
 
-              <Card title="Trilha de Auditoria Imutável (PostgreSQL)">
-                <div className="space-y-2 max-h-[380px] overflow-y-auto">
-                  {(overview?.auditLogs ?? []).map((log) => (
-                    <div key={log.id} className="rounded-xl bg-slide-bg border border-white/10 p-3 text-xs flex flex-wrap justify-between gap-2">
-                      <div>
-                        <span className="font-mono text-slide-accent font-bold mr-2">{log.action}</span>
-                        <span className="text-white">{log.summary}</span>
-                        <div className="text-[11px] text-slide-dim mt-0.5">
-                          Ator: {log.actorEmail || "sistema"} ({log.actorRole}) · Alvo: {log.targetEntity} #{log.targetId ?? "—"}
+              <div id="admin-audit-log-section">
+                <Card title="Trilha de Auditoria Imutável (PostgreSQL)">
+                  <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
+                    {(overview?.auditLogs ?? []).map((log) => {
+                      const formatted = formatAuditActivity(log);
+                      return (
+                        <div key={log.id} className="rounded-xl bg-slide-bg border border-white/10 p-3.5 text-xs flex flex-wrap justify-between gap-2">
+                          <div className="space-y-0.5 min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-bold text-white">{formatted.title}</span>
+                              <span className="font-mono text-[10px] text-slide-accent font-semibold">{log.action}</span>
+                            </div>
+                            <div className="text-slide-paper/90">{log.summary}</div>
+                            <div className="text-[11px] text-slide-dim">
+                              Ator: {formatted.actorDisplay} ({formatted.actorRoleDisplay}) · Alvo: {formatted.targetDisplay}
+                            </div>
+                          </div>
+                          <span className="font-mono text-[11px] text-slide-dim tabular-nums whitespace-nowrap">
+                            {formatted.fullDateTimeLabel}
+                          </span>
                         </div>
-                      </div>
-                      <span className="font-mono text-[11px] text-slide-dim">
-                        {new Date(log.createdAt).toLocaleString("pt-AO")}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </Card>
+                      );
+                    })}
+                  </div>
+                </Card>
+              </div>
             </div>
           )}
         </motion.div>
@@ -2464,27 +3827,55 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                   <option value="mixed">Misto (Escola + Pais)</option>
                 </select>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <input
-                  type="number"
-                  min={1}
-                  value={newBuses}
-                  onChange={(e) => {
-                    const b = Number(e.target.value) || 1;
-                    setNewBuses(b);
-                    setNewMonthlyAoa(b * pricingDraft.schoolBusDoubleShift);
-                  }}
-                  placeholder="Autocarros"
-                  className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
-                />
-                <input
-                  type="number"
-                  min={50000}
-                  value={newMonthlyAoa}
-                  onChange={(e) => setNewMonthlyAoa(Number(e.target.value) || 0)}
-                  placeholder="Valor Mensal (Kz)"
-                  className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
-                />
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="text-[11px] text-slide-dim block mb-1">Autocarros / Motoristas</label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={newBuses}
+                    onChange={(e) => {
+                      const b = Math.max(1, Number(e.target.value) || 1);
+                      setNewBuses(b);
+                      setNewMonthlyAoa(
+                        newStudents * pricingDraft.studentMonthlyFee + b * pricingDraft.driverMonthlyFee
+                      );
+                    }}
+                    placeholder="Autocarros"
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim block mb-1">Alunos Cobertos</label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={newStudents}
+                    onChange={(e) => {
+                      const s = Math.max(1, Number(e.target.value) || 1);
+                      setNewStudents(s);
+                      setNewMonthlyAoa(
+                        s * pricingDraft.studentMonthlyFee + newBuses * pricingDraft.driverMonthlyFee
+                      );
+                    }}
+                    placeholder="Alunos"
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim block mb-1">Valor Mensal (Kz)</label>
+                  <input
+                    type="number"
+                    min={1000}
+                    value={newMonthlyAoa}
+                    onChange={(e) => setNewMonthlyAoa(Number(e.target.value) || 0)}
+                    placeholder="Valor Mensal (Kz)"
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
+                  />
+                </div>
+              </div>
+              <div className="text-[11px] text-slide-dim font-mono tabular-nums">
+                Cálculo automático: ({newStudents} alunos × {formatAOA(pricingDraft.studentMonthlyFee)}) + ({newBuses} motoristas × {formatAOA(pricingDraft.driverMonthlyFee)}) = {formatAOA(newStudents * pricingDraft.studentMonthlyFee + newBuses * pricingDraft.driverMonthlyFee)}
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <input
@@ -3408,6 +4799,66 @@ export function AdminView({ onNavigate }: AdminViewProps) {
         </div>
       )}
     </div>
+  );
+}
+
+function DashboardKpiCard({
+  title,
+  value,
+  secondaryValue,
+  subtitle,
+  statusLabel,
+  statusTone = "neutral",
+  Icon,
+  onClick,
+}: {
+  title: string;
+  value: ReactNode;
+  secondaryValue?: string;
+  subtitle: string;
+  statusLabel: string;
+  statusTone?: "ok" | "warn" | "danger" | "neutral";
+  Icon: LucideIcon;
+  onClick: () => void;
+}) {
+  const toneText =
+    statusTone === "danger"
+      ? "text-slide-accent"
+      : statusTone === "warn"
+      ? "text-amber-400"
+      : statusTone === "ok"
+      ? "text-emerald-400"
+      : "text-slide-dim";
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="group w-full text-left rounded-2xl bg-slide-surface border border-white/10 hover:border-white/25 hover:bg-[#191a21] p-5 transition-all cursor-pointer shadow-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-slide-accent flex flex-col justify-between gap-4"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="w-10 h-10 rounded-xl bg-slide-bg border border-white/10 text-slide-accent grid place-items-center shrink-0 group-hover:border-slide-accent/40 transition-colors">
+          <Icon className="w-4 h-4" />
+        </div>
+        <div className="flex items-center gap-1.5 text-[11px] font-bold">
+          <span className={toneText}>{statusLabel}</span>
+          <ArrowUpRight className="w-3.5 h-3.5 text-slide-dim group-hover:text-white group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
+        </div>
+      </div>
+
+      <div>
+        <div className="flex items-baseline gap-2.5">
+          <span className="text-3xl font-black tracking-tight text-white tabular-nums" style={{ fontFamily: "var(--font-display)" }}>
+            {value}
+          </span>
+          {secondaryValue && (
+            <span className="text-xs font-semibold text-slide-dim tabular-nums">{secondaryValue}</span>
+          )}
+        </div>
+        <div className="text-xs font-bold text-slide-paper mt-1">{title}</div>
+        <div className="text-[11px] text-slide-dim mt-1 leading-snug">{subtitle}</div>
+      </div>
+    </button>
   );
 }
 

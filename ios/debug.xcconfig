@@ -1,1 +1,2 @@
+#include "mobuss.xcconfig"
 CAPACITOR_DEBUG = true

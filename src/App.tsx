@@ -14,14 +14,14 @@ import {
   Smartphone,
   Users,
 } from "lucide-react";
-import { MobileAppEntry } from "./views/MobileAppEntry";
 import { LegalDocumentContent, type LegalTab } from "./components/LegalComplianceModal";
 import { PWAInstallButton } from "./components/PWAInstallButton";
 import { ROLE_LABELS, useAuth } from "./contexts/AuthContext";
-import { APP_TARGET } from "./lib/runtime-config";
+import { APP_TARGET, APP_TARGET_TITLE } from "./lib/runtime-config";
 import { initNativeStatusBar } from "./lib/native-bridge";
 import { addSyncedContract } from "./lib/mobuss-sync";
 
+const MobileAppEntry = lazy(() => import("./views/MobileAppEntry").then((m) => ({ default: m.MobileAppEntry })));
 const AdminView = lazy(() => import("./views/AdminView").then((m) => ({ default: m.AdminView })));
 const SchoolPortalView = lazy(() => import("./views/SchoolPortalView").then((m) => ({ default: m.SchoolPortalView })));
 const ContractRequestPage = lazy(() =>
@@ -92,6 +92,7 @@ export default function App() {
   const [view, setView] = useState<ActiveView>(resolveInitialView);
 
   useEffect(() => {
+    document.title = APP_TARGET_TITLE[APP_TARGET];
     initNativeStatusBar();
     const handleRouteChange = () => {
       setView(resolveInitialView());
@@ -128,11 +129,13 @@ export default function App() {
     );
   }
 
-  // Store-targeted binary builds (Capacitor iOS/Android Client or Driver)
+  // Standalone production builds (no hub navbar, no simulator, no slides, no unrelated modules)
   if (APP_TARGET === "client") {
     return (
       <div className="min-h-screen bg-slide-bg text-slide-ink flex flex-col font-sans">
-        <MobileAppEntry mode="client" />
+        <Suspense fallback={<ViewFallback />}>
+          <MobileAppEntry mode="client" />
+        </Suspense>
       </div>
     );
   }
@@ -140,7 +143,29 @@ export default function App() {
   if (APP_TARGET === "driver") {
     return (
       <div className="min-h-screen bg-slide-bg text-slide-ink flex flex-col font-sans">
-        <MobileAppEntry mode="driver" />
+        <Suspense fallback={<ViewFallback />}>
+          <MobileAppEntry mode="driver" />
+        </Suspense>
+      </div>
+    );
+  }
+
+  if (APP_TARGET === "admin") {
+    return (
+      <div className="min-h-screen bg-slide-bg text-slide-ink flex flex-col font-sans">
+        <Suspense fallback={<ViewFallback />}>
+          <AdminView />
+        </Suspense>
+      </div>
+    );
+  }
+
+  if (APP_TARGET === "school") {
+    return (
+      <div className="min-h-screen bg-slide-bg text-slide-ink flex flex-col font-sans">
+        <Suspense fallback={<ViewFallback />}>
+          <SchoolPortalView />
+        </Suspense>
       </div>
     );
   }
@@ -272,10 +297,9 @@ export default function App() {
 
       {/* Main View Container */}
       <main className="flex-1 min-h-0">
-        {view === "client" && <MobileAppEntry mode="client" />}
-        {view === "driver" && <MobileAppEntry mode="driver" />}
-
         <Suspense fallback={<ViewFallback />}>
+          {view === "client" && <MobileAppEntry mode="client" />}
+          {view === "driver" && <MobileAppEntry mode="driver" />}
           {view === "school" && <SchoolPortalView />}
           {view === "landing" && (
             <ContractRequestPage
