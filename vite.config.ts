@@ -1,7 +1,7 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'node:path';
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
 type BuildTarget = 'hub' | 'client' | 'driver' | 'admin' | 'school';
@@ -78,8 +78,9 @@ function targetHtmlPlugin(targetMeta: (typeof TARGET_MANIFEST)[BuildTarget]): Pl
   };
 }
 
-export default defineConfig(() => {
-  const appTarget = resolveTarget(process.env.VITE_APP_TARGET);
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '');
+  const appTarget = resolveTarget(process.env.VITE_APP_TARGET || env.VITE_APP_TARGET);
   const targetMeta = TARGET_MANIFEST[appTarget];
 
   return {

@@ -88,6 +88,7 @@ if (command === 'dev') {
   const tsx = resolveTsxCli();
   console.log(`[MôBuss] Starting dev server for target "${target}"`);
   runOrExit(tsx.cmd, [...tsx.args, 'server.ts'], {
+    NODE_ENV: process.env.NODE_ENV === 'production' ? 'development' : (process.env.NODE_ENV || 'development'),
     VITE_APP_TARGET: target,
     MOBUSS_WEB_TARGET: target,
   });
