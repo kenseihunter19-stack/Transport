@@ -331,7 +331,14 @@ export function SchoolPortalView() {
   if (authLoading) {
     return (
       <div className="min-h-[calc(100vh-4rem)] bg-slide-bg text-slide-ink grid place-items-center p-8 text-xs text-slide-dim">
-        A verificar credenciais do Portal Escolar...
+        <div className="flex flex-col items-center gap-3">
+          <img
+            src="/mobus-logo-1024.png"
+            alt="MôBus"
+            className="w-16 h-16 rounded-2xl object-contain bg-black p-1.5 border border-white/15 shadow-lg"
+          />
+          <span>A verificar credenciais do Portal Escolar...</span>
+        </div>
       </div>
     );
   }
@@ -339,7 +346,7 @@ export function SchoolPortalView() {
   if (!isAuthenticated) {
     return (
       <AuthGatePanel
-        title="Portal da Escola · MôBuss"
+        title="Portal da Escola · MôBus"
         subtitle="Acesso autenticado para diretores, coordenadores de transporte e secretarias escolares acompanharem alunos, presenças e pedidos contratuais."
         badgeText="Acesso Institucional · Escolas Parceiras"
       />
@@ -388,7 +395,7 @@ export function SchoolPortalView() {
       setGuardianName('');
       setGuardianPhone('+244 9');
       setStudentModalOpen(false);
-      showToast('Aluno submetido para aprovação da equipa MôBuss.');
+      showToast('Aluno submetido para aprovação da equipa MôBus.');
       await loadPortal();
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Erro ao submeter aluno.');
@@ -413,7 +420,7 @@ export function SchoolPortalView() {
       });
       setReqTitle('');
       setReqDetails('');
-      showToast('Pedido enviado à central de operações MôBuss.');
+      showToast('Pedido enviado à central de operações MôBus.');
       await loadPortal();
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Erro ao enviar pedido.');
@@ -462,7 +469,7 @@ export function SchoolPortalView() {
         }),
       });
       setIncDesc('');
-      showToast('Ocorrência enviada à equipa de suporte MôBuss.');
+      showToast('Ocorrência enviada à equipa de suporte MôBus.');
       await loadPortal();
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Erro ao submeter ocorrência.');
@@ -831,10 +838,22 @@ export function SchoolPortalView() {
       <aside className="hidden lg:flex w-64 bg-slide-paper-ink border-r border-white/10 p-5 flex-col justify-between shrink-0">
         <div>
           <div className="pb-4 mb-5 border-b border-white/10">
-            <div className="text-[10px] font-bold uppercase tracking-wider text-slide-accent">
-              Portal da Escola
+            <div className="flex items-center gap-3 mb-3">
+              <img
+                src="/mobus-logo-1024.png"
+                alt="MôBus Logo"
+                className="w-9 h-9 rounded-lg object-contain bg-black p-0.5 border border-white/10 shrink-0"
+              />
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slide-accent leading-none">
+                  Portal da Escola
+                </div>
+                <div className="font-extrabold text-sm tracking-tight text-slide-paper leading-none mt-1" style={{ fontFamily: 'var(--font-display)' }}>
+                  MôBus
+                </div>
+              </div>
             </div>
-            <div className="text-sm font-black text-slide-paper mt-1 leading-snug">
+            <div className="text-sm font-black text-slide-paper leading-snug">
               {school?.name ?? 'Instituição Parceira'}
             </div>
             <div className="text-[11px] text-slide-dim mt-0.5">
@@ -870,7 +889,7 @@ export function SchoolPortalView() {
               <span>Limites de Operação</span>
             </div>
             <p className="leading-relaxed">
-              A escola gere a pauta, motoristas e viaturas próprias; motoristas ou viaturas da MôBuss aparecem em só leitura.
+              A escola gere a pauta, motoristas e viaturas próprias; motoristas ou viaturas da MôBus aparecem em só leitura.
             </p>
           </div>
           <button
@@ -884,30 +903,49 @@ export function SchoolPortalView() {
         </div>
       </aside>
 
-      {/* Mobile Tabs */}
-      <div className="lg:hidden border-b border-white/10 bg-slide-paper-ink px-4 py-2 overflow-x-auto no-scrollbar flex items-center gap-1.5">
-        {SCHOOL_TABS.map(({ id, Icon }) => (
-          <button
-            key={id}
-            onClick={() => setTab(id)}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer ${
-              tab === id ? 'bg-slide-accent text-white' : 'bg-white/5 text-slide-dim'
-            }`}
-          >
-            <Icon className="w-3.5 h-3.5" />
-            <span>{id}</span>
-          </button>
-        ))}
-        {APP_TARGET !== 'hub' && (
-          <button
-            type="button"
-            onClick={() => void signOut()}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer bg-red-500/15 text-red-300 hover:text-white ml-auto"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            <span>Sair</span>
-          </button>
-        )}
+      {/* Mobile Header & Tabs */}
+      <div className="lg:hidden border-b border-white/10 bg-slide-paper-ink">
+        <div className="px-4 py-2.5 flex items-center justify-between gap-2 border-b border-white/10">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <img
+              src="/mobus-logo-1024.png"
+              alt="MôBus Logo"
+              className="w-7 h-7 rounded-lg object-contain bg-black p-0.5 border border-white/10 shrink-0"
+            />
+            <div className="min-w-0">
+              <div className="font-extrabold text-xs tracking-tight text-white truncate" style={{ fontFamily: 'var(--font-display)' }}>
+                MôBus · Portal da Escola
+              </div>
+              <div className="text-[10px] text-slide-dim truncate">
+                {school?.name ?? 'Instituição Parceira'}
+              </div>
+            </div>
+          </div>
+          {APP_TARGET !== 'hub' && (
+            <button
+              type="button"
+              onClick={() => void signOut()}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold whitespace-nowrap shrink-0 cursor-pointer bg-red-500/15 text-red-300 hover:text-white"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Sair</span>
+            </button>
+          )}
+        </div>
+        <div className="px-4 py-2 overflow-x-auto no-scrollbar flex items-center gap-1.5">
+          {SCHOOL_TABS.map(({ id, Icon }) => (
+            <button
+              key={id}
+              onClick={() => setTab(id)}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer ${
+                tab === id ? 'bg-slide-accent text-white' : 'bg-white/5 text-slide-dim'
+              }`}
+            >
+              <Icon className="w-3.5 h-3.5" />
+              <span>{id}</span>
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Main Content */}
@@ -1140,7 +1178,7 @@ export function SchoolPortalView() {
                       <span>Viagens Contratadas (Só Leitura)</span>
                     </h2>
                     <div className="flex items-center gap-2">
-                      <span className="text-[11px] text-slide-dim">Operação gerida pela MôBuss</span>
+                      <span className="text-[11px] text-slide-dim">Operação gerida pela MôBus</span>
                       <button
                         type="button"
                         disabled={exportingReport === 'trips'}
@@ -1226,7 +1264,7 @@ export function SchoolPortalView() {
                           <td className="p-3.5">
                             <span className="px-2 py-0.5 rounded-md bg-white/10 text-[11px] font-semibold">
                               {st.enrollmentStatus === 'pending_approval'
-                                ? 'Aguarda MôBuss'
+                                ? 'Aguarda MôBus'
                                 : st.currentJourneyState}
                             </span>
                           </td>
@@ -1254,7 +1292,7 @@ export function SchoolPortalView() {
               <div className="space-y-4">
                 <div className="flex flex-wrap justify-between items-center gap-3">
                   <div className="text-xs text-slide-dim">
-                    Gira os motoristas contratados pela escola e crie credenciais de acesso à App Motorista. Motoristas da MôBuss aparecem apenas em leitura.
+                    Gira os motoristas contratados pela escola e crie credenciais de acesso à App Motorista. Motoristas da MôBus aparecem apenas em leitura.
                   </div>
                   <button
                     type="button"
@@ -1311,7 +1349,7 @@ export function SchoolPortalView() {
                                 </span>
                               ) : (
                                 <span className="px-2 py-0.5 rounded-md bg-white/10 text-slide-dim text-[10px] font-bold">
-                                  MôBuss · Só Leitura
+                                  MôBus · Só Leitura
                                 </span>
                               )}
                             </td>
@@ -1461,7 +1499,7 @@ export function SchoolPortalView() {
               <div className="space-y-6">
                 <div className="flex flex-wrap justify-between items-center gap-3">
                   <div className="text-xs text-slide-dim">
-                    Viaturas próprias da escola e unidades atribuídas à instituição. Viaturas da MôBuss ou parceiros são apresentadas apenas em leitura.
+                    Viaturas próprias da escola e unidades atribuídas à instituição. Viaturas da MôBus ou parceiros são apresentadas apenas em leitura.
                   </div>
                   <button
                     type="button"
@@ -1523,7 +1561,7 @@ export function SchoolPortalView() {
                                 </span>
                               ) : (
                                 <span className="px-2 py-0.5 rounded-md bg-white/10 text-slide-dim text-[10px] font-bold">
-                                  {v.ownershipType === 'partner_owned' ? 'Parceiro' : 'Frota MôBuss'} · Só Leitura
+                                  {v.ownershipType === 'partner_owned' ? 'Parceiro' : 'Frota MôBus'} · Só Leitura
                                 </span>
                               )}
                             </td>
@@ -1792,7 +1830,7 @@ export function SchoolPortalView() {
             {tab === 'Pedidos' && (
               <div className="grid grid-cols-1 lg:grid-cols-[1fr_1.2fr] gap-6">
                 <div className="rounded-2xl bg-slide-surface border border-white/10 p-5 space-y-4">
-                  <h2 className="text-sm font-bold">Pedir Alteração de Serviço à MôBuss</h2>
+                  <h2 className="text-sm font-bold">Pedir Alteração de Serviço à MôBus</h2>
                   <form onSubmit={handleSubmitChangeRequest} className="space-y-3 text-xs">
                     <div>
                       <label className="block text-slide-dim mb-1 font-semibold">Tipo de Pedido</label>
@@ -1833,7 +1871,7 @@ export function SchoolPortalView() {
                       disabled={submitting}
                       className="w-full rounded-xl bg-slide-accent text-white py-2.5 font-bold cursor-pointer disabled:opacity-50"
                     >
-                      {submitting ? 'A enviar...' : 'Submeter Pedido à Central MôBuss'}
+                      {submitting ? 'A enviar...' : 'Submeter Pedido à Central MôBus'}
                     </button>
                   </form>
                 </div>
@@ -1952,7 +1990,7 @@ export function SchoolPortalView() {
                         <span className="text-slide-dim">Modelo de Serviço:</span>
                         <span className="font-bold">
                           {activeContract.serviceModel === 'full_service'
-                            ? 'Serviço Completo MôBuss'
+                            ? 'Serviço Completo MôBus'
                             : 'Software (Frota Própria)'}
                         </span>
                       </div>
@@ -1977,7 +2015,7 @@ export function SchoolPortalView() {
                 <div className="rounded-2xl bg-slide-surface border border-white/10 p-5 space-y-4 text-xs">
                   <h2 className="text-sm font-bold flex items-center gap-2">
                     <AlertTriangle className="w-4 h-4 text-slide-accent" />
-                    <span>Comunicar Ocorrência à MôBuss</span>
+                    <span>Comunicar Ocorrência à MôBus</span>
                   </h2>
                   <form onSubmit={handleSubmitIncident} className="space-y-3">
                     <select
@@ -1994,7 +2032,7 @@ export function SchoolPortalView() {
                       rows={3}
                       value={incDesc}
                       onChange={(e) => setIncDesc(e.target.value)}
-                      placeholder="Descreva a situação para a central MôBuss..."
+                      placeholder="Descreva a situação para a central MôBus..."
                       className="w-full rounded-xl bg-slide-bg border border-white/10 px-3 py-2 text-white outline-none"
                     />
                     <button
@@ -2079,7 +2117,7 @@ export function SchoolPortalView() {
                 className="w-full rounded-xl bg-slide-accent text-white py-3 font-bold cursor-pointer inline-flex items-center justify-center gap-2"
               >
                 <Plus className="w-4 h-4" />
-                <span>{submitting ? 'A guardar...' : 'Submeter para Aprovação MôBuss'}</span>
+                <span>{submitting ? 'A guardar...' : 'Submeter para Aprovação MôBus'}</span>
               </button>
             </form>
           </div>

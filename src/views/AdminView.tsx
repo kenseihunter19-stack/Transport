@@ -689,7 +689,14 @@ export function AdminView({ onNavigate }: AdminViewProps) {
   if (authLoading) {
     return (
       <div className="min-h-[calc(100vh-3.5rem)] bg-slide-bg text-slide-ink grid place-items-center text-xs text-slide-dim">
-        A verificar sessão administrativa MôBuss...
+        <div className="flex flex-col items-center gap-3">
+          <img
+            src="/mobus-logo-1024.png"
+            alt="MôBus"
+            className="w-16 h-16 rounded-2xl object-contain bg-black p-1.5 border border-white/15 shadow-lg"
+          />
+          <span>A verificar sessão administrativa MôBus...</span>
+        </div>
       </div>
     );
   }
@@ -697,8 +704,8 @@ export function AdminView({ onNavigate }: AdminViewProps) {
   if (!isAuthenticated) {
     return (
       <AuthGatePanel
-        title="MôBuss Admin · Central de Operações"
-        subtitle="Acesso exclusivo à equipa operacional, financeira e de segurança da MôBuss. Inicie sessão para gerir contratos, frota, proprietários parceiros e auditoria."
+        title="MôBus Admin · Central de Operações"
+        subtitle="Acesso exclusivo à equipa operacional, financeira e de segurança da MôBus. Inicie sessão para gerir contratos, frota, proprietários parceiros e auditoria."
         badgeText="PostgreSQL + RBAC · Central Luanda"
       />
     );
@@ -711,7 +718,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
           <Lock className="w-8 h-8 text-slide-accent mx-auto" />
           <h2 className="text-lg font-black">Acesso Administrativo Restrito</h2>
           <p className="text-xs text-slide-dim leading-relaxed">
-            O seu perfil atual (<strong>{dbUser ? ROLE_LABELS[dbUser.primaryRole] : "Utilizador"}</strong>) não possui permissões da equipa central MôBuss.
+            O seu perfil atual (<strong>{dbUser ? ROLE_LABELS[dbUser.primaryRole] : "Utilizador"}</strong>) não possui permissões da equipa central MôBus.
           </p>
           <button
             type="button"
@@ -1943,13 +1950,13 @@ export function AdminView({ onNavigate }: AdminViewProps) {
         <div>
           <div className="flex items-center gap-3 mb-6 pb-4 border-b border-white/10">
             <img
-              src="/assets/aistudio/20261117_030824_57b8de0b.jpg"
-              alt="MôBuss Logo"
-              className="w-9 h-9 rounded-lg object-cover bg-black border border-white/10"
+              src="/mobus-logo-1024.png"
+              alt="MôBus Logo"
+              className="w-9 h-9 rounded-lg object-contain bg-black p-0.5 border border-white/10"
             />
             <div>
               <div className="font-extrabold text-sm tracking-tight leading-none" style={{ fontFamily: "var(--font-display)" }}>
-                MôBuss Admin
+                MôBus Admin
               </div>
               <div className="text-[11px] text-slide-dim font-medium mt-1">
                 Central de Luanda
@@ -2035,13 +2042,13 @@ export function AdminView({ onNavigate }: AdminViewProps) {
         <div className="px-4 py-2.5 flex items-center justify-between gap-2 border-b border-white/10">
           <div className="flex items-center gap-2.5 min-w-0">
             <img
-              src="/assets/aistudio/20261117_030824_57b8de0b.jpg"
-              alt="MôBuss Logo"
-              className="w-7 h-7 rounded-lg object-cover bg-black border border-white/10 shrink-0"
+              src="/mobus-logo-1024.png"
+              alt="MôBus Logo"
+              className="w-7 h-7 rounded-lg object-contain bg-black p-0.5 border border-white/10 shrink-0"
             />
             <div className="min-w-0">
               <div className="font-extrabold text-xs tracking-tight text-white truncate" style={{ fontFamily: "var(--font-display)" }}>
-                MôBuss Admin
+                MôBus Admin
               </div>
               <div className="text-[10px] text-slide-dim truncate">
                 {dbUser?.fullName} · {dbUser ? ROLE_LABELS[dbUser.primaryRole] : ""}
@@ -3766,7 +3773,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                               : "bg-amber-500/20 text-amber-300"
                           }`}
                         >
-                          {owner.ownerType === "mobuss_owned" ? "Frota MôBuss" : "Parceiro Independente"}
+                          {owner.ownerType === "mobuss_owned" ? "Frota MôBus" : "Parceiro Independente"}
                         </span>
                       </div>
                       <div className="text-slide-dim font-mono text-[11px]">{owner.phone}</div>
@@ -3795,7 +3802,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                   >
                     <option value="all">Todos os Proprietários</option>
                     <option value="school_owned">Próprias da Escola</option>
-                    <option value="mobuss_owned">Frota MôBuss</option>
+                    <option value="mobuss_owned">Frota MôBus</option>
                     <option value="partner_owned">Parceiros Independentes</option>
                   </select>
                   <select
@@ -3863,7 +3870,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                           ? "Própria da Escola"
                           : v.ownershipType === "partner_owned"
                           ? "Parceiro"
-                          : "Frota MôBuss"}
+                          : "Frota MôBus"}
                       </div>
                     </td>
                     <td className="p-3.5 text-slide-accent font-semibold">{v.routeCode}</td>
@@ -4470,7 +4477,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                   >
                     <option value="all">Todos os Empregadores</option>
                     <option value="school">Contratados pela Escola</option>
-                    <option value="mobuss">Empregador: MôBuss</option>
+                    <option value="mobuss">Empregador: MôBus</option>
                   </select>
                   <select
                     value={driverSchoolFilter === "all" ? "all" : String(driverSchoolFilter)}
@@ -4513,7 +4520,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                     <td className="p-3.5">
                       {d.employerType === "mobuss" ? (
                         <span className="px-2 py-0.5 rounded bg-slide-accent/20 text-slide-accent text-[11px] font-semibold">
-                          MôBuss
+                          MôBus
                         </span>
                       ) : (
                         <div>
@@ -5418,7 +5425,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                   className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
                 >
                   <option value="software">Software (Frota Escola)</option>
-                  <option value="full_service">Serviço Completo MôBuss</option>
+                  <option value="full_service">Serviço Completo MôBus</option>
                 </select>
               </div>
               <div className="grid grid-cols-3 gap-3">
@@ -5585,7 +5592,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="w-full max-w-lg rounded-2xl bg-slide-paper-ink text-slide-paper p-6 border border-white/15 space-y-4">
             <div className="flex justify-between items-center">
-              <h3 className="text-lg font-black">Criar Conta Oficial MôBuss</h3>
+              <h3 className="text-lg font-black">Criar Conta Oficial MôBus</h3>
               <button onClick={() => setUserModalOpen(false)} className="p-1.5 rounded-full bg-slide-surface cursor-pointer">
                 <X className="w-4 h-4" />
               </button>
@@ -5669,7 +5676,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                     className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
                   >
                     <option value="school">Empregador: Escola</option>
-                    <option value="mobuss">Empregador: MôBuss</option>
+                    <option value="mobuss">Empregador: MôBus</option>
                   </select>
                   {newUserDriverEmployer === "school" && (
                     <select
@@ -6240,7 +6247,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                     className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
                   >
                     <option value="school_owned">Própria da Escola</option>
-                    <option value="mobuss_owned">Frota MôBuss</option>
+                    <option value="mobuss_owned">Frota MôBus</option>
                     <option value="partner_owned">Parceiro Independente</option>
                   </select>
                 </div>
@@ -6447,7 +6454,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                     className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
                   >
                     <option value="school">Escola</option>
-                    <option value="mobuss">MôBuss</option>
+                    <option value="mobuss">MôBus</option>
                   </select>
                 </div>
                 {editingDriver.employerType === "school" ? (

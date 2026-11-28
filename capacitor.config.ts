@@ -4,10 +4,10 @@ const target = (process.env.VITE_APP_TARGET || 'hub').toLowerCase().trim();
 
 const TARGET_METADATA =
   target === 'client'
-    ? { appId: 'ao.mobuss.client', appName: 'MôBuss Cliente', webDir: 'dist/client' }
+    ? { appId: 'ao.mobus.client', appName: 'MôBus Cliente', webDir: 'dist/client' }
     : target === 'driver'
-    ? { appId: 'ao.mobuss.driver', appName: 'MôBuss Motorista', webDir: 'dist/driver' }
-    : { appId: 'ao.mobuss.app', appName: 'MôBuss', webDir: 'dist/hub' };
+    ? { appId: 'ao.mobus.driver', appName: 'MôBus Motorista', webDir: 'dist/driver' }
+    : { appId: 'ao.mobus.app', appName: 'MôBus', webDir: 'dist/hub' };
 
 const config: CapacitorConfig = {
   appId: TARGET_METADATA.appId,

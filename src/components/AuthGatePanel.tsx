@@ -47,9 +47,9 @@ export function AuthGatePanel({
       <div className="w-full max-w-md rounded-3xl bg-slide-paper-ink border border-white/10 p-6 sm:p-8 shadow-2xl space-y-5">
         <div className="flex items-center gap-3">
           <img
-            src="/assets/aistudio/20261117_030824_57b8de0b.jpg"
-            alt="MôBuss"
-            className="w-11 h-11 rounded-2xl object-cover border border-white/15 bg-black"
+            src="/mobus-logo-1024.png"
+            alt="MôBus"
+            className="w-12 h-12 rounded-2xl object-contain p-1 border border-white/15 bg-black shrink-0"
           />
           <div>
             <div className="text-[11px] font-bold uppercase tracking-wider text-slide-accent">
@@ -69,7 +69,7 @@ export function AuthGatePanel({
             <span>Acesso Exclusivo a Contas Autorizadas</span>
           </div>
           <p className="text-[11px] leading-relaxed">
-            As contas de Encarregado, Motorista e Escola são criadas exclusivamente pela Administração MôBuss. Não é possível criar conta diretamente na app.
+            As contas de Encarregado, Motorista e Escola são criadas exclusivamente pela Administração MôBus. Não é possível criar conta diretamente na app.
           </p>
         </div>
 

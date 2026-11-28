@@ -146,7 +146,7 @@ export function registerNativePush(options: {
 
       const recvHandle = await PushNotifications.addListener('pushNotificationReceived', (notif) => {
         if (!disposed) {
-          options.onNotification(notif.title || 'MôBuss', notif.body || 'Nova atualização de viagem.');
+          options.onNotification(notif.title || 'MôBus', notif.body || 'Nova atualização de viagem.');
         }
       });
       handles.push(recvHandle);

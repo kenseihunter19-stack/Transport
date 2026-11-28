@@ -250,7 +250,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
 
         if (res.status === 403) {
-          throw new Error(data.error || 'Conta desativada pelo administrador MôBuss.');
+          throw new Error(data.error || 'Conta desativada pelo administrador MôBus.');
         }
 
         // Optional fallback to Firebase Email/Password only if identifier looks like an email
@@ -349,7 +349,7 @@ export function useAuth() {
 }
 
 export const ROLE_LABELS: Record<MoBussRole, string> = {
-  mobuss_super_admin: 'Super Admin MôBuss',
+  mobuss_super_admin: 'Super Admin MôBus',
   operations_manager: 'Gestor de Operações',
   fleet_manager: 'Gestor de Frota',
   school_account_manager: 'Gestor de Contas Escolares',

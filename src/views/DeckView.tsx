@@ -12,7 +12,7 @@ function Frame({ children, n }: { children: ReactNode; n: number }) {
     <div className="slide-content bg-slide-bg text-slide-ink select-none">
       {children}
       <div className="absolute bottom-10 left-24 right-24 flex justify-between slide-chrome text-slide-dim">
-        <span className="font-semibold text-slide-accent">MôBuss Angola</span>
+        <span className="font-semibold text-slide-accent">MôBus Angola</span>
         <span>
           {n} / {SLIDES.length}
         </span>
@@ -69,7 +69,7 @@ function Pill({ children, tone = "accent" }: { children: ReactNode; tone?: "acce
 /* ---------- slides ---------- */
 const SLIDES: { title: string; render: (n: number) => ReactNode }[] = [
   {
-    title: "MôBuss",
+    title: "MôBus",
     render: (n) => (
       <Frame n={n}>
         <div className="absolute inset-0 grid grid-cols-2 items-center px-24 gap-16">
@@ -83,13 +83,13 @@ const SLIDES: { title: string; render: (n: number) => ReactNode }[] = [
               <span className="text-slide-accent">Cada criança, segura.</span>
             </h1>
             <p className="slide-subtitle text-slide-dim mt-10 max-w-[800px]">
-              A MôBuss liga empresas de transporte, colégios, motoristas e encarregados de educação numa só plataforma.
+              A MôBus liga empresas de transporte, colégios, motoristas e encarregados de educação numa só plataforma.
             </p>
           </div>
           <div className="flex items-center justify-center p-8 bg-black rounded-[40px] border border-slide-surface shadow-2xl">
             <img
-              src="/assets/aistudio/20261117_030824_57b8de0b.jpg"
-              alt="MôBuss"
+              src="/mobus-logo-1024.png"
+              alt="MôBus"
               className="w-full max-h-[650px] object-contain drop-shadow-2xl rounded-3xl"
             />
           </div>
@@ -394,7 +394,12 @@ export function DeckView({ onNavigate, initialSlide = 1 }: DeckViewProps) {
       {/* Top quick navigation */}
       <header className="px-6 py-2.5 bg-slide-bg flex items-center justify-between border-b border-slide-surface text-xs z-20">
         <div className="flex items-center gap-3">
-          <span className="font-bold text-slide-accent">MôBuss Pitch Deck</span>
+          <img
+            src="/mobus-logo-1024.png"
+            alt="MôBus Logo"
+            className="w-7 h-7 rounded-lg object-contain bg-black p-0.5 border border-white/10 shrink-0"
+          />
+          <span className="font-bold text-slide-accent">MôBus Pitch Deck</span>
           <span className="text-slide-dim">· {SLIDES[idx]!.title}</span>
         </div>
         <div className="flex items-center gap-3">

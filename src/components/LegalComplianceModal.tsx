@@ -59,7 +59,7 @@ export function LegalDocumentContent({
               Conformidade App Store & Google Play · Angola
             </div>
             <h2 className="text-base font-black text-white leading-tight" style={{ fontFamily: 'var(--font-display)' }}>
-              MôBuss — Privacidade, Termos & Eliminação de Conta
+              MôBus — Privacidade, Termos & Eliminação de Conta
             </h2>
           </div>
         </div>
@@ -120,7 +120,7 @@ export function LegalDocumentContent({
             <section className="space-y-1.5">
               <h3 className="text-sm font-bold text-white">1. Dados Recolhidos e Finalidade</h3>
               <p>
-                A plataforma MôBuss (aplicações <em>MôBuss Cliente</em>, <em>MôBuss Motorista</em> e portais escolares) trata apenas os dados estritamente necessários à segurança do transporte escolar:
+                A plataforma MôBus (aplicações <em>MôBus Cliente</em>, <em>MôBus Motorista</em> e portais escolares) trata apenas os dados estritamente necessários à segurança do transporte escolar:
               </p>
               <ul className="list-disc pl-5 space-y-1">
                 <li><strong className="text-white">Identificação e Acesso:</strong> Nome, identificador institucional ou e-mail autorizado, número de telefone e perfil operacional (Encarregado, Motorista, Escola ou Administração).</li>
@@ -134,7 +134,7 @@ export function LegalDocumentContent({
             <section className="space-y-1.5">
               <h3 className="text-sm font-bold text-white">2. Partilha e Armazenamento</h3>
               <p>
-                A MôBuss <strong className="text-white">não vende, não aluga e não partilha dados com redes de publicidade ou terceiros comerciais</strong>. Os registos são transmitidos por ligação encriptada (HTTPS/WSS) e alojados em base de dados gerida com controlo de acesso por função (RBAC) e registo de auditoria.
+                A MôBus <strong className="text-white">não vende, não aluga e não partilha dados com redes de publicidade ou terceiros comerciais</strong>. Os registos são transmitidos por ligação encriptada (HTTPS/WSS) e alojados em base de dados gerida com controlo de acesso por função (RBAC) e registo de auditoria.
               </p>
             </section>
 
@@ -156,7 +156,7 @@ export function LegalDocumentContent({
             <section className="space-y-1.5">
               <h3 className="text-sm font-bold text-white">1. Acesso Restrito e Criação de Contas</h3>
               <p>
-                O acesso às aplicações <em>MôBuss Cliente</em> e <em>MôBuss Motorista</em> é exclusivo a utilizadores previamente autorizados. <strong className="text-white">Não existe registo público autónomo</strong> na aplicação; todas as contas são criadas e geridas exclusivamente pela Administração MôBuss em articulação com as instituições de ensino contratantes.
+                O acesso às aplicações <em>MôBus Cliente</em> e <em>MôBus Motorista</em> é exclusivo a utilizadores previamente autorizados. <strong className="text-white">Não existe registo público autónomo</strong> na aplicação; todas as contas são criadas e geridas exclusivamente pela Administração MôBus em articulação com as instituições de ensino contratantes.
               </p>
             </section>
 
@@ -171,7 +171,7 @@ export function LegalDocumentContent({
             <section className="space-y-1.5">
               <h3 className="text-sm font-bold text-white">3. Contratos, Faturação e Suspensão</h3>
               <p>
-                Os tarifários escolares e mensalidades são regidos por contrato formal celebrado entre a escola/encarregado e a MôBuss Angola. Contas podem ser desativadas pela Administração por término de contrato, solicitação do titular ou incumprimento das normas de segurança infantil.
+                Os tarifários escolares e mensalidades são regidos por contrato formal celebrado entre a escola/encarregado e a MôBus Angola. Contas podem ser desativadas pela Administração por término de contrato, solicitação do titular ou incumprimento das normas de segurança infantil.
               </p>
             </section>
           </>
@@ -182,7 +182,7 @@ export function LegalDocumentContent({
             <div className="rounded-2xl bg-slide-bg border border-white/10 p-4 space-y-2">
               <h3 className="text-sm font-bold text-white">Política de Eliminação de Conta e Dados</h3>
               <p>
-                Como as contas MôBuss são provisionadas pela Administração escolar e operacional, pode solicitar a desativação imediata do seu acesso e a eliminação/anonimização dos seus dados pessoais (mantendo apenas registos de auditoria exigidos por lei fiscal e segurança infantil em Angola).
+                Como as contas MôBus são provisionadas pela Administração escolar e operacional, pode solicitar a desativação imediata do seu acesso e a eliminação/anonimização dos seus dados pessoais (mantendo apenas registos de auditoria exigidos por lei fiscal e segurança infantil em Angola).
               </p>
             </div>
 
@@ -192,7 +192,7 @@ export function LegalDocumentContent({
                   Sessão ativa: {dbUser.fullName} ({dbUser.username || dbUser.email})
                 </div>
                 <p className="text-[11px]">
-                  Ao submeter este pedido, a Administração MôBuss recebe um alerta prioritário para desativar a sua conta e remover os tokens de notificação e dados de contacto associados.
+                  Ao submeter este pedido, a Administração MôBus recebe um alerta prioritário para desativar a sua conta e remover os tokens de notificação e dados de contacto associados.
                 </p>
                 <textarea
                   rows={3}

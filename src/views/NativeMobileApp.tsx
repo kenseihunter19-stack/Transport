@@ -1156,7 +1156,7 @@ export function NativeMobileApp({
 
   const activeDriverName =
     role === "parent"
-      ? activeBackendStudent?.activeTrip?.driverName ?? "Motorista MôBuss"
+      ? activeBackendStudent?.activeTrip?.driverName ?? "Motorista MôBus"
       : assignedDriverInfo?.fullName ?? dbUser?.fullName ?? "Motorista Oficial";
   const activeDriverPhone =
     role === "parent"
@@ -1496,13 +1496,13 @@ export function NativeMobileApp({
       <header className="sticky top-0 z-40 bg-[#09090b] text-white px-3.5 py-2.5 flex items-center justify-between border-b border-white/10 shrink-0">
           <div className="flex items-center gap-2">
             <img
-              src="/assets/aistudio/20261117_030824_57b8de0b.jpg"
-              alt="MôBuss Logo"
-              className="w-8 h-8 rounded-xl object-cover bg-black border border-white/15 shadow"
+              src="/mobus-logo-1024.png"
+              alt="MôBus Logo"
+              className="w-8 h-8 rounded-xl object-contain bg-black p-0.5 border border-white/15 shadow"
             />
             <div>
               <div className="font-extrabold text-sm tracking-tight leading-none flex items-center gap-1.5" style={{ fontFamily: "var(--font-display)" }}>
-                <span>MôBuss</span>
+                <span>MôBus</span>
                 {isDriverDark && (
                   <span className="text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/10 text-zinc-300">
                     Noturno
@@ -1583,7 +1583,7 @@ export function NativeMobileApp({
                   <Bell className="w-3.5 h-3.5" />
                 </div>
                 <div className="flex-1">
-                  <div className="text-[10px] text-[#e11d2e] font-bold uppercase tracking-wider">MôBuss Alerta</div>
+                  <div className="text-[10px] text-[#e11d2e] font-bold uppercase tracking-wider">MôBus Alerta</div>
                   <div>{toast}</div>
                 </div>
               </div>
@@ -2340,7 +2340,7 @@ export function NativeMobileApp({
                             <div className="flex justify-between items-center text-[10px] mb-1 gap-2">
                               <span className="font-bold uppercase inline-flex items-center gap-1.5 opacity-75">
                                 {isUnread && <span className="w-2 h-2 rounded-full bg-destructive shrink-0" />}
-                                <span>{NOTIFICATION_TYPE_LABEL[n.type] ?? "MôBuss"}</span>
+                                <span>{NOTIFICATION_TYPE_LABEL[n.type] ?? "MôBus"}</span>
                               </span>
                               <span className="font-mono opacity-65 shrink-0">
                                 {formatNotificationTimestampPt(n.createdAt)}
@@ -3307,7 +3307,7 @@ export function NativeMobileApp({
           <button
             onClick={() => setSosOpen(true)}
             className="flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl text-destructive hover:opacity-90 active:scale-95 transition cursor-pointer select-none"
-            title="Emergência SOS MôBuss"
+            title="Emergência SOS MôBus"
           >
             <ShieldAlert className="w-[18px] h-[18px] animate-pulse" />
             <span className="text-[10px] font-black tracking-tight mt-0.5">SOS</span>
@@ -3328,7 +3328,7 @@ export function NativeMobileApp({
                 <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#e11d2e]/15 text-[#e11d2e] text-[10px] font-black uppercase tracking-wider">
                   <Sparkles className="w-3 h-3" />
                   <span>
-                    Guia · {role === "parent" ? "Encarregado" : role === "driver" ? "Motorista" : "Operações MôBuss"}
+                    Guia · {role === "parent" ? "Encarregado" : role === "driver" ? "Motorista" : "Operações MôBus"}
                   </span>
                 </div>
                 <button
@@ -3446,7 +3446,7 @@ export function NativeMobileApp({
                     <Radio className="w-4 h-4" />
                   </div>
                   <div>
-                    <h3 className="font-extrabold text-base leading-tight">Walkie-Talkie MôBuss</h3>
+                    <h3 className="font-extrabold text-base leading-tight">Walkie-Talkie MôBus</h3>
                     <p className={`text-[11px] ${isDriverDark ? "text-zinc-400" : "text-zinc-500"}`}>
                       {role === "driver" ? "Canal com os Encarregados" : `Canal com ${activeDriverName} (Motorista)`}
                     </p>

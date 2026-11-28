@@ -81,10 +81,7 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "revision": "1872c500de691dce40960bb85481de07"
   }, {
     "url": "index.html",
-    "revision": "db2bdf7ec3a3d1280967725c4cdb6b9f"
-  }, {
-    "url": "assets/wifi-BzLOVOsC.js",
-    "revision": null
+    "revision": "832310bfc9b8ba73ed49624e218ff3df"
   }, {
     "url": "assets/web-w3LekBH0.js",
     "revision": null
@@ -92,31 +89,37 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "url": "assets/web-3i_PcZjY.js",
     "revision": null
   }, {
-    "url": "assets/useTelemetrySocket-D5bNwQgK.js",
+    "url": "assets/useTelemetrySocket-DQZWdyRe.js",
     "revision": null
   }, {
-    "url": "assets/siren-DdisCRIE.js",
+    "url": "assets/smartphone-CVwlC7tW.js",
+    "revision": null
+  }, {
+    "url": "assets/siren-Ue4-B7-J.js",
     "revision": null
   }, {
     "url": "assets/rolldown-runtime-BWaJ3C7D.js",
     "revision": null
   }, {
-    "url": "assets/refresh-cw-Hwsijae9.js",
-    "revision": null
-  }, {
-    "url": "assets/plus-Bime9_k7.js",
-    "revision": null
-  }, {
     "url": "assets/phone-BfeQIEPB.js",
+    "revision": null
+  }, {
+    "url": "assets/operations-D7CnlzjL.js",
     "revision": null
   }, {
     "url": "assets/leaflet-src-Dyou-yFy.js",
     "revision": null
   }, {
-    "url": "assets/index-hmnBcQdN.js",
+    "url": "assets/invoice-pdf-vh-t_kPv.css",
     "revision": null
   }, {
-    "url": "assets/index-BMHRqL8o.css",
+    "url": "assets/invoice-pdf-CUkbanwE.js",
+    "revision": null
+  }, {
+    "url": "assets/index-WqvSEPQ1.css",
+    "revision": null
+  }, {
+    "url": "assets/index-SivJ9iJo.js",
     "revision": null
   }, {
     "url": "assets/dist-CMedSjkm.js",
@@ -131,56 +134,44 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "url": "assets/circle-check-DGmBudT0.js",
     "revision": null
   }, {
-    "url": "assets/check-DU0JO3A9.js",
+    "url": "assets/admin-dashboard-jX0MCysh.js",
     "revision": null
   }, {
-    "url": "assets/SchoolPortalView-c0cV_xzy.js",
+    "url": "assets/SchoolPortalView-CD3s0llG.js",
     "revision": null
   }, {
-    "url": "assets/NativeMobileApp-YSzav3U8.js",
+    "url": "assets/NativeMobileApp-m8KKjx1X.js",
     "revision": null
   }, {
-    "url": "assets/MockupView-BfCqjsHF.js",
+    "url": "assets/MobileAppEntry-DYKoajJf.js",
     "revision": null
   }, {
-    "url": "assets/MobileAppEntry-ByPM0fo2.js",
+    "url": "assets/DeckView-CY5YLxLv.js",
     "revision": null
   }, {
-    "url": "assets/LuandaMap-vh-t_kPv.css",
+    "url": "assets/ContractRequestPage-DILnef5c.js",
     "revision": null
   }, {
-    "url": "assets/LuandaMap-CF8_MuBq.js",
-    "revision": null
-  }, {
-    "url": "assets/DeckView-BYslM_Rq.js",
-    "revision": null
-  }, {
-    "url": "assets/ContractRequestPage-Bd3AjgsF.js",
-    "revision": null
-  }, {
-    "url": "assets/AuthGatePanel-8t_vpjmw.js",
-    "revision": null
-  }, {
-    "url": "assets/AdminView-CvvhuwP_.js",
+    "url": "assets/AdminView-Blsc6Nvi.js",
     "revision": null
   }, {
     "url": "apple-touch-icon.png",
-    "revision": "de2f0b0e2b7a92fd49dff2352bc7307d"
+    "revision": "2e1f8e05376e0db5f3135e5b92806354"
+  }, {
+    "url": "mobus-logo-1024.png",
+    "revision": "28f5c02407a01699f0f5f1e330f1ba27"
   }, {
     "url": "pwa-192x192.png",
-    "revision": "18bc41a5958e1e55c4224e24fe9dcf1a"
+    "revision": "e12acee5439dd31f488273b3bc382028"
   }, {
     "url": "pwa-512x512.png",
-    "revision": "515130a9110f97091a972f20df17dc6c"
+    "revision": "22579a7f1aae2bbf1c31dd8ca30ebc67"
   }, {
     "url": "pwa-maskable-512x512.png",
-    "revision": "ec759a0709718dc5c37f1fa2f4406fac"
-  }, {
-    "url": "assets/aistudio/20261117_030824_57b8de0b.jpg",
-    "revision": "8b3691cc1dd889d79a58975eed8224ec"
+    "revision": "6913860f478ad2a3e9ba5dc45b76deb2"
   }, {
     "url": "manifest.webmanifest",
-    "revision": "7a7238a68ea70ad54cb1599123fd57a5"
+    "revision": "29e41482ccf04261d8a320f290dcbf5e"
   }], {});
   workbox.cleanupOutdatedCaches();
   workbox.registerRoute(new workbox.NavigationRoute(workbox.createHandlerBoundToURL("index.html"), {

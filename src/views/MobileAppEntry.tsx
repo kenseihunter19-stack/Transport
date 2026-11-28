@@ -439,7 +439,14 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
   if (authLoading) {
     return (
       <div className="min-h-[calc(100vh-3.5rem)] bg-slide-bg text-slide-ink grid place-items-center text-xs text-slide-dim">
-        A carregar sessão MôBuss...
+        <div className="flex flex-col items-center gap-3">
+          <img
+            src="/mobus-logo-1024.png"
+            alt="MôBus"
+            className="w-16 h-16 rounded-2xl object-contain bg-black p-1.5 border border-white/15 shadow-lg"
+          />
+          <span>A carregar sessão MôBus...</span>
+        </div>
       </div>
     );
   }
@@ -447,7 +454,7 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
   if (!isAuthenticated) {
     return (
       <AuthGatePanel
-        title={mode === 'driver' ? 'MôBuss Motorista · App Oficial' : 'MôBuss Cliente · App Encarregado'}
+        title={mode === 'driver' ? 'MôBus Motorista · App Oficial' : 'MôBus Cliente · App Encarregado'}
         subtitle={
           mode === 'driver'
             ? 'Inicie sessão com a sua conta autorizada de motorista para aceder ao manifesto da rota, GPS real e validação de PIN no servidor.'
@@ -607,7 +614,7 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
         }),
       });
       setSosDescription('');
-      setStatusMessage('Ocorrência SOS enviada em tempo real à Central MôBuss.');
+      setStatusMessage('Ocorrência SOS enviada em tempo real à Central MôBus.');
       await loadBackendState();
     } catch (err) {
       setStatusMessage(err instanceof Error ? err.message : 'Erro ao enviar ocorrência.');
@@ -725,7 +732,7 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
                     clientProfile === 'company' ? 'bg-slide-accent text-white' : 'text-slide-dim'
                   }`}
                 >
-                  Operações MôBuss
+                  Operações MôBus
                 </button>
               </div>
             </div>
@@ -747,10 +754,10 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
               <Smartphone className="w-3.5 h-3.5" />
               <span>
                 {mode === 'driver'
-                  ? 'MôBuss Motorista · App Oficial'
+                  ? 'MôBus Motorista · App Oficial'
                   : isVehicleOwner
-                  ? 'MôBuss Parceiro · Proprietário de Frota'
-                  : 'MôBuss Cliente · App Encarregado'}
+                  ? 'MôBus Parceiro · Proprietário de Frota'
+                  : 'MôBus Cliente · App Encarregado'}
               </span>
             </div>
             <h2 className="text-xl font-black mt-1" style={{ fontFamily: 'var(--font-display)' }}>
@@ -1003,7 +1010,7 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
 
               {(ownerData?.vehicles ?? []).length === 0 ? (
                 <div className="rounded-xl bg-slide-bg border border-white/10 p-4 text-slide-dim">
-                  Nenhuma viatura associada ao seu perfil ainda. A Gestão de Frota MôBuss pode alocar os seus autocarros no painel Admin.
+                  Nenhuma viatura associada ao seu perfil ainda. A Gestão de Frota MôBus pode alocar os seus autocarros no painel Admin.
                 </div>
               ) : (
                 <div className="space-y-2.5">
@@ -1624,7 +1631,7 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
         )}
 
         <footer className="pt-4 border-t border-white/10 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slide-dim">
-          <span>MôBuss Angola · Acesso Restrito</span>
+          <span>MôBus Angola · Acesso Restrito</span>
           <div className="flex flex-wrap items-center gap-2.5">
             <button
               type="button"

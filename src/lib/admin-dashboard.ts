@@ -302,7 +302,7 @@ export function formatAuditActivity(log: RawAuditLogItem): FormattedAuditActivit
 
   const actorRoleKey = log.actorRole as MoBussRole;
   const actorRoleDisplay = ROLE_LABELS[actorRoleKey] ?? (log.actorRole || "Sistema");
-  const actorDisplay = log.actorEmail?.trim() || "Sistema MôBuss";
+  const actorDisplay = log.actorEmail?.trim() || "Sistema MôBus";
 
   const fallbackTitle = log.action
     .split(/[._]+/)

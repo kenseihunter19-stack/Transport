@@ -9,9 +9,9 @@ android {
             def capConfigFile = file('src/main/assets/capacitor.config.json')
             if (capConfigFile.exists()) {
                 def capText = capConfigFile.getText('UTF-8')
-                if (capText.contains('ao.mobuss.client')) {
+                if (capText.contains('ao.mobus.client')) {
                     mobussTarget = 'client'
-                } else if (capText.contains('ao.mobuss.driver')) {
+                } else if (capText.contains('ao.mobus.driver')) {
                     mobussTarget = 'driver'
                 }
             }
@@ -19,8 +19,8 @@ android {
         if (!mobussTarget) {
             mobussTarget = 'hub'
         }
-        def resolvedAppId = mobussTarget == 'client' ? 'ao.mobuss.client' : (mobussTarget == 'driver' ? 'ao.mobuss.driver' : 'ao.mobuss.app')
-        def resolvedAppName = mobussTarget == 'client' ? 'MôBuss Cliente' : (mobussTarget == 'driver' ? 'MôBuss Motorista' : 'MôBuss')
+        def resolvedAppId = mobussTarget == 'client' ? 'ao.mobus.client' : (mobussTarget == 'driver' ? 'ao.mobus.driver' : 'ao.mobus.app')
+        def resolvedAppName = mobussTarget == 'client' ? 'MôBus Cliente' : (mobussTarget == 'driver' ? 'MôBus Motorista' : 'MôBus')
 
         applicationId resolvedAppId
         resValue "string", "app_name", resolvedAppName

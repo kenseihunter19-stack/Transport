@@ -202,54 +202,49 @@ export async function generateInvoicePdfBuffer(params: {
     const emerald = '#059669';
 
     // -----------------------------------------------------------------------
-    // 1. HEADER: Logo, Company Name, NIF, Address
+    // 1. HEADER: Black Header Band with Logo, Company Name, NIF, Address
     // -----------------------------------------------------------------------
-    let cursorY = 44;
-    const logoPath = path.resolve(
-      process.cwd(),
-      'public/assets/aistudio/20261117_030824_57b8de0b.jpg'
-    );
+    const headerBandHeight = 96;
+    doc.rect(0, 0, pageWidth, headerBandHeight).fill('#000000');
+    doc.rect(0, headerBandHeight, pageWidth, 2.5).fill('#E11D2E');
+
+    const headerTopY = 18;
+    const logoPath = path.resolve(process.cwd(), 'public/mobus-logo-1024.png');
     let textStartX = marginLeft;
     if (fs.existsSync(logoPath)) {
       try {
-        doc.image(logoPath, marginLeft, cursorY, { width: 52, height: 52 });
-        textStartX = marginLeft + 64;
+        doc.image(logoPath, marginLeft, headerTopY, { width: 60, height: 60 });
+        textStartX = marginLeft + 72;
       } catch {
         textStartX = marginLeft;
       }
     }
 
     doc
-      .fillColor(inkDark)
+      .fillColor('#FFFFFF')
       .font('Helvetica-Bold')
       .fontSize(14)
-      .text(pricing.companyName, textStartX, cursorY + 2, {
+      .text(pricing.companyName, textStartX, headerTopY + 5, {
         width: contentWidth - (textStartX - marginLeft),
       });
 
     doc
-      .fillColor(inkMuted)
+      .fillColor('#D1D5DB')
       .font('Helvetica')
       .fontSize(9.5)
-      .text(`NIF: ${pricing.companyNif}`, textStartX, cursorY + 22, {
+      .text(`NIF: ${pricing.companyNif}`, textStartX, headerTopY + 26, {
         width: contentWidth - (textStartX - marginLeft),
       });
 
     doc
-      .fillColor(inkMuted)
+      .fillColor('#9CA3AF')
       .font('Helvetica')
       .fontSize(9.5)
-      .text(pricing.companyAddress || 'Luanda, Angola', textStartX, cursorY + 36, {
+      .text(pricing.companyAddress || 'Luanda, Angola', textStartX, headerTopY + 41, {
         width: contentWidth - (textStartX - marginLeft),
       });
 
-    cursorY += 68;
-    doc
-      .moveTo(marginLeft, cursorY)
-      .lineTo(marginLeft + contentWidth, cursorY)
-      .strokeColor(borderLight)
-      .lineWidth(1)
-      .stroke();
+    let cursorY = headerBandHeight + 2.5 + 14;
 
     // -----------------------------------------------------------------------
     // 2. TITLE: RECIBO DE PAGAMENTO (paid) | FATURA PROFORMA (pending)

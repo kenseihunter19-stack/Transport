@@ -247,7 +247,7 @@ async function createApp() {
         status: 'ok',
         dbConnected: true,
         latencyMs: Date.now() - startedAt,
-        service: 'MôBuss Core API v1',
+        service: 'MôBus Core API v1',
         timezone: 'Africa/Luanda',
         timestamp: new Date().toISOString(),
       });
@@ -257,7 +257,7 @@ async function createApp() {
         status: 'degraded',
         dbConnected: false,
         latencyMs: Date.now() - startedAt,
-        service: 'MôBuss Core API v1',
+        service: 'MôBus Core API v1',
         timestamp: new Date().toISOString(),
       });
     }
@@ -281,7 +281,7 @@ async function createApp() {
         },
         calculationFormula: '3 000 Kz por aluno + 33 000 Kz por motorista',
         pricingNote:
-          'Estimativa indicativa configurada pela MôBuss (por aluno + por motorista); sujeita a proposta formal e contrato aprovado.',
+          'Estimativa indicativa configurada pela MôBus (por aluno + por motorista); sujeita a proposta formal e contrato aprovado.',
       });
     } catch (error) {
       console.error('Failed to fetch public pricing:', error);
@@ -362,7 +362,7 @@ async function createApp() {
           driverFeeAoa,
           totalMonthlyAoa: estimatedMonthlyAoa,
         },
-        message: 'Pedido registado e encaminhado para a equipa comercial MôBuss.',
+        message: 'Pedido registado e encaminhado para a equipa comercial MôBus.',
       });
     } catch (error) {
       console.error('Failed to submit contract request:', error);
@@ -424,7 +424,7 @@ async function createApp() {
       if (!userRow.active) {
         return res.status(403).json({
           code: 'ACCOUNT_DISABLED',
-          error: 'Conta desativada pelo administrador MôBuss.',
+          error: 'Conta desativada pelo administrador MôBus.',
         });
       }
 
@@ -520,7 +520,7 @@ async function createApp() {
 
       res.status(201).json({
         referenceId,
-        message: 'Pedido de eliminação de conta registado e encaminhado à Administração MôBuss.',
+        message: 'Pedido de eliminação de conta registado e encaminhado à Administração MôBus.',
       });
     } catch (error) {
       console.error('Failed to submit account deletion request:', error);
@@ -1176,7 +1176,7 @@ async function createApp() {
       });
 
       const safeNumber = invoice.invoiceNumber.replace(/[^a-zA-Z0-9._-]+/g, '_');
-      const prefix = invoice.status === 'confirmed' ? 'Recibo_MoBuss' : 'Fatura_Proforma_MoBuss';
+      const prefix = invoice.status === 'confirmed' ? 'Recibo_MoBus' : 'Fatura_Proforma_MoBus';
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `attachment; filename="${prefix}_${safeNumber}.pdf"`);
       res.setHeader('Cache-Control', 'no-store');
@@ -1362,7 +1362,7 @@ async function createApp() {
       return { ok: false, status: 403, error: 'Ficha de motorista não encontrada.' };
     }
     if (driver.verificationStatus === 'suspended') {
-      return { ok: false, status: 403, error: 'Motorista suspenso. Contacte a escola ou a central MôBuss.' };
+      return { ok: false, status: 403, error: 'Motorista suspenso. Contacte a escola ou a central MôBus.' };
     }
 
     if (trip.driverId === dbUser.driverId) {
@@ -1402,7 +1402,7 @@ async function createApp() {
           return res.status(403).json({ error: 'Ficha de motorista não encontrada.' });
         }
         if (driverRecord.verificationStatus === 'suspended') {
-          return res.status(403).json({ error: 'Motorista suspenso. Contacte a escola ou a central MôBuss.' });
+          return res.status(403).json({ error: 'Motorista suspenso. Contacte a escola ou a central MôBus.' });
         }
         const driverVehicles = allVehicles.filter((v) => v.assignedDriverId === dbUser.driverId);
         const driverVehicleIds = new Set(driverVehicles.map((v) => v.id));
@@ -1803,7 +1803,7 @@ async function createApp() {
 
       void dispatchGuardianPushByRoute(
         trip.routeCode,
-        `Atraso na rota ${trip.routeCode} · MôBuss`,
+        `Atraso na rota ${trip.routeCode} · MôBus`,
         `Atraso reportado (${matchedReason})${note ? `: ${note}` : '.'}`,
         { type: 'trip_delay', routeCode: trip.routeCode, reason: matchedReason }
       );
@@ -1923,7 +1923,7 @@ async function createApp() {
         );
         void dispatchGuardianPushByRoute(
           updatedTrip.routeCode,
-          `MôBuss ${updatedTrip.routeCode} a aproximar-se`,
+          `MôBus ${updatedTrip.routeCode} a aproximar-se`,
           `Autocarro a ${stopHit.distanceMeters}m de ${stopHit.stopName} (~${stopHit.etaMinutes} min).`,
           { type: 'geofence_500m', routeCode: updatedTrip.routeCode, stopName: stopHit.stopName }
         );
@@ -2125,7 +2125,7 @@ async function createApp() {
         return res.status(429).json({
           valid: false,
           locked: true,
-          error: 'PIN temporariamente bloqueado após várias tentativas. Escalado para Operações MôBuss.',
+          error: 'PIN temporariamente bloqueado após várias tentativas. Escalado para Operações MôBus.',
         });
       }
 
@@ -2189,7 +2189,7 @@ async function createApp() {
           locked: lockTrigger,
           remainingAttempts: Math.max(0, 5 - nextAttempts),
           error: lockTrigger
-            ? 'Limite de tentativas excedido. Caso escalado para a Central MôBuss.'
+            ? 'Limite de tentativas excedido. Caso escalado para a Central MôBus.'
             : 'Código PIN inválido. Verifique com o encarregado autorizado.',
         });
       }
@@ -2830,12 +2830,12 @@ async function createApp() {
         action: 'school.student_submitted',
         targetEntity: 'students',
         targetId: insertedStudent[0]!.id,
-        summary: `Escola submeteu novo aluno "${fullName}" para aprovação operacional MôBuss.`,
+        summary: `Escola submeteu novo aluno "${fullName}" para aprovação operacional MôBus.`,
       });
 
       res.status(201).json({
         student: insertedStudent[0],
-        message: 'Aluno submetido para aprovação MôBuss e convite de verificação do encarregado.',
+        message: 'Aluno submetido para aprovação MôBus e convite de verificação do encarregado.',
       });
     } catch (error) {
       console.error('School add student failed:', error);
@@ -2889,7 +2889,7 @@ async function createApp() {
       res.status(201).json({ request: inserted[0] });
     } catch (error) {
       console.error('Transport change request failed:', error);
-      res.status(500).json({ error: 'Erro ao submeter pedido à equipa MôBuss.' });
+      res.status(500).json({ error: 'Erro ao submeter pedido à equipa MôBus.' });
     }
   });
 
@@ -4515,7 +4515,7 @@ async function createApp() {
             ? schoolMap.get(v.assignedSchoolId ?? 0)?.name ?? 'Frota da Escola'
             : v.ownerId != null
             ? ownerMap.get(v.ownerId)?.fullName ?? 'Proprietário'
-            : 'Frota MôBuss',
+            : 'Frota MôBus',
         driverName: v.assignedDriverId ? driverMap.get(v.assignedDriverId)?.fullName ?? '—' : 'Sem motorista',
         schoolName: v.assignedSchoolId ? schoolMap.get(v.assignedSchoolId)?.name ?? null : null,
       }));
@@ -4992,7 +4992,7 @@ async function createApp() {
         const ownerLabel =
           v.ownershipType === 'school_owned'
             ? `Escola (${sc?.name ?? '—'})`
-            : owner?.fullName ?? 'Frota MôBuss';
+            : owner?.fullName ?? 'Frota MôBus';
         return [
           'Viatura',
           `Autocarro #${v.fleetNumber}`,
@@ -5016,7 +5016,7 @@ async function createApp() {
         const sc = scId ? schoolById.get(scId) : null;
         const employerLabel =
           d.employerType === 'mobuss'
-            ? `MôBuss (${d.licenceCategory})`
+            ? `MôBus (${d.licenceCategory})`
             : `Escola: ${sc?.name ?? '—'} (${d.licenceCategory})`;
         return [
           'Motorista',
@@ -7859,11 +7859,11 @@ async function createApp() {
 
   const port = Number(process.env.PORT) || 3000;
   httpServer.listen(port, '0.0.0.0', () => {
-    console.log(`MôBuss Full-Stack Server listening on http://0.0.0.0:${port}`);
+    console.log(`MôBus Full-Stack Server listening on http://0.0.0.0:${port}`);
   });
 }
 
 createApp().catch((err) => {
-  console.error('Failed to start MôBuss server:', err);
+  console.error('Failed to start MôBus server:', err);
   process.exit(1);
 });

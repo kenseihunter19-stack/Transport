@@ -67,9 +67,9 @@
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<true/>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>A MôBuss utiliza a sua localização GPS para acompanhar a rota escolar em tempo real e notificar chegadas aos encarregados.</string>
+	<string>A MôBus utiliza a sua localização GPS para acompanhar a rota escolar em tempo real e notificar chegadas aos encarregados.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>A MôBuss Motorista utiliza o GPS em segundo plano durante viagens escolares ativas para garantir o acompanhamento em tempo real.</string>
+	<string>A MôBus Motorista utiliza o GPS em segundo plano durante viagens escolares ativas para garantir o acompanhamento em tempo real.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>

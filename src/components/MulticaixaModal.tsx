@@ -195,7 +195,7 @@ export function MulticaixaModal({
                     <span className="font-bold text-slide-paper">{trimmedStudent}</span>
                   </div>
                   <div className="flex justify-between items-center mb-1">
-                    <span className="text-slide-dim">Entidade MôBuss:</span>
+                    <span className="text-slide-dim">Entidade MôBus:</span>
                     <span className="font-mono font-bold text-orange-400">{entityCode}</span>
                   </div>
                   <div className="flex justify-between items-center pt-2 border-t border-slide-surface">

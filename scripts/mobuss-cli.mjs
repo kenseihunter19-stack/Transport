@@ -12,12 +12,12 @@ const ALL_BUILD_TARGETS = ['client', 'driver', 'admin', 'school', 'hub'];
 
 const MOBILE_TARGET_CONFIG = {
   client: {
-    bundleId: 'ao.mobuss.client',
-    displayName: 'MôBuss Cliente',
+    bundleId: 'ao.mobus.client',
+    displayName: 'MôBus Cliente',
   },
   driver: {
-    bundleId: 'ao.mobuss.driver',
-    displayName: 'MôBuss Motorista',
+    bundleId: 'ao.mobus.driver',
+    displayName: 'MôBus Motorista',
   },
 };
 

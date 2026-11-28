@@ -15,11 +15,11 @@ export const APP_TARGET: AppTarget =
       })();
 
 export const APP_TARGET_TITLE: Record<AppTarget, string> = {
-  hub: 'MôBuss — Transporte Escolar Inteligente',
-  client: 'MôBuss Cliente — Encarregados & Parceiros',
-  driver: 'MôBuss Motorista — App Oficial',
-  admin: 'MôBuss Admin — Central de Operações',
-  school: 'MôBuss Portal Escolar',
+  hub: 'MôBus — Transporte Escolar Inteligente',
+  client: 'MôBus Cliente — Encarregados & Parceiros',
+  driver: 'MôBus Motorista — App Oficial',
+  admin: 'MôBus Admin — Central de Operações',
+  school: 'MôBus Portal Escolar',
 };
 
 function sanitizeApiBaseUrl(raw?: string): string {

@@ -51,7 +51,7 @@ export function MockupView({ onNavigate }: MockupViewProps) {
           <div>
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slide-surface text-slide-accent text-xs font-black tracking-wider uppercase mb-3 border border-slide-line/20 shadow-xs">
               <span className="w-2 h-2 rounded-full bg-slide-ok animate-pulse" />
-              <span>Simulador iPhone 16 Pro · MôBuss Luanda</span>
+              <span>Simulador iPhone 16 Pro · MôBus Luanda</span>
             </div>
 
             <h1
@@ -93,9 +93,9 @@ export function MockupView({ onNavigate }: MockupViewProps) {
                 },
                 {
                   r: "company" as const,
-                  title: "Operações Móveis MôBuss",
-                  desc: "Consola móvel para coordenadores e equipa central da MôBuss: monitorização da frota em Luanda, pauta operacional e gestão de seguros/inspeções DNVT.",
-                  tag: "Central de Operações MôBuss · Morro Bento",
+                  title: "Operações Móveis MôBus",
+                  desc: "Consola móvel para coordenadores e equipa central da MôBus: monitorização da frota em Luanda, pauta operacional e gestão de seguros/inspeções DNVT.",
+                  tag: "Central de Operações MôBus · Morro Bento",
                   Icon: Building2,
                 },
               ]
@@ -275,7 +275,7 @@ export function MockupView({ onNavigate }: MockupViewProps) {
                     <div className="flex items-center gap-2">
                       <Bus className="w-4 h-4 text-[#e11d2e] animate-pulse" />
                       <div>
-                        <div className="text-[10px] font-black text-slide-accent leading-none">MôBuss Ao Vivo</div>
+                        <div className="text-[10px] font-black text-slide-accent leading-none">MôBus Ao Vivo</div>
                         <div className="text-[9px] opacity-70">Autocarro 12 · Morro Bento</div>
                       </div>
                     </div>

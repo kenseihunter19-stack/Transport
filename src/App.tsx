@@ -87,7 +87,14 @@ function resolveInitialView(): ActiveView {
 function ViewFallback() {
   return (
     <div className="min-h-[calc(100vh-3.5rem)] bg-slide-bg text-slide-dim grid place-items-center text-xs">
-      A carregar módulo MôBuss...
+      <div className="flex flex-col items-center gap-3">
+        <img
+          src="/mobus-logo-1024.png"
+          alt="MôBus"
+          className="w-16 h-16 rounded-2xl object-contain bg-black p-1.5 border border-white/15 shadow-lg"
+        />
+        <span>A carregar módulo MôBus...</span>
+      </div>
     </div>
   );
 }
@@ -125,7 +132,7 @@ export default function App() {
               }}
               className="text-xs font-bold text-slide-accent hover:underline"
             >
-              ← Voltar à Aplicação MôBuss
+              ← Voltar à Aplicação MôBus
             </a>
           </div>
           <LegalDocumentContent initialTab={tab} standalone />
@@ -189,12 +196,12 @@ export default function App() {
           className="flex items-center gap-2 text-left cursor-pointer hover:opacity-90 transition whitespace-nowrap shrink-0"
         >
           <img
-            src="/assets/aistudio/20261117_030824_57b8de0b.jpg"
-            alt="MôBuss Logo"
-            className="w-8 h-8 rounded-lg object-cover bg-black border border-white/10"
+            src="/mobus-logo-1024.png"
+            alt="MôBus Logo"
+            className="w-8 h-8 rounded-lg object-contain bg-black p-0.5 border border-white/10"
           />
           <span className="font-extrabold tracking-tight text-slide-paper text-base" style={{ fontFamily: "var(--font-display)" }}>
-            MôBuss
+            MôBus
           </span>
         </button>
 

@@ -33,7 +33,7 @@ export async function downloadInvoicePdf(params: {
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
   const safeInvoice = (invoiceNumber || String(invoiceId)).replace(/[^a-zA-Z0-9._-]+/g, "_");
-  const prefix = isPaid ? "Recibo_MoBuss" : "Fatura_Proforma_MoBuss";
+  const prefix = isPaid ? "Recibo_MoBus" : "Fatura_Proforma_MoBus";
   const filename = `${prefix}_${safeInvoice}.pdf`;
 
   const anchor = document.createElement("a");

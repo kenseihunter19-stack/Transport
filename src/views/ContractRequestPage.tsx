@@ -139,8 +139,8 @@ export function ContractRequestPage({
     });
 
     const quoteContent = `=====================================================
-ESTIMATIVA INDICATIVA DE TRANSPORTE ESCOLAR — MÔBUSS
-MôBuss Angola Lda. · Luanda, Angola
+ESTIMATIVA INDICATIVA DE TRANSPORTE ESCOLAR — MÔBUS
+MôBus Angola Lda. · Luanda, Angola
 =====================================================
 Referência do Pedido: ${referenceCode || "MINUTA"}
 Data de Emissão: ${today}
@@ -164,11 +164,11 @@ ESTIMATIVA INDICATIVA (NÃO VINCULATIVA):
 ESTIMATIVA MENSAL INDICATIVA: ${estimatedTotal.toLocaleString("pt-AO")} Kz / mês
 Custo médio efetivo por aluno: ${pricePerStudent.toLocaleString("pt-AO")} Kz / mês
 -----------------------------------------------------
-Nota: Os valores acima constituem estimativa indicativa sujeita a análise operacional e aprovação contratual da MôBuss Angola.
+Nota: Os valores acima constituem estimativa indicativa sujeita a análise operacional e aprovação contratual da MôBus Angola.
 Contacto Comercial: comercial@mobuss.ao | +244 923 000 000
 =====================================================`;
 
-    downloadDocument(`Estimativa_MoBuss_${schoolName.replace(/\s+/g, "_")}`, quoteContent);
+    downloadDocument(`Estimativa_MoBus_${schoolName.replace(/\s+/g, "_")}`, quoteContent);
   }
 
   return (
@@ -176,7 +176,7 @@ Contacto Comercial: comercial@mobuss.ao | +244 923 000 000
       {/* Sub-header context bar */}
       <div className="border-b border-white/10 bg-slide-paper-ink/90 backdrop-blur px-6 py-3.5 flex items-center justify-between gap-4">
         <div className="flex items-center gap-2 text-xs text-slide-dim">
-          <span className="font-bold text-slide-paper">MôBuss Institucional</span>
+          <span className="font-bold text-slide-paper">MôBus Institucional</span>
           <span aria-hidden="true">·</span>
           <span>Parcerias com Escolas & Colégios em Luanda</span>
         </div>
@@ -228,7 +228,7 @@ Contacto Comercial: comercial@mobuss.ao | +244 923 000 000
               </div>
             )}
             <p className="text-sm text-slide-dim mb-6 leading-relaxed">
-              A equipa comercial da <strong className="text-slide-paper">MôBuss Angola</strong> registou o pedido de <strong className="text-slide-paper">{schoolName}</strong> na base de dados e irá analisá-lo na aba <strong className="text-slide-paper">Contratos</strong>.
+              A equipa comercial da <strong className="text-slide-paper">MôBus Angola</strong> registou o pedido de <strong className="text-slide-paper">{schoolName}</strong> na base de dados e irá analisá-lo na aba <strong className="text-slide-paper">Contratos</strong>.
             </p>
 
             <div className="rounded-xl bg-slide-bg p-4 text-left text-xs space-y-2 mb-6 font-mono tabular-nums border border-white/10">
@@ -398,7 +398,7 @@ Contacto Comercial: comercial@mobuss.ao | +244 923 000 000
                     }
                     className="w-full rounded-xl bg-slide-bg px-4 py-2.5 text-xs text-slide-paper outline-none border border-white/15 focus:border-slide-accent"
                   >
-                    <option value="configurable">A configurar em contrato com a MôBuss</option>
+                    <option value="configurable">A configurar em contrato com a MôBus</option>
                     <option value="school">Escola paga a fatura mensal consolidada</option>
                     <option value="parent">Encarregados pagam mensalidade individual</option>
                     <option value="mixed">Modelo Misto (Escola + Encarregados)</option>

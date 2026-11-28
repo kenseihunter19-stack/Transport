@@ -24,39 +24,39 @@ const TARGET_MANIFEST: Record<
   { name: string; shortName: string; description: string; startUrl: string; title: string }
 > = {
   hub: {
-    name: 'MôBuss — Transporte Escolar',
-    shortName: 'MôBuss',
+    name: 'MôBus — Transporte Escolar',
+    shortName: 'MôBus',
     description: 'Transporte escolar inteligente e seguro em Luanda, Angola.',
     startUrl: '/?mode=app',
-    title: 'MôBuss — Transporte Escolar Inteligente',
+    title: 'MôBus — Transporte Escolar Inteligente',
   },
   client: {
-    name: 'MôBuss Cliente',
-    shortName: 'MôBuss',
+    name: 'MôBus Cliente',
+    shortName: 'MôBus',
     description: 'Acompanhamento escolar em tempo real, PIN seguro e pagamentos Multicaixa.',
     startUrl: '/',
-    title: 'MôBuss Cliente — Encarregados & Parceiros',
+    title: 'MôBus Cliente — Encarregados & Parceiros',
   },
   driver: {
-    name: 'MôBuss Motorista',
+    name: 'MôBus Motorista',
     shortName: 'Motorista',
-    description: 'App oficial do motorista MôBuss: manifesto, GPS ao vivo e validação PIN.',
+    description: 'App oficial do motorista MôBus: manifesto, GPS ao vivo e validação PIN.',
     startUrl: '/',
-    title: 'MôBuss Motorista — App Oficial',
+    title: 'MôBus Motorista — App Oficial',
   },
   admin: {
-    name: 'MôBuss Admin',
+    name: 'MôBus Admin',
     shortName: 'Admin',
-    description: 'Central de operações, contratos, frota, DNVT, finanças e auditoria MôBuss.',
+    description: 'Central de operações, contratos, frota, DNVT, finanças e auditoria MôBus.',
     startUrl: '/',
-    title: 'MôBuss Admin — Central de Operações',
+    title: 'MôBus Admin — Central de Operações',
   },
   school: {
-    name: 'MôBuss Portal Escolar',
+    name: 'MôBus Portal Escolar',
     shortName: 'Escola',
-    description: 'Portal institucional para escolas parceiras MôBuss em Angola.',
+    description: 'Portal institucional para escolas parceiras MôBus em Angola.',
     startUrl: '/',
-    title: 'MôBuss Portal Escolar',
+    title: 'MôBus Portal Escolar',
   },
 };
 
@@ -94,7 +94,7 @@ export default defineConfig(({ mode }) => {
       VitePWA({
         registerType: 'autoUpdate',
         includeAssets: [
-          'assets/aistudio/20261117_030824_57b8de0b.jpg',
+          'mobus-logo-1024.png',
           'apple-touch-icon.png',
           'pwa-192x192.png',
           'pwa-512x512.png',

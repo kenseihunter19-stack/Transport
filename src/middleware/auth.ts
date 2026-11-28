@@ -193,7 +193,7 @@ export class AccountNotProvisionedError extends Error {
   public readonly statusCode = 403;
   public readonly code = 'ACCOUNT_NOT_PROVISIONED';
 
-  constructor(message = 'Conta não autorizada. As contas MôBuss são criadas exclusivamente pelo Administrador no Painel Central.') {
+  constructor(message = 'Conta não autorizada. As contas MôBus são criadas exclusivamente pelo Administrador no Painel Central.') {
     super(message);
     this.name = 'AccountNotProvisionedError';
   }
@@ -204,7 +204,7 @@ export async function resolveProvisionedDbUser(decoded: DecodedIdToken): Promise
   const displayName =
     (typeof decoded.name === 'string' && decoded.name.trim()) ||
     (email ? email.split('@')[0] : '') ||
-    'Utilizador MôBuss';
+    'Utilizador MôBus';
 
   const existingByUid = await db
     .select()
@@ -335,7 +335,7 @@ export async function resolveDbUserFromToken(token: string): Promise<{
   if (token.startsWith('mb1.')) {
     const session = verifySessionToken(token);
     if (!session) {
-      throw new Error('Token de sessão MôBuss inválido ou expirado.');
+      throw new Error('Token de sessão MôBus inválido ou expirado.');
     }
     const rows = await db
       .select()
@@ -375,7 +375,7 @@ export const requireAuth = async (
     if (!dbUser.active) {
       return res.status(403).json({
         code: 'ACCOUNT_DISABLED',
-        error: 'Conta desativada pelo administrador MôBuss.',
+        error: 'Conta desativada pelo administrador MôBus.',
       });
     }
     req.dbUser = dbUser;

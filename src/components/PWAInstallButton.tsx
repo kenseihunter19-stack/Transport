@@ -25,7 +25,7 @@ export function PWAInstallButton() {
           }
         }}
         className="flex items-center gap-2 rounded-xl bg-slide-ok px-3.5 py-2 text-xs font-bold text-white shadow hover:opacity-95 active:scale-[0.98] transition cursor-pointer whitespace-nowrap shrink-0"
-        title="Instalar MôBuss no seu dispositivo Android / Telemóvel"
+        title="Instalar MôBus no seu dispositivo Android / Telemóvel"
       >
         <Download className="w-3.5 h-3.5" />
         <span className="hidden sm:inline">Instalar App (APK)</span>
@@ -50,12 +50,12 @@ export function PWAInstallButton() {
             >
               <div className="flex items-center gap-3 mb-4">
                 <img
-                  src="/assets/aistudio/20261117_030824_57b8de0b.jpg"
-                  alt="MôBuss Logo"
-                  className="w-11 h-11 rounded-xl object-cover bg-black border border-white/10"
+                  src="/mobus-logo-1024.png"
+                  alt="MôBus Logo"
+                  className="w-11 h-11 rounded-xl object-contain bg-black p-1 border border-white/10 shrink-0"
                 />
                 <div>
-                  <h3 className="text-base font-bold">Instalar MôBuss no Telemóvel</h3>
+                  <h3 className="text-base font-bold">Instalar MôBus no Telemóvel</h3>
                   <p className="text-xs text-slide-dim">Opções para ter a app no ecrã principal</p>
                 </div>
               </div>
@@ -78,7 +78,7 @@ export function PWAInstallButton() {
                     <span>2. Gerar ficheiro .APK independente</span>
                   </div>
                   <p className="text-xs leading-relaxed">
-                    O repositório já está configurado com <strong>Capacitor</strong> e <strong>GitHub Actions</strong> para compilar o ficheiro <code>MoBuss-debug.apk</code>.
+                    O repositório já está configurado com <strong>Capacitor</strong> e <strong>GitHub Actions</strong> para compilar o ficheiro <code>MoBus-debug.apk</code>.
                   </p>
                 </div>
               </div>

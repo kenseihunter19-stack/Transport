@@ -1,3 +1,3 @@
 // Auto-updated by scripts/mobuss-cli.mjs during cap:sync
-MOBUSS_BUNDLE_ID = ao.mobuss.driver
-MOBUSS_DISPLAY_NAME = MôBuss Motorista
+MOBUSS_BUNDLE_ID = ao.mobus.driver
+MOBUSS_DISPLAY_NAME = MôBus Motorista

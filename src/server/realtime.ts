@@ -467,7 +467,7 @@ export class TripSimulationRunner {
         );
         void dispatchGuardianPushByRoute(
           route.code,
-          `MôBuss ${route.code} a aproximar-se`,
+          `MôBus ${route.code} a aproximar-se`,
           `Autocarro a ${stopHit.distanceMeters}m de ${stopHit.stopName} (~${stopHit.etaMinutes} min).`,
           { type: 'geofence_500m', routeCode: route.code, stopName: stopHit.stopName }
         );
