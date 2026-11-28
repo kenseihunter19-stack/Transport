@@ -1,7 +1,9 @@
 import { relations } from 'drizzle-orm';
 import {
   boolean,
+  doublePrecision,
   integer,
+  jsonb,
   pgTable,
   serial,
   text,
@@ -95,6 +97,7 @@ export const contracts = pgTable('contracts', {
   studentsCovered: integer('students_covered').notNull(),
   monthlyValueAoa: integer('monthly_value_aoa').notNull(),
   shiftRegime: text('shift_regime').notNull().default('both'),
+  serviceModel: text('service_model').notNull().default('software'), // software | full_service
   status: text('status').notNull().default('active'), // request_received | under_review | proposal_sent | accepted | active | suspended | expired | rejected
   startDate: text('start_date').notNull().default('2026-09-01'),
   endDate: text('end_date').notNull().default('2027-07-31'),
@@ -126,6 +129,8 @@ export const drivers = pgTable('drivers', {
   licenceCategory: text('licence_category').notNull().default('Pesados Profissional D'),
   licenceNumber: text('licence_number').notNull(),
   licenceExpiry: text('licence_expiry').notNull(),
+  employerType: text('employer_type').notNull().default('school'), // school | mobuss
+  employerSchoolId: integer('employer_school_id').references(() => schools.id, { onDelete: 'set null' }),
   engagementType: text('engagement_type').notNull().default('employed'), // employed | contractor | owner_driver
   verificationStatus: text('verification_status').notNull().default('verified'), // pending | verified | suspended
   availabilityStatus: text('availability_status').notNull().default('in_service'), // in_service | available | off_duty
@@ -140,10 +145,8 @@ export const vehicles = pgTable('vehicles', {
   id: serial('id').primaryKey(),
   fleetNumber: integer('fleet_number').notNull().unique(),
   plate: text('plate').notNull().unique(),
-  ownershipType: text('ownership_type').notNull().default('mobuss_owned'), // mobuss_owned | partner_owned
-  ownerId: integer('owner_id')
-    .references(() => vehicleOwners.id)
-    .notNull(),
+  ownershipType: text('ownership_type').notNull().default('mobuss_owned'), // mobuss_owned | partner_owned | school_owned
+  ownerId: integer('owner_id').references(() => vehicleOwners.id),
   assignedDriverId: integer('assigned_driver_id').references(() => drivers.id),
   assignedSchoolId: integer('assigned_school_id').references(() => schools.id),
   routeCode: text('route_code'),
@@ -245,6 +248,36 @@ export const trips = pgTable('trips', {
   gpsStatus: text('gps_status').notNull().default('unavailable'), // live | stale | unavailable
   emptyBusSweepVerified: boolean('empty_bus_sweep_verified').notNull().default(false),
   emptyBusSweepAt: timestamp('empty_bus_sweep_at'),
+  delayReason: text('delay_reason'),
+  delayNote: text('delay_note'),
+  delayReportedAt: timestamp('delay_reported_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const routes = pgTable('routes', {
+  id: serial('id').primaryKey(),
+  code: text('code').notNull().unique(),
+  name: text('name').notNull(),
+  corridor: text('corridor'),
+  schoolId: integer('school_id').references(() => schools.id, { onDelete: 'set null' }),
+  pathCoordinates: jsonb('path_coordinates').$type<[number, number][]>().notNull().default([]),
+  active: boolean('active').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const routeStops = pgTable('route_stops', {
+  id: serial('id').primaryKey(),
+  routeId: integer('route_id')
+    .references(() => routes.id, { onDelete: 'cascade' })
+    .notNull(),
+  position: integer('position').notNull(),
+  name: text('name').notNull(),
+  latitude: doublePrecision('latitude').notNull(),
+  longitude: doublePrecision('longitude').notNull(),
+  scheduledTime: text('scheduled_time').notNull().default('07:00'),
+  geofenceRadiusM: integer('geofence_radius_m').notNull().default(500),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
@@ -319,8 +352,15 @@ export const incidents = pgTable('incidents', {
   description: text('description').notNull(),
   reporterName: text('reporter_name').notNull(),
   reporterRole: text('reporter_role').notNull(),
+  driverId: integer('driver_id'),
+  driverName: text('driver_name'),
+  reason: text('reason'),
+  notes: text('notes'),
+  latitude: doublePrecision('latitude'),
+  longitude: doublePrecision('longitude'),
   status: text('status').notNull().default('new'), // new | acknowledged | assigned | in_progress | resolved | closed
   assignedToName: text('assigned_to_name'),
+  acknowledgedAt: timestamp('acknowledged_at'),
   resolutionNotes: text('resolution_notes'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
@@ -335,6 +375,7 @@ export const pricingConfigs = pgTable('pricing_configs', {
   ivaPercent: integer('iva_percent').notNull().default(14),
   companyName: text('company_name').notNull().default('MôBuss Angola Transporte Escolar Lda.'),
   companyNif: text('company_nif').notNull().default('5417209418'),
+  companyAddress: text('company_address').notNull().default('Av. Comandante Valódia, Luanda, Angola'),
   multicaixaEntityCode: text('multicaixa_entity_code').notNull().default('00845'),
   fiscalIntegrationStatus: text('fiscal_integration_status')
     .notNull()
@@ -347,17 +388,22 @@ export const invoices = pgTable('invoices', {
   id: serial('id').primaryKey(),
   invoiceNumber: text('invoice_number').notNull().unique(),
   schoolId: integer('school_id'),
+  guardianId: integer('guardian_id'),
+  studentId: integer('student_id'),
   studentName: text('student_name').notNull(),
   guardianName: text('guardian_name').notNull(),
   payerType: text('payer_type').notNull().default('guardian'), // school | guardian
   phone: text('phone').notNull(),
+  description: text('description'),
   amountAoa: integer('amount_aoa').notNull(),
+  ivaPercent: integer('iva_percent'),
   paymentMethod: text('payment_method').notNull().default('multicaixa_express_entity'),
   paymentEntity: text('payment_entity'),
   paymentReferencePin: text('payment_reference_pin'),
   status: text('status').notNull().default('pending_provider'), // draft | initiated | pending_provider | confirmed | failed | refunded
   providerReference: text('provider_reference'),
   fiscalStatus: text('fiscal_status').notNull().default('proforma_unverified'), // proforma_unverified | verified_fiscal
+  dueDate: timestamp('due_date'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   confirmedAt: timestamp('confirmed_at'),
 });
@@ -389,6 +435,21 @@ export const devicePushTokens = pgTable('device_push_tokens', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
+export const notifications = pgTable('notifications', {
+  id: serial('id').primaryKey(),
+  userId: integer('user_id')
+    .references(() => users.id, { onDelete: 'cascade' })
+    .notNull(),
+  type: text('type').notNull(), // boarded | handover_completed | approaching_stop | trip_delayed | incident | invoice
+  title: text('title').notNull(),
+  body: text('body').notNull(),
+  tripId: integer('trip_id').references(() => trips.id, { onDelete: 'set null' }),
+  studentId: integer('student_id').references(() => students.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  readAt: timestamp('read_at'),
+  deliveryStatus: text('delivery_status').notNull().default('in_app_only'), // in_app_only | delivered | push_failed
+});
+
 // ============================================================================
 // RELATIONS
 // ============================================================================
@@ -408,6 +469,13 @@ export const contractsRelations = relations(contracts, ({ one }) => ({
 
 export const vehicleOwnersRelations = relations(vehicleOwners, ({ many }) => ({
   vehicles: many(vehicles),
+}));
+
+export const driversRelations = relations(drivers, ({ one }) => ({
+  employerSchool: one(schools, {
+    fields: [drivers.employerSchoolId],
+    references: [schools.id],
+  }),
 }));
 
 export const vehiclesRelations = relations(vehicles, ({ one }) => ({
@@ -462,5 +530,20 @@ export const guardianStudentLinksRelations = relations(guardianStudentLinks, ({ 
   student: one(students, {
     fields: [guardianStudentLinks.studentId],
     references: [students.id],
+  }),
+}));
+
+export const routesRelations = relations(routes, ({ one, many }) => ({
+  school: one(schools, {
+    fields: [routes.schoolId],
+    references: [schools.id],
+  }),
+  stops: many(routeStops),
+}));
+
+export const routeStopsRelations = relations(routeStops, ({ one }) => ({
+  route: one(routes, {
+    fields: [routeStops.routeId],
+    references: [routes.id],
   }),
 }));

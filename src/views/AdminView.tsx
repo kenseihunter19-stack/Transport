@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   AlertTriangle,
+  ArrowDown,
+  ArrowUp,
   ArrowUpRight,
   BarChart3,
   Bell,
@@ -32,10 +34,12 @@ import {
   Pencil,
   Phone,
   Plus,
+  Power,
   Presentation,
   Radio,
   RefreshCw,
   RotateCcw,
+  Route as RouteIcon,
   Save,
   Search,
   ShieldAlert,
@@ -57,25 +61,26 @@ import { AuthGatePanel } from "@/components/AuthGatePanel";
 import { ROLE_LABELS, useAuth, type MoBussRole } from "@/contexts/AuthContext";
 import { APP_TARGET } from "@/lib/runtime-config";
 import { useTelemetrySocket } from "@/hooks/useTelemetrySocket";
-import { downloadCsv, downloadDocument } from "@/lib/operations";
-import { LUANDA_ROUTES } from "@/lib/route-luanda";
+import { downloadServerCsv } from "@/lib/csv-download";
+import { type RouteDto, type RouteStopDto } from "@/lib/luanda-geofence";
 import {
   ACTIVE_TRIP_STATES,
   buildLiveFleetVehicles,
+  computeOverviewSummary,
   deriveLiveOperationsSummary,
   formatAuditActivity,
   formatWeekdaysPt,
   getAdminRolePermissions,
-  ROUTE_CODE_TO_ID,
   translateTripState,
   translateVehicleStatus,
   WEEKDAY_OPTIONS,
+  type OverviewSummary,
   type RecurringRouteScheduleItem,
 } from "@/lib/admin-dashboard";
+import { downloadInvoicePdf } from "@/lib/invoice-pdf";
 import {
   clearHazardForBus,
   DEFAULT_PRICING,
-  exportAgtReceipt,
   formatAOA,
   readMoBussSync,
   subscribeMoBussSync,
@@ -101,7 +106,7 @@ const ADMIN_TABS: Array<{ id: AdminTab; Icon: LucideIcon; desc: string }> = [
   { id: "Painel", Icon: LayoutDashboard, desc: "Visão Geral das Operações" },
   { id: "Contratos", Icon: FileSignature, desc: "Pedidos, Escolas & Contratos" },
   { id: "Frota", Icon: Bus, desc: "Proprietários, Autocarros & Alocação" },
-  { id: "Rotas & Escalas", Icon: CalendarClock, desc: "Horários Recorrentes & Viaturas" },
+  { id: "Rotas & Escalas", Icon: CalendarClock, desc: "Corredores, Paragens & Escalas" },
   { id: "Motoristas", Icon: UserCheck, desc: "Equipa & Verificação" },
   { id: "Alunos", Icon: GraduationCap, desc: "Diretório & Segurança PIN" },
   { id: "Finanças", Icon: CreditCard, desc: "Tarifário, Faturas & Parceiros" },
@@ -129,10 +134,11 @@ interface AdminOverviewData {
     contactName: string;
     contactPhone: string;
     payerModel: "school" | "parent" | "mixed";
+    serviceModel?: "software" | "full_service";
     pinPolicy: string;
     busesAllocated: number;
     studentsCovered: number;
-    monthlyValueAoa: number;
+    monthlyValueAoa: number | null;
     shiftRegime: string;
     status: string;
   }>;
@@ -159,14 +165,15 @@ interface AdminOverviewData {
     nif: string | null;
     phone: string;
     settlementModel: string;
-    monthlySettlementAoa: number;
+    monthlySettlementAoa: number | null;
     verificationStatus: string;
   }>;
   vehicles: Array<{
     id: number;
     fleetNumber: number;
     plate: string;
-    ownerId: number;
+    ownershipType?: string;
+    ownerId: number | null;
     ownerName: string;
     assignedDriverId: number | null;
     assignedSchoolId: number | null;
@@ -189,11 +196,17 @@ interface AdminOverviewData {
     licenceCategory: string;
     licenceNumber: string;
     licenceExpiry: string;
+    employerType?: string;
+    employerSchoolId?: number | null;
+    employerSchoolName?: string | null;
     verificationStatus: string;
     ratingAvg: string;
     availabilityStatus: string;
-    monthlyCompensationAoa: number;
+    monthlyCompensationAoa: number | null;
     tripsCompleted: number;
+    hasLogin?: boolean;
+    loginUsername?: string | null;
+    loginActive?: boolean | null;
   }>;
   students: Array<{
     id: number;
@@ -226,26 +239,36 @@ interface AdminOverviewData {
     lastLocationAt: string | null;
     gpsStatus: string;
     emptyBusSweepVerified: boolean;
+    delayReason?: string | null;
   }>;
   incidents: Array<{
     id: number;
     tripId: number | null;
+    tripCode?: string | null;
     schoolId: number | null;
     busNumber: number | null;
     routeCode: string | null;
+    routeName?: string | null;
     category: string;
     severity: string;
     description: string;
     reporterName: string;
     reporterRole: string;
+    driverName?: string | null;
+    reason?: string | null;
+    notes?: string | null;
+    latitude?: number | null;
+    longitude?: number | null;
     status: string;
     assignedToName: string | null;
+    acknowledgedAt?: string | null;
     resolutionNotes: string | null;
     createdAt: string;
   }>;
   invoices: Array<{
     id: number;
     invoiceNumber: string;
+    schoolId?: number | null;
     studentName: string;
     guardianName: string;
     payerType: string;
@@ -269,6 +292,7 @@ interface AdminOverviewData {
     ivaPercent: number;
     companyName: string;
     companyNif: string;
+    companyAddress?: string;
     multicaixaEntityCode?: string;
     fiscalIntegrationStatus: string;
   } | null;
@@ -305,6 +329,8 @@ interface AdminOverviewData {
     active: boolean;
   }>;
   routeSchedules: RecurringRouteScheduleItem[];
+  routes?: RouteDto[];
+  overviewSummary?: OverviewSummary;
 }
 
 const PAYER_LABELS: Record<string, string> = {
@@ -319,22 +345,33 @@ interface AdminViewProps {
 }
 
 export function AdminView({ onNavigate }: AdminViewProps) {
-  const { isAuthenticated, dbUser, capabilities, loading: authLoading, apiFetch, signOut } = useAuth();
+  const { isAuthenticated, dbUser, capabilities, loading: authLoading, apiFetch, getAuthToken, signOut } = useAuth();
   const [tab, setTab] = useState<AdminTab>("Painel");
   const [search, setSearch] = useState("");
-  const [selectedRouteId, setSelectedRouteId] = useState<string>("route_a");
+  const [selectedSimRouteCode, setSelectedSimRouteCode] = useState<string>("ROTA-A");
   const [selectedSchoolFilter, setSelectedSchoolFilter] = useState<"all" | number>("all");
   const [fleetStatusFilter, setFleetStatusFilter] = useState<"all" | "active" | "available" | "maintenance">("all");
   const [fleetTripFilter, setFleetTripFilter] = useState<"all" | "active" | "delayed" | "idle">("all");
   const [fleetRouteFilter, setFleetRouteFilter] = useState<string>("all");
+  const [fleetOwnershipFilter, setFleetOwnershipFilter] = useState<"all" | "school_owned" | "mobuss_owned" | "partner_owned">("all");
+  const [fleetAdminSchoolFilter, setFleetAdminSchoolFilter] = useState<"all" | number>("all");
+  const [driverEmployerFilter, setDriverEmployerFilter] = useState<"all" | "school" | "mobuss">("all");
+  const [driverSchoolFilter, setDriverSchoolFilter] = useState<"all" | number>("all");
   const [selectedFleetVehicleId, setSelectedFleetVehicleId] = useState<number | null>(null);
   const [showTechnicalAudit, setShowTechnicalAudit] = useState(false);
+  const [reportFromDate, setReportFromDate] = useState("");
+  const [reportToDate, setReportToDate] = useState("");
+  const [reportSchoolId, setReportSchoolId] = useState<"all" | number>("all");
+  const [downloadingReportKey, setDownloadingReportKey] = useState<string | null>(null);
   const [progress, setProgress] = useState(0.42);
 
   // Real DB state & Health Probe
   const [overview, setOverview] = useState<AdminOverviewData | null>(null);
   const [loadingOverview, setLoadingOverview] = useState(false);
-  const [health, setHealth] = useState<{ dbConnected: boolean; latencyMs?: number }>({ dbConnected: false });
+  const [health, setHealth] = useState<{ checked: boolean; dbConnected: boolean; latencyMs?: number }>({
+    checked: false,
+    dbConnected: false,
+  });
 
   // Simulator cross-sync (hazards, sweeps, ratings) + pricing form draft
   const [syncState, setSyncState] = useState<MoBussSyncState>(() => readMoBussSync());
@@ -348,6 +385,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
   const [newSchool, setNewSchool] = useState("");
   const [newLocation, setNewLocation] = useState("Talatona, Luanda");
   const [newPayerModel, setNewPayerModel] = useState<"school" | "parent" | "mixed">("school");
+  const [newServiceModel, setNewServiceModel] = useState<"software" | "full_service">("software");
   const [newBuses, setNewBuses] = useState(2);
   const [newStudents, setNewStudents] = useState(50);
   const [newContact, setNewContact] = useState("");
@@ -377,6 +415,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
   const [newUserPassword, setNewUserPassword] = useState("");
   const [newUserRole, setNewUserRole] = useState<MoBussRole>("parent_guardian");
   const [newUserSchoolId, setNewUserSchoolId] = useState<number | "">("");
+  const [newUserDriverEmployer, setNewUserDriverEmployer] = useState<"school" | "mobuss">("school");
   const [newUserStudentId, setNewUserStudentId] = useState<number | "">("");
   const [creatingUser, setCreatingUser] = useState(false);
 
@@ -437,6 +476,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
   const [vehicleForm, setVehicleForm] = useState({
     fleetNumber: "",
     plate: "",
+    ownershipType: "mobuss_owned" as "school_owned" | "mobuss_owned" | "partner_owned",
     ownerId: "" as number | "",
     assignedSchoolId: "" as number | "",
     routeCode: "ROTA-A",
@@ -471,6 +511,34 @@ export function AdminView({ onNavigate }: AdminViewProps) {
     notes: "",
   });
 
+  // Admin DB Routes & Stops Editor State (operations_manager / fleet_manager / super admin)
+  const [rotasSubView, setRotasSubView] = useState<"routes" | "schedules">("routes");
+  const [selectedAdminRouteId, setSelectedAdminRouteId] = useState<number | null>(null);
+  const [routeModalOpen, setRouteModalOpen] = useState(false);
+  const [editingRouteId, setEditingRouteId] = useState<number | null>(null);
+  const [savingRoute, setSavingRoute] = useState(false);
+  const [routeFormError, setRouteFormError] = useState<string | null>(null);
+  const [routeForm, setRouteForm] = useState({
+    code: "",
+    name: "",
+    corridor: "",
+    schoolId: "" as number | "",
+    active: true,
+    pathText: "",
+  });
+  const [mapClickMode, setMapClickMode] = useState<"pick_stop" | "append_path">("pick_stop");
+  const [savingStop, setSavingStop] = useState(false);
+  const [stopFormError, setStopFormError] = useState<string | null>(null);
+  const [stopForm, setStopForm] = useState({
+    id: null as number | null,
+    name: "",
+    latitude: "",
+    longitude: "",
+    scheduledTime: "07:00",
+    geofenceRadiusM: 500,
+    appendToPath: true,
+  });
+
   // Admin Edit Driver Modal
   const [editingDriver, setEditingDriver] = useState<{
     id: number;
@@ -479,6 +547,9 @@ export function AdminView({ onNavigate }: AdminViewProps) {
     licenceCategory: string;
     licenceNumber: string;
     licenceExpiry: string;
+    employerType: "school" | "mobuss";
+    employerSchoolId: number | "";
+    verificationStatus: "verified" | "suspended" | "pending";
     availabilityStatus: "in_service" | "available" | "off_duty";
     monthlyCompensationAoa: number;
   } | null>(null);
@@ -509,9 +580,9 @@ export function AdminView({ onNavigate }: AdminViewProps) {
     try {
       const res = await fetch("/api/v1/health");
       const data = await res.json();
-      setHealth({ dbConnected: Boolean(data.dbConnected), latencyMs: data.latencyMs });
+      setHealth({ checked: true, dbConnected: Boolean(data.dbConnected), latencyMs: data.latencyMs });
     } catch {
-      setHealth({ dbConnected: false });
+      setHealth({ checked: true, dbConnected: false });
     }
   }, []);
 
@@ -530,11 +601,8 @@ export function AdminView({ onNavigate }: AdminViewProps) {
           ivaPercent: data.pricing.ivaPercent,
           companyName: data.pricing.companyName,
           companyNif: data.pricing.companyNif,
+          companyAddress: data.pricing.companyAddress ?? DEFAULT_PRICING.companyAddress,
           multicaixaEntityCode: data.pricing.multicaixaEntityCode || "00845",
-          agtCertCode:
-            data.pricing.fiscalIntegrationStatus === "sandbox_pending_agt_certification"
-              ? "HOMOLOGAÇÃO / NÃO FISCAL AGT"
-              : data.pricing.fiscalIntegrationStatus,
         };
         setPricingDraft(syncedPricing);
         updatePricingConfig(syncedPricing);
@@ -549,8 +617,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
   const { connected: wsConnected } = useTelemetrySocket((event) => {
     if (event.type === "trip:location") {
       const routeCode = String(event.payload.routeCode ?? "");
-      const activeCfg = LUANDA_ROUTES[selectedRouteId] || LUANDA_ROUTES.route_a;
-      if (routeCode === activeCfg.code) {
+      if (routeCode.toUpperCase() === selectedSimRouteCode.toUpperCase()) {
         setProgress(Number(event.payload.progress ?? 0));
       }
       return;
@@ -568,7 +635,8 @@ export function AdminView({ onNavigate }: AdminViewProps) {
       event.type === "trip:state" ||
       event.type === "attendance:updated" ||
       event.type === "pin:validated" ||
-      event.type === "incident:created"
+      event.type === "incident:created" ||
+      event.type === "incident:updated"
     ) {
       void loadOverview();
     }
@@ -588,13 +656,16 @@ export function AdminView({ onNavigate }: AdminViewProps) {
   }, [checkHealth, loadOverview, isAuthenticated, capabilities.canAccessAdmin, apiFetch]);
 
   async function handleSimulationAction(action: "start" | "pause" | "step" | "reset") {
-    const activeRoute = LUANDA_ROUTES[selectedRouteId] || LUANDA_ROUTES.route_a;
+    const activeRoute =
+      (overview?.routes ?? []).find((r) => r.code.toUpperCase() === selectedSimRouteCode.toUpperCase()) ??
+      (overview?.routes ?? [])[0];
+    const targetCode = activeRoute?.code ?? (selectedSimRouteCode || "ROTA-A");
     try {
       const res = await apiFetch<{ simulation: { running: boolean; routeCode: string; progress: number; nearestStopName: string }; connectedClients: number }>(
         `/api/v1/simulation/${action}`,
         {
           method: "POST",
-          body: JSON.stringify({ routeCode: activeRoute.code }),
+          body: JSON.stringify({ routeCode: targetCode }),
         }
       );
       setSimStatus(res.simulation);
@@ -602,12 +673,12 @@ export function AdminView({ onNavigate }: AdminViewProps) {
       setProgress(res.simulation.progress);
       showToast(
         action === "start"
-          ? `Simulação PostgreSQL + WebSocket iniciada na ${activeRoute.code}.`
+          ? `Simulação PostgreSQL + WebSocket iniciada na ${targetCode}.`
           : action === "pause"
           ? "Simulação em pausa."
           : action === "step"
           ? `Autocarro avançou para ${res.simulation.nearestStopName}.`
-          : `Simulação reiniciada na ${activeRoute.code}.`
+          : `Simulação reiniciada na ${targetCode}.`
       );
       await loadOverview();
     } catch (err) {
@@ -668,16 +739,32 @@ export function AdminView({ onNavigate }: AdminViewProps) {
       r.referenceCode.toLowerCase().includes(q) ||
       r.municipality.toLowerCase().includes(q)
   );
-  const vehiclesList = (overview?.vehicles ?? []).filter(
-    (v) =>
+  const vehiclesList = (overview?.vehicles ?? []).filter((v) => {
+    const matchesSearch =
+      !q ||
       v.plate.toLowerCase().includes(q) ||
       v.driverName.toLowerCase().includes(q) ||
       v.ownerName.toLowerCase().includes(q) ||
-      v.routeCode.toLowerCase().includes(q)
-  );
-  const driversList = (overview?.drivers ?? []).filter(
-    (d) => d.fullName.toLowerCase().includes(q) || d.phone.toLowerCase().includes(q)
-  );
+      v.routeCode.toLowerCase().includes(q) ||
+      (v.schoolName ?? "").toLowerCase().includes(q);
+    if (!matchesSearch) return false;
+    if (fleetOwnershipFilter !== "all" && (v.ownershipType || "mobuss_owned") !== fleetOwnershipFilter) return false;
+    if (fleetAdminSchoolFilter !== "all" && v.assignedSchoolId !== fleetAdminSchoolFilter) return false;
+    return true;
+  });
+  const driversList = (overview?.drivers ?? []).filter((d) => {
+    const matchesSearch =
+      !q ||
+      d.fullName.toLowerCase().includes(q) ||
+      d.phone.toLowerCase().includes(q) ||
+      (d.employerSchoolName ?? "").toLowerCase().includes(q) ||
+      (d.loginUsername ?? "").toLowerCase().includes(q);
+    if (!matchesSearch) return false;
+    const emp = d.employerType === "mobuss" ? "mobuss" : "school";
+    if (driverEmployerFilter !== "all" && emp !== driverEmployerFilter) return false;
+    if (driverSchoolFilter !== "all" && d.employerSchoolId !== driverSchoolFilter) return false;
+    return true;
+  });
   const studentsList = (overview?.students ?? []).filter(
     (s) =>
       s.fullName.toLowerCase().includes(q) ||
@@ -709,6 +796,9 @@ export function AdminView({ onNavigate }: AdminViewProps) {
         (overview?.schools ?? []).find((s) => s.id === selectedSchoolFilter) ??
         null;
 
+  const allRoutes = overview?.routes ?? [];
+  const selectedAdminRoute =
+    allRoutes.find((r) => r.id === selectedAdminRouteId) ?? allRoutes[0] ?? null;
   const allSchedules = overview?.routeSchedules ?? [];
   const allLiveFleetVehicles = buildLiveFleetVehicles({
     schools: overview?.schools ?? [],
@@ -717,6 +807,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
     students: overview?.students ?? [],
     trips: overview?.trips ?? [],
     routeSchedules: allSchedules,
+    routes: allRoutes,
   });
 
   // School-scoped records (All Schools vs Individual School)
@@ -797,8 +888,53 @@ export function AdminView({ onNavigate }: AdminViewProps) {
     drivers: scopedDriverList,
     students: scopedStudents,
     openIncidentsCount: scopedOpenIncidentsCount,
-    activeHazardsCount: scopedHazards.length,
+    activeHazardsCount: 0,
   });
+
+  const dbReachableSignal = health.checked ? health.dbConnected : (overview?.overviewSummary?.serviceStatus.dbReachable ?? true);
+  const dbLatencySignal = health.latencyMs ?? overview?.overviewSummary?.serviceStatus.dbLatencyMs ?? null;
+  const scopedRawVehicles =
+    selectedSchoolFilter === "all"
+      ? overview?.vehicles ?? []
+      : (overview?.vehicles ?? []).filter((v) => scopedVehicleIds.has(v.id));
+  const scopedInvoices =
+    selectedSchoolFilter === "all"
+      ? overview?.invoices ?? []
+      : (overview?.invoices ?? []).filter((inv) => inv.schoolId === selectedSchoolFilter);
+
+  const scopedSummary: OverviewSummary =
+    selectedSchoolFilter === "all" && overview?.overviewSummary
+      ? {
+          ...overview.overviewSummary,
+          serviceStatus: dbReachableSignal
+            ? overview.overviewSummary.serviceStatus
+            : {
+                ...overview.overviewSummary.serviceStatus,
+                state: "outage",
+                label: "Indisponível",
+                tone: "danger",
+                reason: "Base de dados PostgreSQL inacessível",
+                dbReachable: false,
+                dbLatencyMs: dbLatencySignal,
+              },
+        }
+      : computeOverviewSummary({
+          scope: selectedSchoolFilter === "all" ? "global" : "school",
+          schoolId: selectedSchoolFilter === "all" ? null : selectedSchoolFilter,
+          visibility: rolePerms,
+          dbReachable: dbReachableSignal,
+          dbLatencyMs: dbLatencySignal,
+          contracts: scopedContracts,
+          pendingContractRequestsCount: selectedSchoolFilter === "all" ? pendingLeadsCount : 0,
+          students: scopedStudents,
+          vehicles: scopedRawVehicles,
+          drivers: scopedDriverList,
+          trips: scopedTrips,
+          incidents: scopedIncidents,
+          invoices: rolePerms.canViewFinance ? scopedInvoices : [],
+        });
+
+  const serviceStatus = scopedSummary.serviceStatus;
 
   const availableRouteFilterOptions = Array.from(
     new Set(
@@ -851,19 +987,21 @@ export function AdminView({ onNavigate }: AdminViewProps) {
     }));
 
   // Derive relevant real routes on the monitoring map without ever inventing routes for idle schools
-  const activeRouteIdsOnMap = Array.from(
+  const knownRouteCodes = new Set(allRoutes.map((r) => r.code.trim().toUpperCase()));
+  const activeRouteCodesOnMap = Array.from(
     new Set(
       [
         ...scopedTrips
           .filter((t) => ACTIVE_TRIP_STATES.has(t.state) || t.state === "delayed" || t.state === "incident" || t.lastLat != null)
-          .map((t) => ROUTE_CODE_TO_ID[t.routeCode]),
+          .map((t) => t.routeCode),
         ...filteredLiveFleet
           .filter((v) => v.hasCoordinates || v.status === "on_trip" || v.status === "assigned")
-          .map((v) => v.routeId),
-        ...scopedSchedules.filter((s) => s.active).map((s) => ROUTE_CODE_TO_ID[s.routeCode]),
+          .map((v) => v.routeCode),
+        ...scopedSchedules.filter((s) => s.active).map((s) => s.routeCode),
       ]
-        .filter((id): id is string => Boolean(id && LUANDA_ROUTES[id]))
-        .filter((id) => fleetRouteFilter === "all" || LUANDA_ROUTES[id]?.code === fleetRouteFilter)
+        .map((code) => code.trim().toUpperCase())
+        .filter((code) => Boolean(code) && knownRouteCodes.has(code))
+        .filter((code) => fleetRouteFilter === "all" || code === fleetRouteFilter.trim().toUpperCase())
     )
   );
 
@@ -908,6 +1046,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
           ivaPercent: pricingDraft.ivaPercent,
           companyName: pricingDraft.companyName,
           companyNif: pricingDraft.companyNif,
+          companyAddress: pricingDraft.companyAddress ?? DEFAULT_PRICING.companyAddress,
           multicaixaEntityCode: pricingDraft.multicaixaEntityCode || "00845",
         }),
       });
@@ -962,6 +1101,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
           schoolName: newSchool.trim(),
           municipality: newLocation.trim(),
           payerModel: newPayerModel,
+          serviceModel: newServiceModel,
           busesAllocated: newBuses,
           driversAllocated: newBuses,
           studentsCovered: newStudents,
@@ -972,6 +1112,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
       });
       setContractModalOpen(false);
       setNewSchool("");
+      setNewServiceModel("software");
       showToast("Contrato registado em PostgreSQL com política de PIN duplo.");
       await loadOverview();
     } catch (err) {
@@ -1119,7 +1260,12 @@ export function AdminView({ onNavigate }: AdminViewProps) {
           phone: newUserPhone.trim() || null,
           password: newUserPassword.trim() || undefined,
           primaryRole: newUserRole,
-          schoolId: newUserRole === "school_admin" && newUserSchoolId ? Number(newUserSchoolId) : null,
+          schoolId:
+            (newUserRole === "school_admin" || (newUserRole === "driver" && newUserDriverEmployer === "school")) &&
+            newUserSchoolId
+              ? Number(newUserSchoolId)
+              : null,
+          employerType: newUserRole === "driver" ? newUserDriverEmployer : undefined,
           studentId: newUserRole === "parent_guardian" && newUserStudentId ? Number(newUserStudentId) : null,
         }),
       });
@@ -1130,6 +1276,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
       setNewUserPassword("");
       setNewUserRole("parent_guardian");
       setNewUserSchoolId("");
+      setNewUserDriverEmployer("school");
       setNewUserStudentId("");
       showToast(res.message);
       await loadOverview();
@@ -1274,19 +1421,27 @@ export function AdminView({ onNavigate }: AdminViewProps) {
 
   async function handleSaveVehicle(e: React.FormEvent) {
     e.preventDefault();
-    const resolvedOwnerId = Number(vehicleForm.ownerId || overview?.vehicleOwners[0]?.id || 0);
-    if (!resolvedOwnerId) {
+    const isSchoolOwned = vehicleForm.ownershipType === "school_owned";
+    const assignedSchoolId = vehicleForm.assignedSchoolId ? Number(vehicleForm.assignedSchoolId) : null;
+    const resolvedOwnerId = isSchoolOwned
+      ? null
+      : Number(vehicleForm.ownerId || overview?.vehicleOwners[0]?.id || 0);
+    if (isSchoolOwned && !assignedSchoolId) {
+      showToast("Selecione a escola proprietária da viatura.");
+      return;
+    }
+    if (!isSchoolOwned && !resolvedOwnerId) {
       showToast("Selecione um proprietário da viatura.");
       return;
     }
     setSavingVehicle(true);
     try {
-      const assignedSchoolId = vehicleForm.assignedSchoolId ? Number(vehicleForm.assignedSchoolId) : null;
       if (editingVehicleId) {
         const res = await apiFetch<{ message: string }>(`/api/v1/admin/vehicles/${editingVehicleId}`, {
           method: "PATCH",
           body: JSON.stringify({
             plate: vehicleForm.plate.trim().toUpperCase(),
+            ownershipType: vehicleForm.ownershipType,
             ownerId: resolvedOwnerId,
             assignedSchoolId,
             routeCode: vehicleForm.routeCode.trim(),
@@ -1305,6 +1460,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
           body: JSON.stringify({
             fleetNumber: Number(vehicleForm.fleetNumber),
             plate: vehicleForm.plate.trim().toUpperCase(),
+            ownershipType: vehicleForm.ownershipType,
             ownerId: resolvedOwnerId,
             assignedSchoolId,
             routeCode: vehicleForm.routeCode.trim(),
@@ -1337,8 +1493,8 @@ export function AdminView({ onNavigate }: AdminViewProps) {
       schoolId: defaultSchoolId,
       vehicleId: "",
       driverId: "",
-      routeCode: "ROTA-A",
-      routeName: LUANDA_ROUTES.route_a.name,
+      routeCode: allRoutes[0]?.code ?? "ROTA-A",
+      routeName: allRoutes[0]?.name ?? "Rota A · Morro Bento",
       days: ["mon", "tue", "wed", "thu", "fri"],
       shiftType: "morning",
       departureTime: "06:30",
@@ -1450,6 +1606,260 @@ export function AdminView({ onNavigate }: AdminViewProps) {
     }
   }
 
+  function parsePathTextToCoords(raw: string): [number, number][] {
+    const trimmed = raw.trim();
+    if (!trimmed) return [];
+    if (trimmed.startsWith("[")) {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .filter((pt): pt is [number, number] => Array.isArray(pt) && pt.length >= 2 && Number.isFinite(Number(pt[0])) && Number.isFinite(Number(pt[1])))
+          .map((pt) => [Number(Number(pt[0]).toFixed(6)), Number(Number(pt[1]).toFixed(6))]);
+      }
+    }
+    return trimmed
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const parts = line.split(/[,;\s]+/).map(Number);
+        return parts.length >= 2 && Number.isFinite(parts[0]) && Number.isFinite(parts[1])
+          ? ([Number(parts[0]!.toFixed(6)), Number(parts[1]!.toFixed(6))] as [number, number])
+          : null;
+      })
+      .filter((pt): pt is [number, number] => pt !== null);
+  }
+
+  function openNewRouteModal() {
+    setEditingRouteId(null);
+    setRouteFormError(null);
+    setRouteForm({
+      code: "",
+      name: "",
+      corridor: "",
+      schoolId: selectedSchoolFilter !== "all" ? selectedSchoolFilter : "",
+      active: true,
+      pathText: "",
+    });
+    setRouteModalOpen(true);
+  }
+
+  function openEditRouteModal(route: RouteDto) {
+    setEditingRouteId(route.id);
+    setRouteFormError(null);
+    setRouteForm({
+      code: route.code,
+      name: route.name,
+      corridor: route.corridor ?? "",
+      schoolId: route.schoolId ?? "",
+      active: route.active,
+      pathText: route.pathCoordinates.map(([lat, lng]) => `${lat}, ${lng}`).join("\n"),
+    });
+    setRouteModalOpen(true);
+  }
+
+  async function handleSaveRoute(e: React.FormEvent) {
+    e.preventDefault();
+    setRouteFormError(null);
+    let pathCoordinates: [number, number][] = [];
+    try {
+      pathCoordinates = parsePathTextToCoords(routeForm.pathText);
+    } catch {
+      setRouteFormError("Formato inválido na lista de coordenadas do traçado. Utilize uma linha por ponto: latitude, longitude");
+      return;
+    }
+
+    setSavingRoute(true);
+    try {
+      const payload = {
+        code: routeForm.code.trim().toUpperCase(),
+        name: routeForm.name.trim(),
+        corridor: routeForm.corridor.trim() || null,
+        schoolId: routeForm.schoolId ? Number(routeForm.schoolId) : null,
+        active: routeForm.active,
+        pathCoordinates,
+      };
+      const res = editingRouteId
+        ? await apiFetch<{ route: RouteDto; message: string }>(`/api/v1/admin/routes/${editingRouteId}`, {
+            method: "PATCH",
+            body: JSON.stringify(payload),
+          })
+        : await apiFetch<{ route: RouteDto; message: string }>("/api/v1/admin/routes", {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+      setRouteModalOpen(false);
+      setEditingRouteId(null);
+      if (res.route?.id) {
+        setSelectedAdminRouteId(res.route.id);
+      }
+      showToast(res.message);
+      await loadOverview();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Erro ao guardar rota.";
+      setRouteFormError(msg);
+      showToast(msg);
+    } finally {
+      setSavingRoute(false);
+    }
+  }
+
+  async function handleToggleRouteActive(route: RouteDto) {
+    try {
+      const res = await apiFetch<{ route: RouteDto; message: string }>(`/api/v1/admin/routes/${route.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ active: !route.active }),
+      });
+      showToast(res.message);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao alterar estado da rota.");
+    }
+  }
+
+  function resetStopForm() {
+    setStopFormError(null);
+    setStopForm({
+      id: null,
+      name: "",
+      latitude: "",
+      longitude: "",
+      scheduledTime: "07:00",
+      geofenceRadiusM: 500,
+      appendToPath: true,
+    });
+  }
+
+  function startEditStop(stop: RouteStopDto) {
+    setMapClickMode("pick_stop");
+    setStopFormError(null);
+    setStopForm({
+      id: stop.id ?? null,
+      name: stop.name,
+      latitude: String(stop.latitude),
+      longitude: String(stop.longitude),
+      scheduledTime: stop.scheduledTime || "07:00",
+      geofenceRadiusM: stop.geofenceRadiusM || 500,
+      appendToPath: false,
+    });
+  }
+
+  async function handleAdminRouteMapClick(lat: number, lng: number) {
+    if (!selectedAdminRoute || !rolePerms.canManageRoutes) return;
+    if (mapClickMode === "append_path") {
+      try {
+        const nextPath: [number, number][] = [...selectedAdminRoute.pathCoordinates, [lat, lng]];
+        const res = await apiFetch<{ message: string }>(`/api/v1/admin/routes/${selectedAdminRoute.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ pathCoordinates: nextPath }),
+        });
+        showToast(`Ponto (${lat.toFixed(5)}, ${lng.toFixed(5)}) adicionado ao traçado. ${res.message}`);
+        await loadOverview();
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : "Erro ao atualizar traçado no mapa.");
+      }
+      return;
+    }
+
+    setStopForm((prev) => ({
+      ...prev,
+      latitude: lat.toFixed(6),
+      longitude: lng.toFixed(6),
+    }));
+  }
+
+  async function handleSyncRoutePathFromStops(route: RouteDto) {
+    if (route.stops.length < 2) {
+      showToast("Adicione pelo menos 2 paragens para gerar a linha do traçado.");
+      return;
+    }
+    try {
+      const pathCoordinates = route.stops.map((st) => [st.latitude, st.longitude] as [number, number]);
+      await apiFetch(`/api/v1/admin/routes/${route.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ pathCoordinates }),
+      });
+      showToast(`Traçado da rota ${route.code} atualizado a partir das ${route.stops.length} paragens.`);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao gerar traçado pelas paragens.");
+    }
+  }
+
+  async function handleSaveRouteStop(e: React.FormEvent) {
+    e.preventDefault();
+    if (!selectedAdminRoute) return;
+    setStopFormError(null);
+    const lat = Number(stopForm.latitude);
+    const lng = Number(stopForm.longitude);
+    if (!stopForm.name.trim() || !Number.isFinite(lat) || !Number.isFinite(lng)) {
+      setStopFormError("Indique o nome da paragem e coordenadas válidas (toque no mapa ou escreva latitude/longitude).");
+      return;
+    }
+    setSavingStop(true);
+    try {
+      const payload = {
+        name: stopForm.name.trim(),
+        latitude: lat,
+        longitude: lng,
+        scheduledTime: stopForm.scheduledTime.trim() || "07:00",
+        geofenceRadiusM: Number(stopForm.geofenceRadiusM) || 500,
+        appendToPath: stopForm.appendToPath,
+      };
+      const res = stopForm.id
+        ? await apiFetch<{ message: string }>(
+            `/api/v1/admin/routes/${selectedAdminRoute.id}/stops/${stopForm.id}`,
+            { method: "PATCH", body: JSON.stringify(payload) }
+          )
+        : await apiFetch<{ message: string }>(
+            `/api/v1/admin/routes/${selectedAdminRoute.id}/stops`,
+            { method: "POST", body: JSON.stringify(payload) }
+          );
+      resetStopForm();
+      showToast(res.message);
+      await loadOverview();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Erro ao guardar paragem.";
+      setStopFormError(msg);
+      showToast(msg);
+    } finally {
+      setSavingStop(false);
+    }
+  }
+
+  async function handleDeleteRouteStop(routeId: number, stopId: number, stopName: string) {
+    try {
+      const res = await apiFetch<{ message: string }>(`/api/v1/admin/routes/${routeId}/stops/${stopId}`, {
+        method: "DELETE",
+      });
+      if (stopForm.id === stopId) {
+        resetStopForm();
+      }
+      showToast(res.message || `Paragem "${stopName}" removida.`);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao remover paragem.");
+    }
+  }
+
+  async function handleMoveRouteStop(route: RouteDto, index: number, direction: -1 | 1) {
+    const targetIdx = index + direction;
+    if (targetIdx < 0 || targetIdx >= route.stops.length) return;
+    const reordered = [...route.stops];
+    const [moved] = reordered.splice(index, 1);
+    reordered.splice(targetIdx, 0, moved!);
+    try {
+      const res = await apiFetch<{ message: string }>(`/api/v1/admin/routes/${route.id}/stops/reorder`, {
+        method: "PUT",
+        body: JSON.stringify({ stopIds: reordered.map((s) => s.id) }),
+      });
+      showToast(res.message);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao reordenar paragens.");
+    }
+  }
+
   async function handleSaveDriverEdit(e: React.FormEvent) {
     e.preventDefault();
     if (!editingDriver) return;
@@ -1463,6 +1873,12 @@ export function AdminView({ onNavigate }: AdminViewProps) {
           licenceCategory: editingDriver.licenceCategory.trim(),
           licenceNumber: editingDriver.licenceNumber.trim(),
           licenceExpiry: editingDriver.licenceExpiry.trim(),
+          employerType: editingDriver.employerType,
+          employerSchoolId:
+            editingDriver.employerType === "school" && editingDriver.employerSchoolId
+              ? Number(editingDriver.employerSchoolId)
+              : null,
+          verificationStatus: editingDriver.verificationStatus,
           availabilityStatus: editingDriver.availabilityStatus,
           monthlyCompensationAoa: Number(editingDriver.monthlyCompensationAoa) || 0,
         }),
@@ -1477,71 +1893,33 @@ export function AdminView({ onNavigate }: AdminViewProps) {
     }
   }
 
-  function handleDownloadReport(name: string) {
-    if (name === "Pauta Diária de Presenças e Desembarque") {
-      downloadCsv("mobuss-pauta-presencas-oficial.csv", [
-        ["Aluno", "Escola", "Corredor", "Paragem", "Encarregado", "Política PIN", "PIN", "Estado"],
-        ...(overview?.students ?? []).map((s) => [
-          s.fullName,
-          s.schoolName,
-          s.routeCode,
-          s.stopName,
-          s.guardianName,
-          "Embarque + Desembarque",
-          "•••• (Mascarado)",
-          s.currentJourneyState,
-        ]),
-      ]);
-    } else if (name === "Livro de Faturas Multicaixa Express (Homologação)") {
-      downloadCsv("mobuss-faturas-homologacao.csv", [
-        ["Nº Documento", "Aluno", "Encarregado", "Valor (Kz)", "Ref. Provedor", "Estado", "Estado Fiscal"],
-        ...(overview?.invoices ?? []).map((inv) => [
-          inv.invoiceNumber,
-          inv.studentName,
-          inv.guardianName,
-          inv.amountAoa,
-          inv.providerReference ?? "A aguardar provedor",
-          inv.status,
-          inv.fiscalStatus,
-        ]),
-      ]);
-    } else if (name === "Relatório de folha de salários (Motoristas)") {
-      downloadCsv("mobuss-folha-salarios.csv", [
-        ["Motorista", "Contacto", "Habilitação", "Avaliação", "Viagens Mês", "Salário Bruto (Kz)", "Estado"],
-        ...(overview?.drivers ?? []).map((d) => [
-          d.fullName,
-          d.phone,
-          d.licenceCategory,
-          d.ratingAvg,
-          d.tripsCompleted,
-          d.monthlyCompensationAoa,
-          d.availabilityStatus,
-        ]),
-      ]);
-    } else if (name === "Relatório mensal de viagens") {
-      downloadCsv("mobuss-viagens-ativas.csv", [
-        ["Código Viagem", "Rota", "Turno", "Estado", "GPS", "Inspeção Anti-Esquecimento"],
-        ...(overview?.trips ?? []).map((t) => [
-          t.tripCode,
-          t.routeName,
-          t.legType,
-          t.state,
-          t.gpsStatus,
-          t.emptyBusSweepVerified ? "Confirmada" : "Pendente",
-        ]),
-      ]);
-    } else {
-      downloadDocument(
-        "Relatorio_Emergencias_MoBuss",
-        (overview?.incidents ?? [])
-          .map(
-            (i) =>
-              `• [${i.createdAt}] ${i.category} (${i.severity}) — Estado: ${i.status}\n  Descrição: ${i.description}\n  Reportado por: ${i.reporterName}`
-          )
-          .join("\n\n")
-      );
+  async function handleDownloadReport(
+    reportKey: "students" | "trips" | "attendance" | "invoices" | "incidents" | "vehicles-drivers" | "payroll",
+    label: string,
+    options?: { useReportFilters?: boolean }
+  ) {
+    setDownloadingReportKey(reportKey);
+    try {
+      const useFilters = options?.useReportFilters ?? true;
+      await downloadServerCsv({
+        path: `/api/v1/admin/reports/${reportKey}`,
+        filename: `mobuss-relatorio-${reportKey}.csv`,
+        query: useFilters
+          ? {
+              from: reportFromDate,
+              to: reportToDate,
+              schoolId: reportSchoolId === "all" ? null : reportSchoolId,
+            }
+          : undefined,
+        getAuthToken,
+      });
+      showToast(`Relatório "${label}" exportado em CSV com sucesso.`);
+      await loadOverview();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : `Não foi possível exportar "${label}".`);
+    } finally {
+      setDownloadingReportKey(null);
     }
-    showToast(`Ficheiro "${name}" exportado sem exposição de segredos.`);
   }
 
   return (
@@ -1598,9 +1976,9 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                     <span className="truncate whitespace-nowrap">{id}</span>
                   </span>
 
-                  {id === "Emergências" && (openIncidentsCount + activeHazards.length > 0) && (
+                  {id === "Emergências" && openIncidentsCount > 0 && (
                     <span className="rounded-md px-1.5 py-0.5 text-[10px] font-bold tabular-nums bg-white/15 text-white">
-                      {openIncidentsCount + activeHazards.length}
+                      {openIncidentsCount}
                     </span>
                   )}
                   {id === "Contratos" && pendingLeadsCount > 0 && (
@@ -1702,11 +2080,39 @@ export function AdminView({ onNavigate }: AdminViewProps) {
             <div className="text-xs font-medium text-slide-dim flex items-center gap-x-2.5 gap-y-1 flex-wrap">
               <span className="text-slide-paper/90 font-semibold">Angola · Luanda</span>
               <span aria-hidden="true" className="text-white/25">·</span>
-              <span className={`inline-flex items-center gap-1.5 font-semibold ${health.dbConnected ? "text-emerald-400" : "text-amber-400"}`}>
+              <span
+                className={`inline-flex items-center gap-1.5 font-semibold ${
+                  serviceStatus.tone === "ok"
+                    ? "text-emerald-400"
+                    : serviceStatus.tone === "warn"
+                    ? "text-amber-400"
+                    : serviceStatus.tone === "danger"
+                    ? "text-slide-accent"
+                    : "text-slide-paper"
+                }`}
+                title={serviceStatus.reason}
+              >
+                <span
+                  className={`w-2 h-2 rounded-full shrink-0 ${
+                    serviceStatus.tone === "ok"
+                      ? "bg-emerald-400"
+                      : serviceStatus.tone === "warn"
+                      ? "bg-amber-400"
+                      : serviceStatus.tone === "danger"
+                      ? "bg-slide-accent"
+                      : "bg-slide-dim"
+                  }`}
+                />
+                <span>Serviço: {serviceStatus.label}</span>
+              </span>
+              <span aria-hidden="true" className="text-white/25">·</span>
+              <span className={`inline-flex items-center gap-1.5 font-semibold ${dbReachableSignal ? "text-emerald-400" : "text-slide-accent"}`}>
                 <Database className="w-3.5 h-3.5 shrink-0" />
                 <span className="tabular-nums">
-                  {health.dbConnected
-                    ? `PostgreSQL Online (${health.latencyMs ?? 0}ms)`
+                  {dbReachableSignal
+                    ? `PostgreSQL Online (${dbLatencySignal ?? 0}ms)`
+                    : health.checked
+                    ? "PostgreSQL Indisponível"
                     : "A verificar PostgreSQL..."}
                 </span>
               </span>
@@ -1785,98 +2191,219 @@ export function AdminView({ onNavigate }: AdminViewProps) {
           {/* ================= PAINEL (DASHBOARD) ================= */}
           {tab === "Painel" && (
             <div className="space-y-6">
-              {activeHazards.length > 0 && (
-                <div className="rounded-xl bg-slide-accent/10 border border-slide-accent/35 p-4 flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div className="w-9 h-9 rounded-lg bg-slide-accent/20 text-slide-accent grid place-items-center shrink-0">
-                      <AlertTriangle className="w-4 h-4" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="text-xs font-bold text-white">
-                        Alerta de Via Reportado ({activeHazards[0]!.label})
-                      </div>
-                      <div className="text-xs text-slide-dim truncate">
-                        {activeHazards[0]!.driver} · {activeHazards[0]!.routeCode} · Autocarro {activeHazards[0]!.busNumber}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setTab("Emergências")}
-                      className="px-3 py-1.5 rounded-lg bg-slide-accent text-white text-xs font-bold cursor-pointer hover:opacity-95 whitespace-nowrap"
-                    >
-                      Ver Ocorrências
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        clearHazardForBus(activeHazards[0]!.busNumber);
-                        showToast("Alerta de via limpo.");
-                      }}
-                      className="px-3 py-1.5 rounded-lg bg-slide-surface text-xs font-semibold border border-white/10 cursor-pointer hover:bg-white/10 whitespace-nowrap"
-                    >
-                      Limpar
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* 4 Redesigned Statistics Cards (Dynamically scoped by selected school or All Schools) */}
+              {/* Role-Scoped Real PostgreSQL Statistics Cards */}
               <section aria-label="Resumo operacional" className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-                <DashboardKpiCard
-                  title={selectedSchoolObj ? "Contratos da Escola" : "Contratos Escolares Ativos"}
-                  value={activeContractsCount}
-                  subtitle={
-                    selectedSchoolObj
-                      ? `${selectedSchoolObj.name} · ${selectedSchoolObj.municipality}`
-                      : `${selectableSchools.length} escola(s) · ${pendingLeadsCount} pedido(s) por rever`
-                  }
-                  statusLabel={pendingLeadsCount > 0 && !selectedSchoolObj ? "Requer revisão" : "Ativo"}
-                  statusTone={pendingLeadsCount > 0 && !selectedSchoolObj ? "warn" : "ok"}
-                  Icon={FileSignature}
-                  onClick={() => setTab("Contratos")}
-                />
-                <DashboardKpiCard
-                  title={selectedSchoolObj ? "Viaturas Atribuídas" : "Visão Geral da Frota"}
-                  value={scopedVehicles.length}
-                  secondaryValue={`${busesOnRoadCount} alocadas`}
-                  subtitle={
-                    selectedSchoolObj
-                      ? `${scopedVehicles.filter((v) => v.hasLiveGps).length} c/ GPS ao vivo · ${scopedSchedules.filter((s) => s.active).length} escala(s)`
-                      : `${scopedVehicles.filter((v) => v.status === "available").length} disponíveis · ${overview?.vehicleOwners.length ?? 0} proprietário(s)`
-                  }
-                  statusLabel={scopedVehicles.length > 0 ? "Operacional" : "Sem viaturas"}
-                  statusTone={scopedVehicles.length > 0 ? "ok" : "warn"}
-                  Icon={Bus}
-                  onClick={() => setTab("Frota")}
-                />
-                <DashboardKpiCard
-                  title={selectedSchoolObj ? "Alunos da Escola" : "Alunos Registados"}
-                  value={scopedStudents.length}
-                  secondaryValue={`${scopedStudents.filter((s) => s.enrollmentStatus === "active").length} ativos`}
-                  subtitle={`${liveOps.studentsAwaitingPickupCount} a aguardar embarque · ${liveOps.studentsOnBoardCount} a bordo`}
-                  statusLabel="PIN Obrigatório"
-                  statusTone="neutral"
-                  Icon={GraduationCap}
-                  onClick={() => setTab("Alunos")}
-                />
-                <DashboardKpiCard
-                  title={selectedSchoolObj ? "Ocorrências da Escola" : "Ocorrências em Aberto"}
-                  value={scopedOpenIncidentsCount}
-                  secondaryValue={`${scopedIncidents.length} total`}
-                  subtitle={
-                    scopedHazards.length > 0
-                      ? `${scopedHazards.length} alerta(s) de via em curso`
-                      : scopedOpenIncidentsCount > 0
-                      ? "Ocorrências em aberto na central"
-                      : "Sem ocorrências pendentes"
-                  }
-                  statusLabel={scopedOpenIncidentsCount > 0 ? "Atenção requerida" : "Normal"}
-                  statusTone={scopedOpenIncidentsCount > 0 ? "danger" : "ok"}
-                  Icon={Siren}
-                  onClick={() => setTab("Emergências")}
-                />
+                {rolePerms.canViewContractsKpi && scopedSummary.contracts && (
+                  <DashboardKpiCard
+                    title={selectedSchoolObj ? "Contratos da Escola" : "Contratos Escolares Ativos"}
+                    value={scopedSummary.contracts.total > 0 ? scopedSummary.contracts.active : "sem dados"}
+                    secondaryValue={
+                      scopedSummary.contracts.total > 0 ? `${scopedSummary.contracts.total} total` : undefined
+                    }
+                    subtitle={
+                      selectedSchoolObj
+                        ? `${selectedSchoolObj.name} · ${selectedSchoolObj.municipality}`
+                        : scopedSummary.contracts.total > 0
+                        ? `${selectableSchools.length} escola(s) · ${scopedSummary.contracts.pendingRequests} pedido(s) por rever`
+                        : "sem dados de contratos"
+                    }
+                    statusLabel={
+                      scopedSummary.contracts.total === 0
+                        ? "sem dados"
+                        : scopedSummary.contracts.pendingRequests > 0 && !selectedSchoolObj
+                        ? "Requer revisão"
+                        : scopedSummary.contracts.active > 0
+                        ? "Ativo"
+                        : "Inativo"
+                    }
+                    statusTone={
+                      scopedSummary.contracts.total === 0
+                        ? "neutral"
+                        : scopedSummary.contracts.pendingRequests > 0 && !selectedSchoolObj
+                        ? "warn"
+                        : scopedSummary.contracts.active > 0
+                        ? "ok"
+                        : "neutral"
+                    }
+                    Icon={FileSignature}
+                    onClick={() => setTab("Contratos")}
+                  />
+                )}
+
+                {rolePerms.canViewFleetKpi && scopedSummary.vehicles && (
+                  <DashboardKpiCard
+                    title={selectedSchoolObj ? "Viaturas Atribuídas" : "Frota & Motoristas"}
+                    value={scopedSummary.vehicles.total > 0 ? scopedSummary.vehicles.total : "sem dados"}
+                    secondaryValue={
+                      scopedSummary.drivers && scopedSummary.drivers.total > 0
+                        ? `${scopedSummary.drivers.onDuty}/${scopedSummary.drivers.total} mot.`
+                        : undefined
+                    }
+                    subtitle={
+                      scopedSummary.vehicles.total === 0
+                        ? "sem dados de viaturas"
+                        : `${(scopedSummary.vehicles.byStatus.on_trip ?? 0) + (scopedSummary.vehicles.byStatus.assigned ?? 0)} em operação · ${scopedSummary.vehicles.byStatus.available ?? 0} disp. · ${scopedSummary.vehicles.byStatus.maintenance ?? 0} manut.`
+                    }
+                    statusLabel={
+                      scopedSummary.vehicles.total === 0
+                        ? "sem dados"
+                        : serviceStatus.label
+                    }
+                    statusTone={
+                      scopedSummary.vehicles.total === 0
+                        ? "neutral"
+                        : serviceStatus.tone
+                    }
+                    Icon={Bus}
+                    onClick={() => setTab("Frota")}
+                  />
+                )}
+
+                {rolePerms.canViewStudentsKpi && scopedSummary.students && (
+                  <DashboardKpiCard
+                    title={selectedSchoolObj ? "Alunos Inscritos (Escola)" : "Alunos Inscritos"}
+                    value={scopedSummary.students.total > 0 ? scopedSummary.students.enrolled : "sem dados"}
+                    secondaryValue={
+                      scopedSummary.students.total > 0 ? `${scopedSummary.students.total} registados` : undefined
+                    }
+                    subtitle={
+                      scopedSummary.students.total === 0
+                        ? "sem dados de educandos"
+                        : `${scopedSummary.students.awaitingPickup} a aguardar · ${scopedSummary.students.onBoard} a bordo · ${scopedSummary.students.pendingApproval} por aprovar`
+                    }
+                    statusLabel={
+                      scopedSummary.students.total === 0
+                        ? "sem dados"
+                        : scopedSummary.students.pendingApproval > 0
+                        ? "Aprovações pend."
+                        : "PIN Obrigatório"
+                    }
+                    statusTone={
+                      scopedSummary.students.total === 0
+                        ? "neutral"
+                        : scopedSummary.students.pendingApproval > 0
+                        ? "warn"
+                        : "neutral"
+                    }
+                    Icon={GraduationCap}
+                    onClick={() => setTab("Alunos")}
+                  />
+                )}
+
+                {rolePerms.canViewIncidentsKpi && scopedSummary.incidents && (
+                  <DashboardKpiCard
+                    title={selectedSchoolObj ? "Ocorrências da Escola" : "Ocorrências em Aberto"}
+                    value={scopedSummary.incidents.total > 0 ? scopedSummary.incidents.open : "sem dados"}
+                    secondaryValue={
+                      scopedSummary.incidents.total > 0 ? `${scopedSummary.incidents.total} total` : undefined
+                    }
+                    subtitle={
+                      scopedSummary.incidents.total === 0
+                        ? "sem dados de ocorrências"
+                        : scopedSummary.incidents.criticalOpen > 0
+                        ? `${scopedSummary.incidents.criticalOpen} crítica(s) · ${scopedSummary.incidents.delayReportsOpen} atraso(s)`
+                        : scopedSummary.incidents.open > 0
+                        ? `${scopedSummary.incidents.open} ocorrência(s) em tratamento`
+                        : "Todas as ocorrências resolvidas"
+                    }
+                    statusLabel={
+                      scopedSummary.incidents.total === 0
+                        ? "sem dados"
+                        : scopedSummary.incidents.criticalOpen > 0
+                        ? "Crítico"
+                        : scopedSummary.incidents.open > 0
+                        ? "Atenção requerida"
+                        : "Resolvidas"
+                    }
+                    statusTone={
+                      scopedSummary.incidents.total === 0
+                        ? "neutral"
+                        : scopedSummary.incidents.criticalOpen > 0 || scopedSummary.incidents.open > 0
+                        ? "danger"
+                        : "ok"
+                    }
+                    Icon={Siren}
+                    onClick={() => setTab("Emergências")}
+                  />
+                )}
+
+                {rolePerms.canViewFinanceKpi && scopedSummary.finance && (
+                  <DashboardKpiCard
+                    title="Faturas Pagas (Mês)"
+                    value={
+                      scopedSummary.finance.totalInvoicesThisMonth > 0
+                        ? formatAOA(scopedSummary.finance.paidThisMonthAoa)
+                        : "sem dados"
+                    }
+                    secondaryValue={
+                      scopedSummary.finance.totalInvoicesThisMonth > 0
+                        ? `${scopedSummary.finance.paidThisMonthCount} paga(s)`
+                        : undefined
+                    }
+                    subtitle={
+                      scopedSummary.finance.totalInvoicesThisMonth === 0
+                        ? "sem dados de faturação neste mês"
+                        : `Pendentes mês: ${scopedSummary.finance.pendingThisMonthCount} (${formatAOA(scopedSummary.finance.pendingThisMonthAoa)})`
+                    }
+                    statusLabel={
+                      scopedSummary.finance.totalInvoicesThisMonth === 0
+                        ? "sem dados"
+                        : scopedSummary.finance.pendingThisMonthCount > 0
+                        ? "Por conciliar"
+                        : "Conciliado"
+                    }
+                    statusTone={
+                      scopedSummary.finance.totalInvoicesThisMonth === 0
+                        ? "neutral"
+                        : scopedSummary.finance.pendingThisMonthCount > 0
+                        ? "warn"
+                        : "ok"
+                    }
+                    Icon={CreditCard}
+                    onClick={() => setTab("Finanças")}
+                  />
+                )}
+
+                {rolePerms.canViewDocumentsKpi && scopedSummary.documents && (
+                  <DashboardKpiCard
+                    title="Documentos a Expirar (30d)"
+                    value={
+                      scopedSummary.documents.checkedCount > 0
+                        ? scopedSummary.documents.expiringNext30DaysTotal
+                        : "sem dados"
+                    }
+                    secondaryValue={
+                      scopedSummary.documents.expiredTotal > 0
+                        ? `${scopedSummary.documents.expiredTotal} expirado(s)`
+                        : undefined
+                    }
+                    subtitle={
+                      scopedSummary.documents.checkedCount === 0
+                        ? "sem dados de documentação"
+                        : `${scopedSummary.documents.vehiclesDnvtExpiring30Days} DNVT · ${scopedSummary.documents.driversLicenceExpiring30Days} carta(s)`
+                    }
+                    statusLabel={
+                      scopedSummary.documents.checkedCount === 0
+                        ? "sem dados"
+                        : scopedSummary.documents.expiredTotal > 0
+                        ? "Expirado"
+                        : scopedSummary.documents.expiringNext30DaysTotal > 0
+                        ? "Renovar em 30d"
+                        : "Em dia"
+                    }
+                    statusTone={
+                      scopedSummary.documents.checkedCount === 0
+                        ? "neutral"
+                        : scopedSummary.documents.expiredTotal > 0
+                        ? "danger"
+                        : scopedSummary.documents.expiringNext30DaysTotal > 0
+                        ? "warn"
+                        : "ok"
+                    }
+                    Icon={ShieldCheck}
+                    onClick={() => setTab("DNVT")}
+                  />
+                )}
               </section>
 
               {/* Quick Actions (Authorized Only) + Live Operations Overview */}
@@ -1888,73 +2415,172 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                       <h2 className="font-bold text-sm text-slide-paper flex items-center gap-2" style={{ fontFamily: "var(--font-display)" }}>
                         <Navigation className="w-4 h-4 text-slide-accent" />
                         <span>
-                          {selectedSchoolObj ? `Operações Ao Vivo · ${selectedSchoolObj.name}` : "Operações Ao Vivo · Toda a Frota"}
+                          {selectedSchoolObj ? `Operações Ao Vivo · ${selectedSchoolObj.name}` : "Operações Ao Vivo · Base de Dados"}
                         </span>
                       </h2>
                       <p className="text-xs text-slide-dim mt-0.5">
-                        Telemetria operacional em tempo real proveniente do PostgreSQL e WebSocket.
+                        Telemetria operacional em tempo real ({scopedSummary.referenceDate}) proveniente do PostgreSQL e WebSocket.
                       </p>
                     </div>
                     <span className="text-[11px] font-semibold text-slide-dim tabular-nums">
-                      {scopedTrips.length} registo(s) de viagem hoje
+                      {scopedSummary.tripsToday && scopedSummary.tripsToday.total > 0
+                        ? `${scopedSummary.tripsToday.total} viagem(ns) hoje`
+                        : "Viagens hoje: sem dados"}
                     </span>
                   </div>
 
                   <div className="grid grid-cols-2 sm:grid-cols-3 border border-white/10 rounded-xl bg-slide-bg overflow-hidden divide-x divide-y divide-white/10">
                     <div className="p-3.5">
-                      <div className="text-[11px] font-medium text-slide-dim">Viagens Ativas</div>
-                      <div className="text-xl font-black text-white tabular-nums mt-0.5">{liveOps.activeTripsCount}</div>
+                      <div className="text-[11px] font-medium text-slide-dim">Viagens Hoje</div>
+                      <div className="text-xl font-black text-white tabular-nums mt-0.5">
+                        {!rolePerms.canViewTripsKpi
+                          ? "Restrito"
+                          : scopedSummary.tripsToday && scopedSummary.tripsToday.total > 0
+                          ? scopedSummary.tripsToday.total
+                          : "sem dados"}
+                      </div>
                       <div className="text-[11px] text-slide-dim mt-0.5 tabular-nums">
-                        {liveOps.scheduledTripsCount} agendada(s)
+                        {!rolePerms.canViewTripsKpi
+                          ? "Fora do âmbito do perfil"
+                          : scopedSummary.tripsToday && scopedSummary.tripsToday.total > 0
+                          ? `${scopedSummary.tripsToday.active} em curso · ${scopedSummary.tripsToday.scheduled} agendada(s)`
+                          : "Sem viagens para hoje"}
                       </div>
                     </div>
+
                     <div className="p-3.5">
-                      <div className="text-[11px] font-medium text-slide-dim">Viaturas em Movimento</div>
-                      <div className="text-xl font-black text-white tabular-nums mt-0.5">{liveOps.vehiclesMovingCount}</div>
-                      <div className="text-[11px] text-slide-dim mt-0.5">
-                        {liveOps.vehiclesMovingCount > 0 ? "GPS ou estado em rota" : "Sem viaturas em rota"}
+                      <div className="text-[11px] font-medium text-slide-dim">Estado do Serviço</div>
+                      <div
+                        className={`text-xl font-black mt-0.5 ${
+                          serviceStatus.tone === "ok"
+                            ? "text-emerald-400"
+                            : serviceStatus.tone === "warn"
+                            ? "text-amber-400"
+                            : serviceStatus.tone === "danger"
+                            ? "text-slide-accent"
+                            : "text-white"
+                        }`}
+                      >
+                        {serviceStatus.label}
+                      </div>
+                      <div className="text-[11px] text-slide-dim mt-0.5 tabular-nums">
+                        GPS: {serviceStatus.liveGpsTripsCount} ao vivo · {serviceStatus.staleGpsTripsCount} desat.
                       </div>
                     </div>
+
                     <div className="p-3.5">
                       <div className="text-[11px] font-medium text-slide-dim">Motoristas em Serviço</div>
                       <div className="text-xl font-black text-white tabular-nums mt-0.5">
-                        {liveOps.driversOnDutyCount}
-                        <span className="text-xs font-semibold text-slide-dim">/{liveOps.totalDriversCount}</span>
+                        {!rolePerms.canViewDriversKpi
+                          ? "Restrito"
+                          : scopedSummary.drivers && scopedSummary.drivers.total > 0
+                          ? (
+                            <>
+                              {scopedSummary.drivers.onDuty}
+                              <span className="text-xs font-semibold text-slide-dim">/{scopedSummary.drivers.total}</span>
+                            </>
+                          )
+                          : "sem dados"}
                       </div>
-                      <div className="text-[11px] text-slide-dim mt-0.5">Equipa ativa no turno</div>
+                      <div className="text-[11px] text-slide-dim mt-0.5">
+                        {!rolePerms.canViewDriversKpi
+                          ? "Fora do âmbito do perfil"
+                          : scopedSummary.drivers && scopedSummary.drivers.total > 0
+                          ? `${scopedSummary.drivers.available} disponível(is) · ${scopedSummary.drivers.offDuty} folga`
+                          : "sem dados de motoristas"}
+                      </div>
                     </div>
+
                     <div className="p-3.5">
                       <div className="text-[11px] font-medium text-slide-dim">Viagens com Atraso</div>
-                      <div className={`text-xl font-black tabular-nums mt-0.5 ${liveOps.delayedTripsCount > 0 ? "text-amber-400" : "text-white"}`}>
-                        {liveOps.delayedTripsCount}
+                      <div
+                        className={`text-xl font-black tabular-nums mt-0.5 ${
+                          (scopedSummary.delayedTripsCount ?? 0) > 0 ? "text-amber-400" : "text-white"
+                        }`}
+                      >
+                        {!rolePerms.canViewTripsKpi
+                          ? "Restrito"
+                          : scopedSummary.tripsToday && scopedSummary.tripsToday.total === 0 && (scopedSummary.delayedTripsCount ?? 0) === 0
+                          ? "sem dados"
+                          : scopedSummary.delayedTripsCount ?? "sem dados"}
                       </div>
-                      <div className="text-[11px] text-slide-dim mt-0.5">Atrasos ou ocorrências</div>
+                      <div className="text-[11px] text-slide-dim mt-0.5">
+                        {!rolePerms.canViewTripsKpi
+                          ? "Fora do âmbito do perfil"
+                          : (scopedSummary.delayedTripsCount ?? 0) > 0
+                          ? "Atrasos reportados em curso"
+                          : scopedSummary.tripsToday && scopedSummary.tripsToday.total > 0
+                          ? "Sem atrasos registados"
+                          : "Sem viagens ativas"}
+                      </div>
                     </div>
+
                     <div className="p-3.5">
                       <div className="text-[11px] font-medium text-slide-dim">Alunos por Recolher</div>
                       <div className="text-xl font-black text-white tabular-nums mt-0.5">
-                        {liveOps.studentsAwaitingPickupCount}
+                        {!rolePerms.canViewStudentsKpi
+                          ? "Restrito"
+                          : scopedSummary.students && scopedSummary.students.total > 0
+                          ? scopedSummary.students.awaitingPickup
+                          : "sem dados"}
                       </div>
                       <div className="text-[11px] text-slide-dim mt-0.5 tabular-nums">
-                        {liveOps.studentsOnBoardCount} a bordo neste momento
+                        {!rolePerms.canViewStudentsKpi
+                          ? "Fora do âmbito do perfil"
+                          : scopedSummary.students && scopedSummary.students.total > 0
+                          ? `${scopedSummary.students.onBoard} a bordo · ${scopedSummary.students.enrolled} ativos`
+                          : "sem dados de alunos"}
                       </div>
                     </div>
+
                     <div className="p-3.5">
-                      <div className="text-[11px] font-medium text-slide-dim">Alertas Operacionais</div>
-                      <div className={`text-xl font-black tabular-nums mt-0.5 ${liveOps.activeAlertsCount > 0 ? "text-slide-accent" : "text-emerald-400"}`}>
-                        {liveOps.activeAlertsCount}
+                      <div className="text-[11px] font-medium text-slide-dim">
+                        {rolePerms.canViewFinanceKpi ? "Faturas Pendentes (Mês)" : "Ocorrências Críticas"}
                       </div>
-                      <div className="text-[11px] text-slide-dim mt-0.5">Ocorrências e avisos de via</div>
+                      <div
+                        className={`text-xl font-black tabular-nums mt-0.5 ${
+                          rolePerms.canViewFinanceKpi
+                            ? (scopedSummary.finance?.pendingThisMonthCount ?? 0) > 0
+                              ? "text-amber-400"
+                              : "text-white"
+                            : serviceStatus.openCriticalIncidentsCount > 0
+                            ? "text-slide-accent"
+                            : "text-emerald-400"
+                        }`}
+                      >
+                        {rolePerms.canViewFinanceKpi
+                          ? scopedSummary.finance && scopedSummary.finance.totalInvoicesThisMonth > 0
+                            ? formatAOA(scopedSummary.finance.pendingThisMonthAoa)
+                            : "sem dados"
+                          : rolePerms.canViewIncidentsKpi
+                          ? scopedSummary.incidents && scopedSummary.incidents.total > 0
+                            ? serviceStatus.openCriticalIncidentsCount
+                            : "sem dados"
+                          : "Restrito"}
+                      </div>
+                      <div className="text-[11px] text-slide-dim mt-0.5">
+                        {rolePerms.canViewFinanceKpi
+                          ? scopedSummary.finance && scopedSummary.finance.totalInvoicesThisMonth > 0
+                            ? `${scopedSummary.finance.pendingThisMonthCount} fatura(s) pendente(s)`
+                            : "sem dados este mês"
+                          : rolePerms.canViewIncidentsKpi
+                          ? `${scopedSummary.incidents?.open ?? 0} ocorrência(s) em aberto`
+                          : "Fora do âmbito do perfil"}
+                      </div>
                     </div>
                   </div>
 
                   {/* Real PostgreSQL Active / Scheduled Trips List or Honest Empty State */}
-                  {scopedTrips.length === 0 ? (
+                  {!rolePerms.canViewTripsKpi ? (
+                    <div className="rounded-xl bg-slide-bg border border-white/10 px-4 py-3 text-xs text-slide-dim">
+                      O acompanhamento detalhado de viagens está reservado aos perfis operacionais, de frota e de segurança.
+                    </div>
+                  ) : scopedTrips.length === 0 ? (
                     <div className="rounded-xl bg-slide-bg border border-white/10 px-4 py-3 text-xs text-slide-dim flex flex-wrap items-center justify-between gap-3">
                       <span>
                         {selectedSchoolObj
-                          ? `Sem viagens ativas registadas para ${selectedSchoolObj.name}. Nenhuma rota simulada será exibida como operação real.`
-                          : "Sem viagens registadas no PostgreSQL para este turno. Os dados reais serão apresentados assim que um motorista iniciar viagem."}
+                          ? `sem dados · Sem viagens registadas para ${selectedSchoolObj.name}.`
+                          : "sem dados · Sem viagens registadas no PostgreSQL."}
                       </span>
                       {rolePerms.canManageRouteSchedules && (
                         <button
@@ -2026,6 +2652,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                           setVehicleForm({
                             fleetNumber: String((overview?.vehicles.length ?? 0) + 1),
                             plate: "",
+                            ownershipType: "mobuss_owned",
                             ownerId: overview?.vehicleOwners[0]?.id ?? "",
                             assignedSchoolId: selectedSchoolFilter !== "all" ? selectedSchoolFilter : "",
                             routeCode: "ROTA-A",
@@ -2143,6 +2770,265 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                 </div>
               </div>
 
+              {/* Real Database Charts & Role-Scoped Breakdown Row */}
+              <section aria-label="Gráficos e indicadores da base de dados" className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                {rolePerms.canViewFleetKpi && scopedSummary.vehicles && (
+                  <Card
+                    title="Frota por Estado (Base de Dados)"
+                    action={
+                      <span className="text-[11px] font-semibold text-slide-dim tabular-nums">
+                        {scopedSummary.vehicles.total > 0 ? `${scopedSummary.vehicles.total} viatura(s)` : "sem dados"}
+                      </span>
+                    }
+                  >
+                    {scopedSummary.vehicles.total === 0 ? (
+                      <div className="rounded-xl bg-slide-bg border border-white/10 p-4 text-xs text-slide-dim">
+                        sem dados
+                      </div>
+                    ) : (
+                      <div className="space-y-2.5">
+                        {scopedSummary.vehicles.statusSeries.map((item) => {
+                          const pct = Math.round((item.count / scopedSummary.vehicles!.total) * 100);
+                          return (
+                            <div key={item.key} className="space-y-1 text-xs">
+                              <div className="flex items-center justify-between">
+                                <span className="text-slide-paper font-medium">{item.label}</span>
+                                <span className="font-mono font-bold text-white tabular-nums">
+                                  {item.count} ({pct}%)
+                                </span>
+                              </div>
+                              <div className="h-2 rounded-full bg-slide-bg overflow-hidden border border-white/5">
+                                <div
+                                  className={`h-full rounded-full transition-all ${
+                                    item.key === "on_trip"
+                                      ? "bg-emerald-400"
+                                      : item.key === "assigned"
+                                      ? "bg-sky-400"
+                                      : item.key === "available"
+                                      ? "bg-slide-ok"
+                                      : item.key === "maintenance"
+                                      ? "bg-amber-400"
+                                      : "bg-slide-accent"
+                                  }`}
+                                  style={{ width: `${pct}%` }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </Card>
+                )}
+
+                {rolePerms.canViewTripsKpi && scopedSummary.tripsToday && (
+                  <Card
+                    title={`Viagens Hoje por Estado (${scopedSummary.referenceDate})`}
+                    action={
+                      <span className="text-[11px] font-semibold text-slide-dim tabular-nums">
+                        {scopedSummary.tripsToday.total > 0 ? `${scopedSummary.tripsToday.total} viagem(ns)` : "sem dados"}
+                      </span>
+                    }
+                  >
+                    {scopedSummary.tripsToday.total === 0 ? (
+                      <div className="rounded-xl bg-slide-bg border border-white/10 p-4 text-xs text-slide-dim">
+                        sem dados
+                      </div>
+                    ) : (
+                      <div className="space-y-2.5">
+                        {scopedSummary.tripsToday.stateSeries.map((item) => {
+                          const pct = Math.round((item.count / scopedSummary.tripsToday!.total) * 100);
+                          return (
+                            <div key={item.key} className="space-y-1 text-xs">
+                              <div className="flex items-center justify-between">
+                                <span className="text-slide-paper font-medium">{item.label}</span>
+                                <span className="font-mono font-bold text-white tabular-nums">
+                                  {item.count} ({pct}%)
+                                </span>
+                              </div>
+                              <div className="h-2 rounded-full bg-slide-bg overflow-hidden border border-white/5">
+                                <div
+                                  className={`h-full rounded-full transition-all ${
+                                    item.key === "in_progress"
+                                      ? "bg-emerald-400"
+                                      : item.key === "scheduled"
+                                      ? "bg-sky-400"
+                                      : item.key === "delayed"
+                                      ? "bg-amber-400"
+                                      : item.key === "completed"
+                                      ? "bg-slide-ok"
+                                      : "bg-slide-accent"
+                                  }`}
+                                  style={{ width: `${pct}%` }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </Card>
+                )}
+
+                {rolePerms.canViewFinanceKpi && scopedSummary.finance && (
+                  <Card
+                    title={`Faturação do Mês (${scopedSummary.finance.month})`}
+                    action={
+                      <button
+                        type="button"
+                        onClick={() => setTab("Finanças")}
+                        className="text-[11px] font-bold text-slide-accent hover:underline cursor-pointer"
+                      >
+                        Abrir Finanças →
+                      </button>
+                    }
+                  >
+                    {scopedSummary.finance.totalInvoicesThisMonth === 0 ? (
+                      <div className="rounded-xl bg-slide-bg border border-white/10 p-4 text-xs text-slide-dim">
+                        sem dados
+                      </div>
+                    ) : (
+                      <div className="space-y-3 text-xs">
+                        {(() => {
+                          const totalAoa =
+                            scopedSummary.finance!.paidThisMonthAoa + scopedSummary.finance!.pendingThisMonthAoa;
+                          const paidPct =
+                            totalAoa > 0 ? Math.round((scopedSummary.finance!.paidThisMonthAoa / totalAoa) * 100) : 0;
+                          const pendingPct =
+                            totalAoa > 0 ? Math.round((scopedSummary.finance!.pendingThisMonthAoa / totalAoa) * 100) : 0;
+                          return (
+                            <>
+                              <div className="space-y-1">
+                                <div className="flex justify-between">
+                                  <span className="text-emerald-300 font-semibold">
+                                    Pagas este mês ({scopedSummary.finance!.paidThisMonthCount})
+                                  </span>
+                                  <span className="font-mono font-bold text-white tabular-nums">
+                                    {formatAOA(scopedSummary.finance!.paidThisMonthAoa)}
+                                  </span>
+                                </div>
+                                <div className="h-2 rounded-full bg-slide-bg overflow-hidden border border-white/5">
+                                  <div className="h-full rounded-full bg-emerald-400" style={{ width: `${paidPct}%` }} />
+                                </div>
+                              </div>
+                              <div className="space-y-1">
+                                <div className="flex justify-between">
+                                  <span className="text-amber-300 font-semibold">
+                                    Pendentes este mês ({scopedSummary.finance!.pendingThisMonthCount})
+                                  </span>
+                                  <span className="font-mono font-bold text-white tabular-nums">
+                                    {formatAOA(scopedSummary.finance!.pendingThisMonthAoa)}
+                                  </span>
+                                </div>
+                                <div className="h-2 rounded-full bg-slide-bg overflow-hidden border border-white/5">
+                                  <div className="h-full rounded-full bg-amber-400" style={{ width: `${pendingPct}%` }} />
+                                </div>
+                              </div>
+                            </>
+                          );
+                        })()}
+                      </div>
+                    )}
+                  </Card>
+                )}
+
+                <Card
+                  title="Sinais do Estado de Serviço"
+                  action={
+                    <span
+                      className={`text-[11px] font-bold ${
+                        serviceStatus.tone === "ok"
+                          ? "text-emerald-400"
+                          : serviceStatus.tone === "warn"
+                          ? "text-amber-400"
+                          : serviceStatus.tone === "danger"
+                          ? "text-slide-accent"
+                          : "text-slide-dim"
+                      }`}
+                    >
+                      {serviceStatus.label}
+                    </span>
+                  }
+                >
+                  <div className="space-y-2 text-xs">
+                    <div className="flex items-center justify-between rounded-lg bg-slide-bg border border-white/10 px-3 py-2">
+                      <span className="text-slide-dim">Base de Dados PostgreSQL</span>
+                      <span className={`font-bold tabular-nums ${serviceStatus.dbReachable ? "text-emerald-400" : "text-slide-accent"}`}>
+                        {serviceStatus.dbReachable ? `Acessível (${serviceStatus.dbLatencyMs ?? 0}ms)` : "Inacessível"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-lg bg-slide-bg border border-white/10 px-3 py-2">
+                      <span className="text-slide-dim">Telemetria GPS Ativa vs Desat.</span>
+                      <span className="font-mono font-bold text-white tabular-nums">
+                        {serviceStatus.liveGpsTripsCount === 0 && serviceStatus.staleGpsTripsCount === 0
+                          ? "sem dados"
+                          : `${serviceStatus.liveGpsTripsCount} ao vivo / ${serviceStatus.staleGpsTripsCount} desat.`}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-lg bg-slide-bg border border-white/10 px-3 py-2">
+                      <span className="text-slide-dim">Ocorrências Críticas Abertas</span>
+                      <span
+                        className={`font-mono font-bold tabular-nums ${
+                          serviceStatus.openCriticalIncidentsCount > 0 ? "text-slide-accent" : "text-emerald-400"
+                        }`}
+                      >
+                        {rolePerms.canViewIncidentsKpi
+                          ? scopedSummary.incidents && scopedSummary.incidents.total === 0
+                            ? "sem dados"
+                            : serviceStatus.openCriticalIncidentsCount
+                          : "Restrito"}
+                      </span>
+                    </div>
+                  </div>
+                </Card>
+
+                {rolePerms.canViewDocumentsKpi && scopedSummary.documents && (
+                  <Card
+                    title="Documentação a Expirar (Próx. 30 Dias)"
+                    action={
+                      <button
+                        type="button"
+                        onClick={() => setTab("DNVT")}
+                        className="text-[11px] font-bold text-slide-accent hover:underline cursor-pointer"
+                      >
+                        Ver DNVT →
+                      </button>
+                    }
+                  >
+                    {scopedSummary.documents.checkedCount === 0 || scopedSummary.documents.items.length === 0 ? (
+                      <div className="rounded-xl bg-slide-bg border border-white/10 p-4 text-xs text-slide-dim">
+                        {scopedSummary.documents.checkedCount === 0
+                          ? "sem dados"
+                          : "sem dados · Nenhum documento expira nos próximos 30 dias."}
+                      </div>
+                    ) : (
+                      <div className="space-y-2 text-xs">
+                        {scopedSummary.documents.items.slice(0, 4).map((doc) => (
+                          <div
+                            key={`${doc.entityType}-${doc.entityId}-${doc.documentType}`}
+                            className="rounded-lg bg-slide-bg border border-white/10 px-3 py-2 flex items-center justify-between gap-2"
+                          >
+                            <div className="min-w-0">
+                              <div className="font-bold text-white truncate">{doc.title}</div>
+                              <div className="text-[11px] text-slide-dim truncate">
+                                {doc.documentType} · Val. {doc.expiryDate}
+                              </div>
+                            </div>
+                            <span
+                              className={`text-[11px] font-bold shrink-0 tabular-nums ${
+                                doc.status === "expired" ? "text-slide-accent" : "text-amber-300"
+                              }`}
+                            >
+                              {doc.daysRemaining < 0 ? `Expirou há ${Math.abs(doc.daysRemaining)}d` : `${doc.daysRemaining}d`}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </Card>
+                )}
+              </section>
+
               {/* Preserved Hub Route Simulator (Strict Separation from Real Live Operations) */}
               {APP_TARGET === "hub" && (
                 <div className="rounded-2xl bg-slide-surface border border-white/10 p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
@@ -2162,13 +3048,13 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
                     <select
-                      value={selectedRouteId}
-                      onChange={(e) => setSelectedRouteId(e.target.value)}
+                      value={selectedSimRouteCode}
+                      onChange={(e) => setSelectedSimRouteCode(e.target.value)}
                       aria-label="Rota de simulação"
                       className="rounded-xl bg-slide-bg border border-white/15 px-2.5 py-1.5 text-xs text-white outline-none"
                     >
-                      {Object.values(LUANDA_ROUTES).map((r) => (
-                        <option key={r.id} value={r.id}>
+                      {(allRoutes.filter((r) => r.active).length > 0 ? allRoutes.filter((r) => r.active) : allRoutes).map((r) => (
+                        <option key={r.id} value={r.code}>
                           Simular {r.code}
                         </option>
                       ))}
@@ -2400,7 +3286,8 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                     <LuandaMap
                       progress={0}
                       multiRouteMode
-                      visibleRouteIds={activeRouteIdsOnMap}
+                      routes={allRoutes}
+                      visibleRouteCodes={activeRouteCodesOnMap}
                       enableClustering
                       scopeKey={`${selectedSchoolFilter}-${fleetRouteFilter}-${fleetStatusFilter}-${fleetTripFilter}`}
                       darkMode
@@ -2770,7 +3657,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
               </Card>
 
               {/* Active Contracts Table */}
-              <Table head={["Contrato / Escola", "Município", "Modelo Pagador", "Política PIN", "Frota / Alunos", "Valor Mensal", "Estado"]}>
+              <Table head={["Contrato / Escola", "Município", "Modelo Serviço", "Modelo Pagador", "Política PIN", "Frota / Alunos", "Valor Mensal", "Estado"]}>
                 {contractsList.map((c) => (
                   <tr key={c.id} className="hover:bg-white/[0.03] text-xs">
                     <td className="p-3.5">
@@ -2778,6 +3665,17 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                       <div className="text-[11px] font-mono text-slide-dim">{c.contractNumber}</div>
                     </td>
                     <td className="p-3.5 text-slide-dim">{c.municipality}</td>
+                    <td className="p-3.5">
+                      <span
+                        className={`px-2 py-0.5 rounded text-[11px] font-semibold ${
+                          c.serviceModel === "full_service"
+                            ? "bg-slide-accent/20 text-slide-accent"
+                            : "bg-emerald-500/15 text-emerald-300"
+                        }`}
+                      >
+                        {c.serviceModel === "full_service" ? "Serviço Completo" : "Software"}
+                      </span>
+                    </td>
                     <td className="p-3.5">
                       <span className="px-2 py-0.5 rounded bg-white/10 text-[11px] font-semibold">
                         {PAYER_LABELS[c.payerModel] ?? c.payerModel}
@@ -2790,7 +3688,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                       {c.busesAllocated} bus · {c.studentsCovered} alunos
                     </td>
                     <td className="p-3.5 font-mono font-bold text-slide-accent tabular-nums">
-                      {formatAOA(c.monthlyValueAoa)}
+                      {c.monthlyValueAoa != null ? formatAOA(c.monthlyValueAoa) : "Restrito"}
                     </td>
                     <td className="p-3.5">
                       <StatusBadge s={c.status === "active" ? "Ativo" : c.status} />
@@ -2873,7 +3771,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                       </div>
                       <div className="text-slide-dim font-mono text-[11px]">{owner.phone}</div>
                       <div className="text-[11px] text-slide-ok font-semibold">
-                        Acerto: {formatAOA(owner.monthlySettlementAoa)} ({owner.settlementModel})
+                        Acerto: {owner.monthlySettlementAoa != null ? formatAOA(owner.monthlySettlementAoa) : "Restrito"} ({owner.settlementModel})
                       </div>
                     </div>
                   ))}
@@ -2881,28 +3779,61 @@ export function AdminView({ onNavigate }: AdminViewProps) {
               </Card>
 
               <div className="flex flex-wrap justify-between items-center gap-3">
-                <span className="text-xs text-slide-dim">
-                  Frota registada e alocação de motoristas verificados ({vehiclesList.length} viatura(s)).
-                </span>
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <span className="text-slide-dim">
+                    Frota registada ({vehiclesList.length} viatura(s)):
+                  </span>
+                  <select
+                    value={fleetOwnershipFilter}
+                    onChange={(e) =>
+                      setFleetOwnershipFilter(
+                        e.target.value as "all" | "school_owned" | "mobuss_owned" | "partner_owned"
+                      )
+                    }
+                    aria-label="Filtrar viaturas por proprietário"
+                    className="rounded-xl bg-slide-surface border border-white/15 px-3 py-1.5 text-xs text-white outline-none"
+                  >
+                    <option value="all">Todos os Proprietários</option>
+                    <option value="school_owned">Próprias da Escola</option>
+                    <option value="mobuss_owned">Frota MôBuss</option>
+                    <option value="partner_owned">Parceiros Independentes</option>
+                  </select>
+                  <select
+                    value={fleetAdminSchoolFilter === "all" ? "all" : String(fleetAdminSchoolFilter)}
+                    onChange={(e) =>
+                      setFleetAdminSchoolFilter(e.target.value === "all" ? "all" : Number(e.target.value))
+                    }
+                    aria-label="Filtrar viaturas por escola"
+                    className="rounded-xl bg-slide-surface border border-white/15 px-3 py-1.5 text-xs text-white outline-none"
+                  >
+                    <option value="all">Todas as Escolas</option>
+                    {(overview?.schools ?? []).map((sc) => (
+                      <option key={sc.id} value={sc.id}>
+                        {sc.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
                 <button
                   type="button"
-                    onClick={() => {
-                      setEditingVehicleId(null);
-                      setVehicleForm({
-                        fleetNumber: String((overview?.vehicles.length ?? 0) + 1),
-                        plate: "",
-                        ownerId: overview?.vehicleOwners[0]?.id ?? "",
-                        assignedSchoolId: "",
-                        routeCode: "ROTA-A",
-                        capacity: 22,
-                        dnvtExpiry: "2027-12-31",
-                        dnvtStatus: "valid",
-                        insuranceProvider: "ENSA Seguros de Angola",
-                        insuranceStatus: "valid",
-                        status: "available",
-                      });
-                      setVehicleModalOpen(true);
-                    }}
+                  onClick={() => {
+                    setEditingVehicleId(null);
+                    setVehicleForm({
+                      fleetNumber: String((overview?.vehicles.length ?? 0) + 1),
+                      plate: "",
+                      ownershipType: "mobuss_owned",
+                      ownerId: overview?.vehicleOwners[0]?.id ?? "",
+                      assignedSchoolId: fleetAdminSchoolFilter !== "all" ? fleetAdminSchoolFilter : "",
+                      routeCode: "ROTA-A",
+                      capacity: 22,
+                      dnvtExpiry: "2027-12-31",
+                      dnvtStatus: "valid",
+                      insuranceProvider: "ENSA Seguros de Angola",
+                      insuranceStatus: "valid",
+                      status: "available",
+                    });
+                    setVehicleModalOpen(true);
+                  }}
                   className="rounded-xl bg-slide-accent text-white px-3.5 py-2 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
                 >
                   <Plus className="w-3.5 h-3.5" />
@@ -2925,7 +3856,16 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                         <span className="text-slide-dim">—</span>
                       )}
                     </td>
-                    <td className="p-3.5 text-slide-dim">{v.ownerName}</td>
+                    <td className="p-3.5 text-slide-dim">
+                      <div className="font-medium text-white">{v.ownerName}</div>
+                      <div className="text-[10px]">
+                        {v.ownershipType === "school_owned"
+                          ? "Própria da Escola"
+                          : v.ownershipType === "partner_owned"
+                          ? "Parceiro"
+                          : "Frota MôBuss"}
+                      </div>
+                    </td>
                     <td className="p-3.5 text-slide-accent font-semibold">{v.routeCode}</td>
                     <td className="p-3.5 font-medium">{v.driverName}</td>
                     <td className="p-3.5 text-[11px] text-slide-dim">
@@ -2965,7 +3905,11 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                             setVehicleForm({
                               fleetNumber: String(v.fleetNumber),
                               plate: v.plate,
-                              ownerId: v.ownerId,
+                              ownershipType:
+                                v.ownershipType === "school_owned" || v.ownershipType === "partner_owned"
+                                  ? v.ownershipType
+                                  : "mobuss_owned",
+                              ownerId: v.ownerId ?? "",
                               assignedSchoolId: v.assignedSchoolId ?? "",
                               routeCode: v.routeCode || "ROTA-A",
                               capacity: v.capacity,
@@ -2994,111 +3938,520 @@ export function AdminView({ onNavigate }: AdminViewProps) {
           {tab === "Rotas & Escalas" && (
             <div className="space-y-6">
               <div className="flex flex-wrap justify-between items-center gap-3">
-                <div className="flex flex-wrap items-center gap-3">
-                  <span className="text-xs text-slide-dim">
-                    Agendamento recorrente de rotas escolares, faixas horárias e atribuição de viaturas ({schedulesTabList.length} escala(s)).
-                  </span>
-                  <select
-                    value={scheduleSchoolFilter === "all" ? "all" : String(scheduleSchoolFilter)}
-                    onChange={(e) => setScheduleSchoolFilter(e.target.value === "all" ? "all" : Number(e.target.value))}
-                    aria-label="Filtrar escalas por escola"
-                    className="rounded-xl bg-slide-surface border border-white/15 px-3 py-1.5 text-xs text-white outline-none"
-                  >
-                    <option value="all">Todas as Escolas</option>
-                    {selectableSchools.map((sc) => (
-                      <option key={sc.id} value={sc.id}>
-                        {sc.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {rolePerms.canManageRouteSchedules && (
+                <div className="inline-flex rounded-xl bg-slide-surface border border-white/10 p-1 gap-1 text-xs">
                   <button
                     type="button"
-                    onClick={() => openNewRouteScheduleModal(scheduleSchoolFilter !== "all" ? scheduleSchoolFilter : undefined)}
+                    onClick={() => setRotasSubView("routes")}
+                    className={`px-3.5 py-1.5 rounded-lg font-bold cursor-pointer inline-flex items-center gap-1.5 transition ${
+                      rotasSubView === "routes" ? "bg-slide-accent text-white" : "text-slide-dim hover:text-white"
+                    }`}
+                  >
+                    <RouteIcon className="w-3.5 h-3.5" />
+                    <span>Corredores & Paragens ({allRoutes.length})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRotasSubView("schedules")}
+                    className={`px-3.5 py-1.5 rounded-lg font-bold cursor-pointer inline-flex items-center gap-1.5 transition ${
+                      rotasSubView === "schedules" ? "bg-slide-accent text-white" : "text-slide-dim hover:text-white"
+                    }`}
+                  >
+                    <CalendarClock className="w-3.5 h-3.5" />
+                    <span>Escalas Recorrentes ({schedulesTabList.length})</span>
+                  </button>
+                </div>
+
+                {rotasSubView === "routes" && rolePerms.canManageRoutes && (
+                  <button
+                    type="button"
+                    onClick={openNewRouteModal}
                     className="rounded-xl bg-slide-accent text-white px-4 py-2 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
                   >
                     <Plus className="w-3.5 h-3.5" />
-                    <span>Agendar Rota Recorrente</span>
+                    <span>Nova Rota</span>
                   </button>
+                )}
+
+                {rotasSubView === "schedules" && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      value={scheduleSchoolFilter === "all" ? "all" : String(scheduleSchoolFilter)}
+                      onChange={(e) => setScheduleSchoolFilter(e.target.value === "all" ? "all" : Number(e.target.value))}
+                      aria-label="Filtrar escalas por escola"
+                      className="rounded-xl bg-slide-surface border border-white/15 px-3 py-1.5 text-xs text-white outline-none"
+                    >
+                      <option value="all">Todas as Escolas</option>
+                      {selectableSchools.map((sc) => (
+                        <option key={sc.id} value={sc.id}>
+                          {sc.name}
+                        </option>
+                      ))}
+                    </select>
+                    {rolePerms.canManageRouteSchedules && (
+                      <button
+                        type="button"
+                        onClick={() => openNewRouteScheduleModal(scheduleSchoolFilter !== "all" ? scheduleSchoolFilter : undefined)}
+                        className="rounded-xl bg-slide-accent text-white px-4 py-2 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Agendar Rota Recorrente</span>
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
 
-              {schedulesTabList.length === 0 ? (
-                <div className="rounded-2xl bg-slide-surface border border-white/10 p-6 text-center space-y-2 text-xs">
-                  <CalendarClock className="w-7 h-7 text-slide-accent mx-auto" />
-                  <div className="font-bold text-white">Sem escalas recorrentes registadas para este filtro</div>
-                  <p className="text-slide-dim">
-                    Defina rotas recorrentes por escola com dias da semana, janela horária e viatura atribuída (com verificação automática de conflitos).
-                  </p>
+              {rotasSubView === "routes" ? (
+                <div className="grid grid-cols-1 xl:grid-cols-[0.95fr_1.5fr] gap-6 items-start">
+                  {/* Left: Route List */}
+                  <Card title={`Rotas Configuradas (${allRoutes.length})`}>
+                    <div className="space-y-2.5">
+                      {allRoutes
+                        .filter(
+                          (r) =>
+                            !q ||
+                            r.code.toLowerCase().includes(q) ||
+                            r.name.toLowerCase().includes(q) ||
+                            (r.corridor ?? "").toLowerCase().includes(q) ||
+                            (r.schoolName ?? "").toLowerCase().includes(q)
+                        )
+                        .map((r) => {
+                          const isSelected = selectedAdminRoute?.id === r.id;
+                          return (
+                            <div
+                              key={r.id}
+                              onClick={() => {
+                                setSelectedAdminRouteId(r.id);
+                                resetStopForm();
+                              }}
+                              className={`rounded-xl p-3.5 border transition cursor-pointer space-y-2 ${
+                                isSelected
+                                  ? "bg-slide-bg border-slide-accent"
+                                  : "bg-slide-bg/70 border-white/10 hover:border-white/25"
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="font-mono font-black text-xs text-slide-accent">{r.code}</span>
+                                    <span
+                                      className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                                        r.active
+                                          ? "bg-emerald-500/15 text-emerald-300"
+                                          : "bg-zinc-700/60 text-zinc-400"
+                                      }`}
+                                    >
+                                      {r.active ? "Ativa" : "Desativada"}
+                                    </span>
+                                  </div>
+                                  <div className="font-bold text-xs text-white mt-1 truncate">{r.name}</div>
+                                  <div className="text-[11px] text-slide-dim mt-0.5 truncate">
+                                    {r.schoolName ? `Escola: ${r.schoolName}` : "Corredor geral"} · {r.stops.length} paragem(ns) ·{" "}
+                                    {r.pathCoordinates.length} pontos no traçado
+                                  </div>
+                                </div>
+                              </div>
+
+                              {rolePerms.canManageRoutes && (
+                                <div
+                                  className="flex flex-wrap gap-1.5 pt-1"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() => openEditRouteModal(r)}
+                                    className="px-2.5 py-1 rounded-lg bg-slide-surface border border-white/15 hover:bg-white/10 text-[11px] font-semibold cursor-pointer inline-flex items-center gap-1"
+                                  >
+                                    <Pencil className="w-3 h-3 text-emerald-300" />
+                                    <span>Editar</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleToggleRouteActive(r)}
+                                    className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold cursor-pointer inline-flex items-center gap-1 ${
+                                      r.active
+                                        ? "bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/20"
+                                        : "bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20"
+                                    }`}
+                                  >
+                                    <Power className="w-3 h-3" />
+                                    <span>{r.active ? "Desativar" : "Reativar"}</span>
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                    </div>
+                  </Card>
+
+                  {/* Right: Selected Route Interactive Map & Stops Editor */}
+                  <Card
+                    title={
+                      selectedAdminRoute
+                        ? `${selectedAdminRoute.code} · ${selectedAdminRoute.name}`
+                        : "Editor de Rota & Paragens"
+                    }
+                    action={
+                      selectedAdminRoute && rolePerms.canManageRoutes ? (
+                        <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                          <button
+                            type="button"
+                            onClick={() => setMapClickMode("pick_stop")}
+                            className={`px-2.5 py-1 rounded-lg font-bold cursor-pointer border ${
+                              mapClickMode === "pick_stop"
+                                ? "bg-slide-accent text-white border-slide-accent"
+                                : "bg-slide-bg border-white/15 text-slide-dim"
+                            }`}
+                          >
+                            Marcar Paragem no Mapa
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setMapClickMode("append_path")}
+                            className={`px-2.5 py-1 rounded-lg font-bold cursor-pointer border ${
+                              mapClickMode === "append_path"
+                                ? "bg-slide-accent text-white border-slide-accent"
+                                : "bg-slide-bg border-white/15 text-slide-dim"
+                            }`}
+                          >
+                            Desenhar Traçado
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleSyncRoutePathFromStops(selectedAdminRoute)}
+                            className="px-2.5 py-1 rounded-lg bg-slide-bg border border-white/15 hover:bg-white/10 font-semibold text-white cursor-pointer"
+                            title="Atualizar a linha da rota pela ordem atual das paragens"
+                          >
+                            Gerar Linha pelas Paragens
+                          </button>
+                        </div>
+                      ) : null
+                    }
+                  >
+                    {!selectedAdminRoute ? (
+                      <div className="text-xs text-slide-dim py-6 text-center">
+                        Selecione ou crie uma rota para gerir as respetivas paragens e traçado no mapa.
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        <div className="text-[11px] text-slide-dim flex flex-wrap items-center justify-between gap-2">
+                          <span>
+                            {rolePerms.canManageRoutes
+                              ? mapClickMode === "pick_stop"
+                                ? "Toque em qualquer ponto do mapa abaixo para preencher automaticamente latitude e longitude da paragem."
+                                : "Toque no mapa para adicionar um vértice ao traçado (linha) desta rota."
+                              : "Visualização só de leitura das paragens e traçado desta rota."}
+                          </span>
+                          <span className="font-mono text-white">
+                            {selectedAdminRoute.stops.length} paragem(ns) · {selectedAdminRoute.pathCoordinates.length} pontos
+                          </span>
+                        </div>
+
+                        {(() => {
+                          const draftLat = Number(stopForm.latitude);
+                          const draftLng = Number(stopForm.longitude);
+                          const hasDraftPin =
+                            stopForm.latitude.trim() !== "" &&
+                            stopForm.longitude.trim() !== "" &&
+                            Number.isFinite(draftLat) &&
+                            Number.isFinite(draftLng);
+                          return (
+                            <LuandaMap
+                              route={selectedAdminRoute}
+                              routeCode={selectedAdminRoute.code}
+                              progress={0}
+                              showBusMarker={false}
+                              showZoomControl
+                              darkMode
+                              scopeKey={`admin-route-${selectedAdminRoute.id}`}
+                              onMapClick={rolePerms.canManageRoutes ? handleAdminRouteMapClick : undefined}
+                              draftPin={
+                                hasDraftPin
+                                  ? {
+                                      lat: draftLat,
+                                      lng: draftLng,
+                                      label: stopForm.name.trim() || "Paragem selecionada",
+                                      radiusM: Number(stopForm.geofenceRadiusM) || 500,
+                                    }
+                                  : null
+                              }
+                              className="h-[300px] sm:h-[340px] rounded-xl border border-white/10"
+                            />
+                          );
+                        })()}
+
+                        {/* Add / Edit Stop Form */}
+                        {rolePerms.canManageRoutes && (
+                          <form
+                            onSubmit={handleSaveRouteStop}
+                            className="rounded-xl bg-slide-bg border border-white/10 p-3.5 space-y-3 text-xs"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="font-bold text-white flex items-center gap-1.5">
+                                <MapPin className="w-3.5 h-3.5 text-slide-accent" />
+                                <span>{stopForm.id ? "Editar Paragem Selecionada" : "Adicionar Paragem à Rota"}</span>
+                              </div>
+                              {stopForm.id && (
+                                <button
+                                  type="button"
+                                  onClick={resetStopForm}
+                                  className="text-[11px] text-slide-dim underline cursor-pointer"
+                                >
+                                  Cancelar edição
+                                </button>
+                              )}
+                            </div>
+
+                            {stopFormError && (
+                              <div className="rounded-lg bg-red-500/15 border border-red-500/40 px-3 py-2 text-[11px] text-red-200">
+                                {stopFormError}
+                              </div>
+                            )}
+
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                              <input
+                                required
+                                value={stopForm.name}
+                                onChange={(e) => setStopForm({ ...stopForm, name: e.target.value })}
+                                placeholder="Nome da paragem (ex: Largo do Kinaxixi)"
+                                className="sm:col-span-2 rounded-xl bg-slide-surface border border-white/15 px-3 py-2 text-white outline-none"
+                              />
+                              <input
+                                required
+                                type="time"
+                                value={stopForm.scheduledTime}
+                                onChange={(e) => setStopForm({ ...stopForm, scheduledTime: e.target.value })}
+                                aria-label="Hora prevista da paragem"
+                                className="rounded-xl bg-slide-surface border border-white/15 px-3 py-2 text-white font-mono outline-none"
+                              />
+                            </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                              <div>
+                                <label className="text-[10px] text-slide-dim block mb-1">Latitude</label>
+                                <input
+                                  required
+                                  type="number"
+                                  step="0.000001"
+                                  value={stopForm.latitude}
+                                  onChange={(e) => setStopForm({ ...stopForm, latitude: e.target.value })}
+                                  placeholder="-8.838300"
+                                  className="w-full rounded-xl bg-slide-surface border border-white/15 px-3 py-2 text-white font-mono outline-none"
+                                />
+                              </div>
+                              <div>
+                                <label className="text-[10px] text-slide-dim block mb-1">Longitude</label>
+                                <input
+                                  required
+                                  type="number"
+                                  step="0.000001"
+                                  value={stopForm.longitude}
+                                  onChange={(e) => setStopForm({ ...stopForm, longitude: e.target.value })}
+                                  placeholder="13.234400"
+                                  className="w-full rounded-xl bg-slide-surface border border-white/15 px-3 py-2 text-white font-mono outline-none"
+                                />
+                              </div>
+                              <div>
+                                <label className="text-[10px] text-slide-dim block mb-1">Raio Geofence (m)</label>
+                                <input
+                                  required
+                                  type="number"
+                                  min={50}
+                                  max={5000}
+                                  value={stopForm.geofenceRadiusM}
+                                  onChange={(e) =>
+                                    setStopForm({ ...stopForm, geofenceRadiusM: Number(e.target.value) || 500 })
+                                  }
+                                  className="w-full rounded-xl bg-slide-surface border border-white/15 px-3 py-2 text-white font-mono outline-none"
+                                />
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              {!stopForm.id ? (
+                                <label className="inline-flex items-center gap-2 text-[11px] text-slide-dim cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={stopForm.appendToPath}
+                                    onChange={(e) => setStopForm({ ...stopForm, appendToPath: e.target.checked })}
+                                  />
+                                  <span>Incluir coordenada no traçado da rota</span>
+                                </label>
+                              ) : (
+                                <span />
+                              )}
+
+                              <button
+                                type="submit"
+                                disabled={savingStop}
+                                className="rounded-xl bg-slide-ok text-white px-4 py-2 font-bold cursor-pointer disabled:opacity-50"
+                              >
+                                {savingStop
+                                  ? "A guardar..."
+                                  : stopForm.id
+                                  ? "Guardar Alterações"
+                                  : "Adicionar Paragem"}
+                              </button>
+                            </div>
+                          </form>
+                        )}
+
+                        {/* Ordered Stops List */}
+                        <div className="space-y-2">
+                          <div className="text-[11px] font-bold uppercase tracking-wider text-slide-dim">
+                            Ordem das Paragens ({selectedAdminRoute.stops.length})
+                          </div>
+                          {selectedAdminRoute.stops.length === 0 ? (
+                            <div className="rounded-xl bg-slide-bg border border-white/10 p-4 text-xs text-slide-dim">
+                              Esta rota ainda não tem paragens registadas. Toque no mapa ou insira as coordenadas acima para adicionar.
+                            </div>
+                          ) : (
+                            selectedAdminRoute.stops.map((st, idx) => (
+                              <div
+                                key={st.id}
+                                className="rounded-xl bg-slide-bg border border-white/10 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs"
+                              >
+                                <div className="flex items-center gap-3 min-w-0">
+                                  <span className="w-6 h-6 rounded-full bg-slide-accent text-white font-black text-[11px] grid place-items-center shrink-0">
+                                    {idx + 1}
+                                  </span>
+                                  <div className="min-w-0">
+                                    <div className="font-bold text-white truncate">{st.name}</div>
+                                    <div className="text-[11px] text-slide-dim font-mono">
+                                      {st.scheduledTime} · {st.latitude.toFixed(5)}, {st.longitude.toFixed(5)} · Raio {st.geofenceRadiusM}m
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {rolePerms.canManageRoutes && (
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    <button
+                                      type="button"
+                                      disabled={idx === 0}
+                                      onClick={() => void handleMoveRouteStop(selectedAdminRoute, idx, -1)}
+                                      className="p-1.5 rounded-lg bg-slide-surface border border-white/10 text-white hover:bg-white/10 disabled:opacity-30 cursor-pointer"
+                                      title="Mover paragem para cima"
+                                    >
+                                      <ArrowUp className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={idx === selectedAdminRoute.stops.length - 1}
+                                      onClick={() => void handleMoveRouteStop(selectedAdminRoute, idx, 1)}
+                                      className="p-1.5 rounded-lg bg-slide-surface border border-white/10 text-white hover:bg-white/10 disabled:opacity-30 cursor-pointer"
+                                      title="Mover paragem para baixo"
+                                    >
+                                      <ArrowDown className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => startEditStop(st)}
+                                      className="px-2 py-1 rounded-lg bg-slide-surface border border-white/10 hover:bg-white/10 text-[11px] font-semibold cursor-pointer inline-flex items-center gap-1"
+                                    >
+                                      <Pencil className="w-3 h-3 text-emerald-300" />
+                                      <span>Editar</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => st.id !== undefined && void handleDeleteRouteStop(selectedAdminRoute.id, st.id, st.name)}
+                                      className="px-2 py-1 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 hover:bg-red-500/20 text-[11px] font-semibold cursor-pointer inline-flex items-center gap-1"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                      <span>Remover</span>
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </Card>
                 </div>
               ) : (
-                <Table head={["Escola Contratada", "Rota", "Recorrência & Turno", "Horário", "Viatura & Motorista", "Estado", "Ações"]}>
-                  {schedulesTabList.map((sch) => (
-                    <tr key={sch.id} className="hover:bg-white/[0.03] text-xs">
-                      <td className="p-3.5 font-bold text-white">{sch.schoolName}</td>
-                      <td className="p-3.5">
-                        <div className="text-slide-accent font-bold">{sch.routeCode}</div>
-                        <div className="text-[11px] text-slide-dim">{sch.routeName}</div>
-                      </td>
-                      <td className="p-3.5">
-                        <div className="font-semibold text-white">{formatWeekdaysPt(sch.daysOfWeek)}</div>
-                        <div className="text-[11px] text-slide-dim">
-                          {sch.shiftType === "afternoon" ? "Turno da Tarde" : "Turno da Manhã"}
-                        </div>
-                      </td>
-                      <td className="p-3.5 font-mono font-bold text-white tabular-nums">
-                        {sch.departureTime} – {sch.arrivalTime}
-                      </td>
-                      <td className="p-3.5">
-                        {sch.vehicleFleetNumber ? (
-                          <div>
-                            <span className="font-bold text-white">Autocarro {sch.vehicleFleetNumber}</span>{" "}
-                            <span className="font-mono text-[11px] text-slide-dim">({sch.vehiclePlate})</span>
-                            <div className="text-[11px] text-slide-dim">{sch.driverName}</div>
-                          </div>
-                        ) : (
-                          <span className="text-amber-300 font-semibold">Sem viatura atribuída</span>
-                        )}
-                      </td>
-                      <td className="p-3.5">
-                        <StatusBadge s={sch.active ? "Ativo" : "Pausada"} />
-                      </td>
-                      <td className="p-3.5">
-                        {rolePerms.canManageRouteSchedules ? (
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => void handleToggleRouteSchedule(sch)}
-                              className="px-2.5 py-1 rounded-lg bg-slide-bg border border-white/15 hover:bg-white/10 font-semibold cursor-pointer"
-                            >
-                              {sch.active ? "Pausar" : "Ativar"}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => openEditRouteScheduleModal(sch)}
-                              className="px-2.5 py-1 rounded-lg bg-slide-bg border border-white/15 hover:bg-white/10 font-semibold cursor-pointer inline-flex items-center gap-1"
-                            >
-                              <Pencil className="w-3 h-3 text-emerald-300" />
-                              <span>Editar</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setDeleteScheduleTarget(sch)}
-                              className="px-2.5 py-1 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 hover:bg-red-500/20 font-semibold cursor-pointer inline-flex items-center gap-1"
-                            >
-                              <Trash2 className="w-3 h-3" />
-                              <span>Remover</span>
-                            </button>
-                          </div>
-                        ) : (
-                          <span className="text-slide-dim">Só leitura</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </Table>
+                <div className="space-y-4">
+                  <div className="text-xs text-slide-dim">
+                    Agendamento recorrente de rotas escolares, faixas horárias e atribuição de viaturas ({schedulesTabList.length} escala(s)).
+                  </div>
+
+                  {schedulesTabList.length === 0 ? (
+                    <div className="rounded-2xl bg-slide-surface border border-white/10 p-6 text-center space-y-2 text-xs">
+                      <CalendarClock className="w-7 h-7 text-slide-accent mx-auto" />
+                      <div className="font-bold text-white">Sem escalas recorrentes registadas para este filtro</div>
+                      <p className="text-slide-dim">
+                        Defina rotas recorrentes por escola com dias da semana, janela horária e viatura atribuída (com verificação automática de conflitos).
+                      </p>
+                    </div>
+                  ) : (
+                    <Table head={["Escola Contratada", "Rota", "Recorrência & Turno", "Horário", "Viatura & Motorista", "Estado", "Ações"]}>
+                      {schedulesTabList.map((sch) => (
+                        <tr key={sch.id} className="hover:bg-white/[0.03] text-xs">
+                          <td className="p-3.5 font-bold text-white">{sch.schoolName}</td>
+                          <td className="p-3.5">
+                            <div className="text-slide-accent font-bold">{sch.routeCode}</div>
+                            <div className="text-[11px] text-slide-dim">{sch.routeName}</div>
+                          </td>
+                          <td className="p-3.5">
+                            <div className="font-semibold text-white">{formatWeekdaysPt(sch.daysOfWeek)}</div>
+                            <div className="text-[11px] text-slide-dim">
+                              {sch.shiftType === "afternoon" ? "Turno da Tarde" : "Turno da Manhã"}
+                            </div>
+                          </td>
+                          <td className="p-3.5 font-mono font-bold text-white tabular-nums">
+                            {sch.departureTime} – {sch.arrivalTime}
+                          </td>
+                          <td className="p-3.5">
+                            {sch.vehicleFleetNumber ? (
+                              <div>
+                                <span className="font-bold text-white">Autocarro {sch.vehicleFleetNumber}</span>{" "}
+                                <span className="font-mono text-[11px] text-slide-dim">({sch.vehiclePlate})</span>
+                                <div className="text-[11px] text-slide-dim">{sch.driverName}</div>
+                              </div>
+                            ) : (
+                              <span className="text-amber-300 font-semibold">Sem viatura atribuída</span>
+                            )}
+                          </td>
+                          <td className="p-3.5">
+                            <StatusBadge s={sch.active ? "Ativo" : "Pausada"} />
+                          </td>
+                          <td className="p-3.5">
+                            {rolePerms.canManageRouteSchedules ? (
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => void handleToggleRouteSchedule(sch)}
+                                  className="px-2.5 py-1 rounded-lg bg-slide-bg border border-white/15 hover:bg-white/10 font-semibold cursor-pointer"
+                                >
+                                  {sch.active ? "Pausar" : "Ativar"}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => openEditRouteScheduleModal(sch)}
+                                  className="px-2.5 py-1 rounded-lg bg-slide-bg border border-white/15 hover:bg-white/10 font-semibold cursor-pointer inline-flex items-center gap-1"
+                                >
+                                  <Pencil className="w-3 h-3 text-emerald-300" />
+                                  <span>Editar</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setDeleteScheduleTarget(sch)}
+                                  className="px-2.5 py-1 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 hover:bg-red-500/20 font-semibold cursor-pointer inline-flex items-center gap-1"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  <span>Remover</span>
+                                </button>
+                              </div>
+                            ) : (
+                              <span className="text-slide-dim">Só leitura</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </Table>
+                  )}
+                </div>
               )}
             </div>
           )}
@@ -3106,21 +4459,71 @@ export function AdminView({ onNavigate }: AdminViewProps) {
           {/* ================= MOTORISTAS ================= */}
           {tab === "Motoristas" && (
             <div className="space-y-6">
-              <div className="flex justify-between items-center text-xs text-slide-dim">
-                <span>Motoristas verificados com habilitação profissional Categoria D</span>
+              <div className="flex flex-wrap justify-between items-center gap-3 text-xs text-slide-dim">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span>Motoristas ({driversList.length}):</span>
+                  <select
+                    value={driverEmployerFilter}
+                    onChange={(e) => setDriverEmployerFilter(e.target.value as "all" | "school" | "mobuss")}
+                    aria-label="Filtrar motoristas por empregador"
+                    className="rounded-xl bg-slide-surface border border-white/15 px-3 py-1.5 text-xs text-white outline-none"
+                  >
+                    <option value="all">Todos os Empregadores</option>
+                    <option value="school">Contratados pela Escola</option>
+                    <option value="mobuss">Empregador: MôBuss</option>
+                  </select>
+                  <select
+                    value={driverSchoolFilter === "all" ? "all" : String(driverSchoolFilter)}
+                    onChange={(e) =>
+                      setDriverSchoolFilter(e.target.value === "all" ? "all" : Number(e.target.value))
+                    }
+                    aria-label="Filtrar motoristas por escola"
+                    className="rounded-xl bg-slide-surface border border-white/15 px-3 py-1.5 text-xs text-white outline-none"
+                  >
+                    <option value="all">Todas as Escolas</option>
+                    {(overview?.schools ?? []).map((sc) => (
+                      <option key={sc.id} value={sc.id}>
+                        {sc.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
                 <button
-                  onClick={() => handleDownloadReport("Relatório de folha de salários (Motoristas)")}
-                  className="bg-slide-surface border border-white/10 text-slide-paper px-3.5 py-2 rounded-xl font-semibold cursor-pointer inline-flex items-center gap-2"
+                  type="button"
+                  disabled={downloadingReportKey === "payroll"}
+                  onClick={() => void handleDownloadReport("payroll", "Folha Salarial (Motoristas)", { useReportFilters: false })}
+                  className="bg-slide-surface border border-white/10 text-slide-paper px-3.5 py-2 rounded-xl font-semibold cursor-pointer inline-flex items-center gap-2 disabled:opacity-50"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>Exportar Folha Salarial CSV</span>
+                  <span>{downloadingReportKey === "payroll" ? "A exportar..." : "Exportar Folha Salarial CSV"}</span>
                 </button>
               </div>
 
-              <Table head={["Motorista", "Contacto", "Categoria", "Avaliação", "Viagens Mês", "Salário Bruto", "Estado", "Ações"]}>
+              <Table head={["Motorista", "Empregador / Escola", "Contacto", "Categoria", "Avaliação", "Viagens Mês", "Salário Bruto", "Estado", "Ações"]}>
                 {driversList.map((d) => (
                   <tr key={d.id} className="hover:bg-white/[0.03] text-xs">
-                    <td className="p-3.5 font-bold text-white">{d.fullName}</td>
+                    <td className="p-3.5">
+                      <div className="font-bold text-white">{d.fullName}</div>
+                      {d.hasLogin && d.loginUsername && (
+                        <div className="text-[10px] font-mono text-emerald-300">
+                          @{d.loginUsername} ({d.loginActive ? "ativo" : "suspenso"})
+                        </div>
+                      )}
+                    </td>
+                    <td className="p-3.5">
+                      {d.employerType === "mobuss" ? (
+                        <span className="px-2 py-0.5 rounded bg-slide-accent/20 text-slide-accent text-[11px] font-semibold">
+                          MôBuss
+                        </span>
+                      ) : (
+                        <div>
+                          <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 text-[11px] font-semibold">
+                            Escola
+                          </span>
+                          <div className="text-[10px] text-slide-dim mt-0.5">{d.employerSchoolName || "Sem escola"}</div>
+                        </div>
+                      )}
+                    </td>
                     <td className="p-3.5 font-mono text-slide-dim">{d.phone}</td>
                     <td className="p-3.5 text-slide-dim">
                       <div>{d.licenceCategory}</div>
@@ -3128,11 +4531,15 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                     </td>
                     <td className="p-3.5 text-amber-400 font-bold tabular-nums">★ {d.ratingAvg}</td>
                     <td className="p-3.5 font-mono tabular-nums">{d.tripsCompleted}</td>
-                    <td className="p-3.5 font-mono font-bold">{formatAOA(d.monthlyCompensationAoa)}</td>
+                    <td className="p-3.5 font-mono font-bold">
+                      {d.monthlyCompensationAoa != null ? formatAOA(d.monthlyCompensationAoa) : "Restrito"}
+                    </td>
                     <td className="p-3.5">
                       <StatusBadge
                         s={
-                          d.availabilityStatus === "in_service"
+                          d.verificationStatus === "suspended"
+                            ? "Suspenso"
+                            : d.availabilityStatus === "in_service"
                             ? "Em serviço"
                             : d.availabilityStatus === "available"
                             ? "Disponível"
@@ -3151,12 +4558,18 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                             licenceCategory: d.licenceCategory,
                             licenceNumber: d.licenceNumber,
                             licenceExpiry: d.licenceExpiry,
+                            employerType: d.employerType === "mobuss" ? "mobuss" : "school",
+                            employerSchoolId: d.employerSchoolId ?? "",
+                            verificationStatus:
+                              d.verificationStatus === "suspended" || d.verificationStatus === "pending"
+                                ? d.verificationStatus
+                                : "verified",
                             availabilityStatus: (
                               d.availabilityStatus === "in_service" || d.availabilityStatus === "off_duty"
                                 ? d.availabilityStatus
                                 : "available"
                             ),
-                            monthlyCompensationAoa: d.monthlyCompensationAoa,
+                            monthlyCompensationAoa: d.monthlyCompensationAoa ?? 0,
                           })
                         }
                         className="px-2.5 py-1 rounded-lg bg-slide-bg border border-white/15 hover:bg-white/10 font-semibold cursor-pointer inline-flex items-center gap-1"
@@ -3189,11 +4602,17 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                     <span>Registar Novo Aluno</span>
                   </button>
                   <button
-                    onClick={() => handleDownloadReport("Pauta Diária de Presenças e Desembarque")}
-                    className="bg-slide-surface border border-white/10 text-slide-paper px-3.5 py-2 rounded-xl font-semibold cursor-pointer inline-flex items-center gap-2"
+                    type="button"
+                    disabled={downloadingReportKey === "students"}
+                    onClick={() =>
+                      void handleDownloadReport("students", "Alunos (Escola, Rota e Paragem)", {
+                        useReportFilters: false,
+                      })
+                    }
+                    className="bg-slide-surface border border-white/10 text-slide-paper px-3.5 py-2 rounded-xl font-semibold cursor-pointer inline-flex items-center gap-2 disabled:opacity-50"
                   >
                     <ClipboardList className="w-3.5 h-3.5" />
-                    <span>Exportar Pauta Segura CSV</span>
+                    <span>{downloadingReportKey === "students" ? "A exportar..." : "Exportar Pauta Segura CSV"}</span>
                   </button>
                 </div>
               </div>
@@ -3396,8 +4815,14 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                         <option value={0}>0%</option>
                       </select>
                     </div>
+                    <input
+                      value={pricingDraft.companyAddress ?? ""}
+                      onChange={(e) => setPricingDraft((p) => ({ ...p, companyAddress: e.target.value }))}
+                      placeholder="Morada da empresa (para faturas)"
+                      className="w-full rounded-lg bg-slide-surface px-2.5 py-1.5 text-[11px] border border-white/10 outline-none"
+                    />
                     <div className="text-[11px] text-amber-300 font-semibold">
-                      Entidade MCX configurável ({pricingDraft.multicaixaEntityCode || "00845"}) · Estado AGT: Homologação
+                      Entidade MCX configurável ({pricingDraft.multicaixaEntityCode || "00845"}) · Estado fiscal: Proforma
                     </div>
                   </div>
                 </div>
@@ -3450,26 +4875,30 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                         </button>
                       )}
                       <button
-                        onClick={() => {
-                          exportAgtReceipt(
-                            {
-                              invoice: inv.invoiceNumber,
-                              student: inv.studentName,
-                              guardian: inv.guardianName,
-                              phone: inv.phone,
-                              amountValue: inv.amountAoa,
-                              date: new Date(inv.createdAt).toLocaleDateString("pt-AO"),
-                              emisRef: inv.providerReference ?? "PENDENTE",
-                              agtCert: inv.fiscalStatus,
-                              status: inv.status === "confirmed" ? "Validado" : "Pendente",
-                            },
-                            pricingDraft
-                          );
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await downloadInvoicePdf({
+                              invoiceId: inv.id,
+                              invoiceNumber: inv.invoiceNumber,
+                              isPaid: inv.status === "confirmed",
+                              getAuthToken,
+                            });
+                            showToast(
+                              inv.status === "confirmed"
+                                ? `Recibo PDF (${inv.invoiceNumber}) descarregado.`
+                                : `Fatura proforma PDF (${inv.invoiceNumber}) descarregada.`
+                            );
+                          } catch (err) {
+                            showToast(
+                              err instanceof Error ? err.message : "Não foi possível descarregar o PDF da fatura."
+                            );
+                          }
                         }}
                         className="px-2.5 py-1 rounded-lg bg-slide-bg border border-white/10 font-semibold cursor-pointer inline-flex items-center gap-1"
                       >
                         <Download className="w-3 h-3" />
-                        <span>Nota Provisória</span>
+                        <span>{inv.status === "confirmed" ? "Recibo PDF" : "Proforma PDF"}</span>
                       </button>
                     </td>
                   </tr>
@@ -3514,84 +4943,240 @@ export function AdminView({ onNavigate }: AdminViewProps) {
           {/* ================= EMERGÊNCIAS ================= */}
           {tab === "Emergências" && (
             <div className="space-y-4">
-              {(overview?.incidents ?? []).map((inc) => (
-                <div
-                  key={inc.id}
-                  className={`rounded-2xl p-5 flex flex-wrap justify-between items-center gap-4 border ${
-                    inc.status === "resolved" || inc.status === "closed"
-                      ? "bg-slide-surface border-white/10"
-                      : "bg-slide-accent/15 border-slide-accent/50"
-                  }`}
-                >
-                  <div className="space-y-1 flex-1 min-w-[240px]">
-                    <div className="font-bold text-sm text-white flex items-center gap-2">
-                      <HeartPulse className="w-4 h-4 text-slide-accent" />
-                      <span>{inc.category}</span>
-                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slide-bg border border-white/10">
-                        {inc.severity}
-                      </span>
-                    </div>
-                    <p className="text-xs text-slide-paper">{inc.description}</p>
-                    <div className="text-[11px] text-slide-dim">
-                      Reportado por {inc.reporterName} ({inc.reporterRole}) · Estado: <strong>{inc.status}</strong>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {inc.status !== "resolved" && inc.status !== "closed" ? (
-                      <>
-                        <button
-                          onClick={() => void handleIncidentStatus(inc.id, "in_progress")}
-                          className="px-3 py-1.5 rounded-xl bg-slide-surface border border-white/15 text-xs font-semibold cursor-pointer"
-                        >
-                          Em Tratamento
-                        </button>
-                        <button
-                          onClick={() => void handleIncidentStatus(inc.id, "resolved")}
-                          className="px-3 py-1.5 rounded-xl bg-slide-ok text-white text-xs font-bold cursor-pointer"
-                        >
-                          Resolver
-                        </button>
-                      </>
-                    ) : (
-                      <StatusBadge s="Resolvida" />
-                    )}
-                  </div>
+              {(overview?.incidents ?? []).length === 0 ? (
+                <div className="rounded-2xl bg-slide-surface border border-white/10 p-6 text-center text-xs text-slide-dim">
+                  Sem ocorrências ou desvios registados.
                 </div>
-              ))}
+              ) : (
+                (overview?.incidents ?? []).map((inc) => {
+                  const isClosed = inc.status === "resolved" || inc.status === "closed";
+                  const isAcknowledged = inc.status === "acknowledged";
+                  const formattedTime = (() => {
+                    const ms = Date.parse(inc.createdAt);
+                    if (!Number.isFinite(ms)) return "—";
+                    return new Date(ms).toLocaleString("pt-AO", {
+                      day: "2-digit",
+                      month: "2-digit",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    });
+                  })();
+                  const statusLabel =
+                    inc.status === "new"
+                      ? "Novo"
+                      : inc.status === "acknowledged"
+                      ? "Reconhecido"
+                      : inc.status === "in_progress"
+                      ? "Em Tratamento"
+                      : isClosed
+                      ? "Resolvida"
+                      : inc.status;
+                  return (
+                    <div
+                      key={inc.id}
+                      className={`rounded-2xl p-5 flex flex-wrap justify-between items-center gap-4 border ${
+                        isClosed
+                          ? "bg-slide-surface border-white/10"
+                          : isAcknowledged
+                          ? "bg-slide-surface border-emerald-500/40"
+                          : "bg-slide-accent/15 border-slide-accent/50"
+                      }`}
+                    >
+                      <div className="space-y-1.5 flex-1 min-w-[260px]">
+                        <div className="font-bold text-sm text-white flex flex-wrap items-center gap-2">
+                          <HeartPulse className="w-4 h-4 text-slide-accent shrink-0" />
+                          <span>{inc.reason ? `Desvio / Trânsito · ${inc.reason}` : inc.category}</span>
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slide-bg border border-white/10">
+                            {inc.severity}
+                          </span>
+                          <StatusBadge s={statusLabel} />
+                        </div>
+                        <p className="text-xs text-slide-paper">
+                          {inc.notes ? inc.notes : inc.description}
+                        </p>
+                        <div className="text-[11px] text-slide-dim flex flex-wrap items-center gap-x-3 gap-y-1">
+                          <span>
+                            Viagem: <strong className="text-white font-mono">{inc.tripCode || (inc.tripId ? `#${inc.tripId}` : "—")}</strong>
+                          </span>
+                          <span>
+                            Rota: <strong className="text-white">{inc.routeCode || "—"}{inc.routeName ? ` (${inc.routeName})` : ""}</strong>
+                          </span>
+                          <span>
+                            Motorista: <strong className="text-white">{inc.driverName || inc.reporterName}</strong>
+                          </span>
+                          <span>
+                            Motivo: <strong className="text-white">{inc.reason || inc.category}</strong>
+                          </span>
+                          <span className="tabular-nums">
+                            Hora: <strong className="text-white">{formattedTime}</strong>
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {!isClosed ? (
+                          <>
+                            {inc.status === "new" && rolePerms.canManageIncidents && (
+                              <button
+                                onClick={() => void handleIncidentStatus(inc.id, "acknowledged")}
+                                className="px-3 py-1.5 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 hover:bg-emerald-500/30 text-xs font-bold cursor-pointer"
+                              >
+                                Reconhecer
+                              </button>
+                            )}
+                            {rolePerms.canManageIncidents && (
+                              <>
+                                <button
+                                  onClick={() => void handleIncidentStatus(inc.id, "in_progress")}
+                                  className="px-3 py-1.5 rounded-xl bg-slide-surface border border-white/15 text-xs font-semibold cursor-pointer"
+                                >
+                                  Em Tratamento
+                                </button>
+                                <button
+                                  onClick={() => void handleIncidentStatus(inc.id, "resolved")}
+                                  className="px-3 py-1.5 rounded-xl bg-slide-ok text-white text-xs font-bold cursor-pointer"
+                                >
+                                  Resolver
+                                </button>
+                              </>
+                            )}
+                          </>
+                        ) : (
+                          <StatusBadge s="Resolvida" />
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </div>
           )}
 
           {/* ================= RELATÓRIOS ================= */}
           {tab === "Relatórios" && (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {[
-                { title: "Relatório mensal de viagens", desc: "Viagens separadas por turno com estado de inspeção.", format: "CSV", Icon: Bus },
-                { title: "Livro de Faturas Multicaixa Express (Homologação)", desc: "Registo contabilístico com referências e estado fiscal.", format: "CSV", Icon: FileSpreadsheet },
-                { title: "Pauta Diária de Presenças e Desembarque", desc: "Lista nominal mascarada sem exposição de códigos PIN.", format: "CSV", Icon: ClipboardList },
-                { title: "Relatório de folha de salários (Motoristas)", desc: "Equipa verificada e processamento salarial.", format: "CSV", Icon: UserCheck },
-                { title: "Relatório de Emergências e Ocorrências SOS MôBuss", desc: "Auditoria de incidentes e resoluções.", format: "TXT", Icon: Radio },
-              ].map((r) => {
-                const ReportIcon = r.Icon;
-                return (
-                  <button
-                    key={r.title}
-                    onClick={() => handleDownloadReport(r.title)}
-                    className="rounded-2xl bg-slide-surface p-5 text-left hover:border-slide-accent/60 transition cursor-pointer border border-white/10 flex flex-col justify-between"
+            <div className="space-y-4">
+              <div className="rounded-2xl bg-slide-surface border border-white/10 p-4 flex flex-wrap items-end gap-3 text-xs">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slide-dim mb-1">Data inicial</label>
+                  <input
+                    type="date"
+                    value={reportFromDate}
+                    onChange={(e) => setReportFromDate(e.target.value)}
+                    className="rounded-xl bg-slide-bg border border-white/10 px-3 py-2 text-white outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slide-dim mb-1">Data final</label>
+                  <input
+                    type="date"
+                    value={reportToDate}
+                    onChange={(e) => setReportToDate(e.target.value)}
+                    className="rounded-xl bg-slide-bg border border-white/10 px-3 py-2 text-white outline-none"
+                  />
+                </div>
+                <div className="min-w-[200px] flex-1">
+                  <label className="block text-[11px] font-semibold text-slide-dim mb-1">Filtrar por escola</label>
+                  <select
+                    value={reportSchoolId}
+                    onChange={(e) =>
+                      setReportSchoolId(e.target.value === "all" ? "all" : Number(e.target.value))
+                    }
+                    className="w-full rounded-xl bg-slide-bg border border-white/10 px-3 py-2 text-white outline-none"
                   >
-                    <div>
-                      <div className="w-10 h-10 rounded-xl bg-slide-bg border border-white/10 text-slide-accent grid place-items-center mb-3">
-                        <ReportIcon className="w-5 h-5" />
-                      </div>
-                      <div className="text-sm font-bold text-white">{r.title}</div>
-                      <div className="text-xs text-slide-dim mt-2">{r.desc}</div>
-                    </div>
-                    <div className="text-xs mt-4 pt-3 border-t border-white/10 flex justify-between text-slide-accent font-bold">
-                      <span>Descarregar</span>
-                      <span className="font-mono">{r.format}</span>
-                    </div>
+                    <option value="all">Todas as escolas</option>
+                    {(overview?.schools ?? []).map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {(reportFromDate || reportToDate || reportSchoolId !== "all") && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setReportFromDate("");
+                      setReportToDate("");
+                      setReportSchoolId("all");
+                    }}
+                    className="rounded-xl bg-slide-bg border border-white/10 px-3 py-2 text-xs font-semibold text-slide-dim hover:text-white cursor-pointer"
+                  >
+                    Limpar filtros
                   </button>
-                );
-              })}
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {(
+                  [
+                    {
+                      key: "students",
+                      title: "Alunos (Escola, Rota e Paragem)",
+                      desc: "Diretório nominal com escola, corredor, paragem e encarregado (sem códigos PIN).",
+                      Icon: GraduationCap,
+                    },
+                    {
+                      key: "trips",
+                      title: "Viagens e Atrasos",
+                      desc: "Data do serviço, rota, motorista, viatura, estado operacional e desvios/atrasos.",
+                      Icon: Bus,
+                    },
+                    {
+                      key: "attendance",
+                      title: "Presenças (Embarque e Desembarque)",
+                      desc: "Eventos de embarque e entrega agrupados por aluno e por dia.",
+                      Icon: ClipboardList,
+                    },
+                    {
+                      key: "invoices",
+                      title: "Faturas e Pagamentos",
+                      desc: "Registo contabilístico com referências MCX, conciliação e estado fiscal.",
+                      Icon: FileSpreadsheet,
+                    },
+                    {
+                      key: "incidents",
+                      title: "Ocorrências e Emergências",
+                      desc: "Auditoria completa de incidentes, desvios, responsáveis e resoluções.",
+                      Icon: Radio,
+                    },
+                    {
+                      key: "vehicles-drivers",
+                      title: "Viaturas e Motoristas (Validades)",
+                      desc: "Frota e motoristas com datas de validade de DNVT, seguros e cartas de condução.",
+                      Icon: UserCheck,
+                    },
+                    {
+                      key: "payroll",
+                      title: "Folha Salarial (Motoristas)",
+                      desc: "Compensação mensal, viagens realizadas no período e estado operacional.",
+                      Icon: CreditCard,
+                    },
+                  ] as const
+                ).map((r) => {
+                  const ReportIcon = r.Icon;
+                  const isBusy = downloadingReportKey === r.key;
+                  return (
+                    <button
+                      key={r.key}
+                      type="button"
+                      disabled={isBusy}
+                      onClick={() => void handleDownloadReport(r.key, r.title)}
+                      className="rounded-2xl bg-slide-surface p-5 text-left hover:border-slide-accent/60 transition cursor-pointer border border-white/10 flex flex-col justify-between disabled:opacity-60"
+                    >
+                      <div>
+                        <div className="w-10 h-10 rounded-xl bg-slide-bg border border-white/10 text-slide-accent grid place-items-center mb-3">
+                          <ReportIcon className="w-5 h-5" />
+                        </div>
+                        <div className="text-sm font-bold text-white">{r.title}</div>
+                        <div className="text-xs text-slide-dim mt-2">{r.desc}</div>
+                      </div>
+                      <div className="text-xs mt-4 pt-3 border-t border-white/10 flex justify-between text-slide-accent font-bold">
+                        <span>{isBusy ? "A gerar CSV no servidor..." : "Descarregar"}</span>
+                        <span className="font-mono">CSV</span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           )}
 
@@ -3809,7 +5394,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                 placeholder="Nome da Escola Parceira"
                 className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
               />
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <input
                   required
                   value={newLocation}
@@ -3825,6 +5410,15 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                   <option value="school">Escola Paga</option>
                   <option value="parent">Encarregados Pagam</option>
                   <option value="mixed">Misto (Escola + Pais)</option>
+                </select>
+                <select
+                  value={newServiceModel}
+                  onChange={(e) => setNewServiceModel(e.target.value as "software" | "full_service")}
+                  aria-label="Modelo de serviço"
+                  className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                >
+                  <option value="software">Software (Frota Escola)</option>
+                  <option value="full_service">Serviço Completo MôBuss</option>
                 </select>
               </div>
               <div className="grid grid-cols-3 gap-3">
@@ -3967,7 +5561,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
               required
               value={reconcileRef}
               onChange={(e) => setReconcileRef(e.target.value)}
-              placeholder="Ex: MCX-849201-EMIS"
+              placeholder="Ex: CONC-00845-849201"
               className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
             />
             <div className="flex gap-2">
@@ -4065,6 +5659,34 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                     </option>
                   ))}
                 </select>
+              )}
+
+              {newUserRole === "driver" && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <select
+                    value={newUserDriverEmployer}
+                    onChange={(e) => setNewUserDriverEmployer(e.target.value as "school" | "mobuss")}
+                    className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                  >
+                    <option value="school">Empregador: Escola</option>
+                    <option value="mobuss">Empregador: MôBuss</option>
+                  </select>
+                  {newUserDriverEmployer === "school" && (
+                    <select
+                      required
+                      value={newUserSchoolId}
+                      onChange={(e) => setNewUserSchoolId(e.target.value ? Number(e.target.value) : "")}
+                      className="rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                    >
+                      <option value="">Selecionar escola empregadora...</option>
+                      {(overview?.schools ?? []).map((sc) => (
+                        <option key={sc.id} value={sc.id}>
+                          {sc.name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
               )}
 
               {newUserRole === "parent_guardian" && (
@@ -4606,21 +6228,64 @@ export function AdminView({ onNavigate }: AdminViewProps) {
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Proprietário</label>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Tipo de Propriedade</label>
                   <select
-                    required
-                    value={vehicleForm.ownerId}
-                    onChange={(e) => setVehicleForm({ ...vehicleForm, ownerId: Number(e.target.value) })}
+                    value={vehicleForm.ownershipType}
+                    onChange={(e) =>
+                      setVehicleForm({
+                        ...vehicleForm,
+                        ownershipType: e.target.value as "school_owned" | "mobuss_owned" | "partner_owned",
+                      })
+                    }
                     className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
                   >
-                    <option value="">Selecionar proprietário...</option>
-                    {(overview?.vehicleOwners ?? []).map((o) => (
-                      <option key={o.id} value={o.id}>
-                        {o.fullName}
-                      </option>
-                    ))}
+                    <option value="school_owned">Própria da Escola</option>
+                    <option value="mobuss_owned">Frota MôBuss</option>
+                    <option value="partner_owned">Parceiro Independente</option>
                   </select>
                 </div>
+                {vehicleForm.ownershipType === "school_owned" ? (
+                  <div>
+                    <label className="text-[11px] text-slide-dim font-semibold block mb-1">Escola Proprietária</label>
+                    <select
+                      required
+                      value={vehicleForm.assignedSchoolId}
+                      onChange={(e) =>
+                        setVehicleForm({
+                          ...vehicleForm,
+                          assignedSchoolId: e.target.value ? Number(e.target.value) : "",
+                        })
+                      }
+                      className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                    >
+                      <option value="">Selecionar escola...</option>
+                      {(overview?.schools ?? []).map((sc) => (
+                        <option key={sc.id} value={sc.id}>
+                          {sc.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ) : (
+                  <div>
+                    <label className="text-[11px] text-slide-dim font-semibold block mb-1">Proprietário</label>
+                    <select
+                      required
+                      value={vehicleForm.ownerId}
+                      onChange={(e) => setVehicleForm({ ...vehicleForm, ownerId: Number(e.target.value) })}
+                      className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                    >
+                      <option value="">Selecionar proprietário...</option>
+                      {(overview?.vehicleOwners ?? []).map((o) => (
+                        <option key={o.id} value={o.id}>
+                          {o.fullName}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="text-[11px] text-slide-dim font-semibold block mb-1">Corredor / Rota</label>
                   <input
@@ -4630,6 +6295,44 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                     className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
                   />
                 </div>
+                {vehicleForm.ownershipType !== "school_owned" ? (
+                  <div>
+                    <label className="text-[11px] text-slide-dim font-semibold block mb-1">Escola Atribuída (opc.)</label>
+                    <select
+                      value={vehicleForm.assignedSchoolId}
+                      onChange={(e) =>
+                        setVehicleForm({
+                          ...vehicleForm,
+                          assignedSchoolId: e.target.value ? Number(e.target.value) : "",
+                        })
+                      }
+                      className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                    >
+                      <option value="">Sem escola fixa</option>
+                      {(overview?.schools ?? []).map((sc) => (
+                        <option key={sc.id} value={sc.id}>
+                          {sc.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ) : editingVehicleId ? (
+                  <div>
+                    <label className="text-[11px] text-slide-dim font-semibold block mb-1">Estado Operacional</label>
+                    <select
+                      value={vehicleForm.status}
+                      onChange={(e) => setVehicleForm({ ...vehicleForm, status: e.target.value })}
+                      className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                    >
+                      <option value="available">Disponível</option>
+                      <option value="assigned">Alocada</option>
+                      <option value="maintenance">Manutenção</option>
+                      <option value="suspended">Suspensa</option>
+                    </select>
+                  </div>
+                ) : (
+                  <div />
+                )}
               </div>
               <div className="grid grid-cols-3 gap-3">
                 <div>
@@ -4730,13 +6433,72 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                   />
                 </div>
               </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Empregador</label>
+                  <select
+                    value={editingDriver.employerType}
+                    onChange={(e) =>
+                      setEditingDriver({
+                        ...editingDriver,
+                        employerType: e.target.value as "school" | "mobuss",
+                      })
+                    }
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                  >
+                    <option value="school">Escola</option>
+                    <option value="mobuss">MôBuss</option>
+                  </select>
+                </div>
+                {editingDriver.employerType === "school" ? (
+                  <div>
+                    <label className="text-[11px] text-slide-dim font-semibold block mb-1">Escola Empregadora</label>
+                    <select
+                      required
+                      value={editingDriver.employerSchoolId}
+                      onChange={(e) =>
+                        setEditingDriver({
+                          ...editingDriver,
+                          employerSchoolId: e.target.value ? Number(e.target.value) : "",
+                        })
+                      }
+                      className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                    >
+                      <option value="">Selecionar escola...</option>
+                      {(overview?.schools ?? []).map((sc) => (
+                        <option key={sc.id} value={sc.id}>
+                          {sc.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ) : (
+                  <div>
+                    <label className="text-[11px] text-slide-dim font-semibold block mb-1">Verificação</label>
+                    <select
+                      value={editingDriver.verificationStatus}
+                      onChange={(e) =>
+                        setEditingDriver({
+                          ...editingDriver,
+                          verificationStatus: e.target.value as "verified" | "suspended" | "pending",
+                        })
+                      }
+                      className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                    >
+                      <option value="verified">Verificado / Ativo</option>
+                      <option value="suspended">Suspenso</option>
+                      <option value="pending">Pendente</option>
+                    </select>
+                  </div>
+                )}
+              </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="text-[11px] text-slide-dim font-semibold block mb-1">Categoria Carta</label>
                   <input
                     value={editingDriver.licenceCategory}
                     onChange={(e) => setEditingDriver({ ...editingDriver, licenceCategory: e.target.value })}
-                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white outline-none"
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
                   />
                 </div>
                 <div>
@@ -4744,7 +6506,7 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                   <input
                     value={editingDriver.licenceNumber}
                     onChange={(e) => setEditingDriver({ ...editingDriver, licenceNumber: e.target.value })}
-                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white font-mono outline-none"
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
                   />
                 </div>
                 <div>
@@ -4752,11 +6514,11 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                   <input
                     value={editingDriver.licenceExpiry}
                     onChange={(e) => setEditingDriver({ ...editingDriver, licenceExpiry: e.target.value })}
-                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white font-mono outline-none"
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
                   />
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="text-[11px] text-slide-dim font-semibold block mb-1">Disponibilidade</label>
                   <select
@@ -4772,6 +6534,23 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                     <option value="in_service">Em serviço</option>
                     <option value="available">Disponível</option>
                     <option value="off_duty">De folga</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Verificação</label>
+                  <select
+                    value={editingDriver.verificationStatus}
+                    onChange={(e) =>
+                      setEditingDriver({
+                        ...editingDriver,
+                        verificationStatus: e.target.value as "verified" | "suspended" | "pending",
+                      })
+                    }
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                  >
+                    <option value="verified">Verificado / Ativo</option>
+                    <option value="suspended">Suspenso</option>
+                    <option value="pending">Pendente</option>
                   </select>
                 </div>
                 <div>
@@ -4795,6 +6574,349 @@ export function AdminView({ onNavigate }: AdminViewProps) {
                 {savingDriver ? "A guardar..." : "Guardar Dados do Motorista"}
               </button>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Criar / Editar Rota */}
+      {routeModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-lg rounded-2xl bg-slide-paper-ink text-slide-paper p-6 border border-white/15 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-black">{editingRouteId ? "Editar Rota Escolar" : "Criar Nova Rota"}</h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setRouteModalOpen(false);
+                  setEditingRouteId(null);
+                }}
+                className="p-1.5 rounded-full bg-slide-surface cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {routeFormError && (
+              <div className="rounded-xl bg-red-500/15 border border-red-500/40 px-3 py-2 text-xs text-red-200">
+                {routeFormError}
+              </div>
+            )}
+
+            <form onSubmit={handleSaveRoute} className="space-y-3 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Código da Rota</label>
+                  <input
+                    required
+                    value={routeForm.code}
+                    onChange={(e) => setRouteForm({ ...routeForm, code: e.target.value.toUpperCase() })}
+                    placeholder="ROTA-E"
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono uppercase outline-none"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Nome da Rota</label>
+                  <input
+                    required
+                    value={routeForm.name}
+                    onChange={(e) => setRouteForm({ ...routeForm, name: e.target.value })}
+                    placeholder="Ex: Rota E · Benfica → Talatona"
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Corredor (Opcional)</label>
+                  <input
+                    value={routeForm.corridor}
+                    onChange={(e) => setRouteForm({ ...routeForm, corridor: e.target.value })}
+                    placeholder="Ex: Benfica · Talatona"
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Escola (Opcional)</label>
+                  <select
+                    value={routeForm.schoolId === "" ? "" : String(routeForm.schoolId)}
+                    onChange={(e) => setRouteForm({ ...routeForm, schoolId: e.target.value ? Number(e.target.value) : "" })}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white outline-none"
+                  >
+                    <option value="">Sem escola específica (Opcional)</option>
+                    {(overview?.schools ?? []).map((sc) => (
+                      <option key={sc.id} value={sc.id}>
+                        {sc.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-[11px] text-slide-dim font-semibold block mb-1">
+                  Coordenadas da Linha no Mapa (Opcional — 1 ponto por linha: lat, lng)
+                </label>
+                <textarea
+                  rows={4}
+                  value={routeForm.pathText}
+                  onChange={(e) => setRouteForm({ ...routeForm, pathText: e.target.value })}
+                  placeholder={"-8.838300, 13.234400\n-8.855000, 13.230000"}
+                  className="w-full rounded-xl bg-slide-bg border border-white/15 px-3.5 py-2.5 text-white font-mono outline-none"
+                />
+              </div>
+
+              <label className="inline-flex items-center gap-2 text-xs text-slide-paper cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={routeForm.active}
+                  onChange={(e) => setRouteForm({ ...routeForm, active: e.target.checked })}
+                />
+                <span>Rota ativa para operação</span>
+              </label>
+
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="submit"
+                  disabled={savingRoute}
+                  className="flex-1 rounded-xl bg-slide-ok text-white py-3 font-bold cursor-pointer disabled:opacity-50"
+                >
+                  {savingRoute ? "A guardar..." : editingRouteId ? "Guardar Alterações da Rota" : "Criar Rota na Base de Dados"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRouteModalOpen(false);
+                    setEditingRouteId(null);
+                  }}
+                  className="rounded-xl bg-slide-surface px-4 py-3 font-semibold cursor-pointer"
+                >
+                  Cancelar
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Agendar / Editar Escala Recorrente */}
+      {routeScheduleModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-lg rounded-2xl bg-slide-paper-ink text-slide-paper p-6 border border-white/15 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-black">
+                {editingScheduleId ? "Editar Escala Recorrente" : "Agendar Rota Recorrente"}
+              </h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setRouteScheduleModalOpen(false);
+                  setEditingScheduleId(null);
+                }}
+                className="p-1.5 rounded-full bg-slide-surface cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            {scheduleError && (
+              <div className="rounded-xl bg-red-500/15 border border-red-500/40 px-3 py-2 text-xs text-red-200">
+                {scheduleError}
+              </div>
+            )}
+            <form onSubmit={handleSaveRouteSchedule} className="space-y-3 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Escola Contratada</label>
+                  <select
+                    required
+                    value={scheduleForm.schoolId}
+                    onChange={(e) =>
+                      setScheduleForm({
+                        ...scheduleForm,
+                        schoolId: e.target.value ? Number(e.target.value) : "",
+                      })
+                    }
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white outline-none"
+                  >
+                    <option value="">Selecionar escola...</option>
+                    {selectableSchools.map((sc) => (
+                      <option key={sc.id} value={sc.id}>
+                        {sc.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Rota</label>
+                  <select
+                    required
+                    value={scheduleForm.routeCode}
+                    onChange={(e) => {
+                      const code = e.target.value;
+                      const found = allRoutes.find((r) => r.code === code);
+                      setScheduleForm({
+                        ...scheduleForm,
+                        routeCode: code,
+                        routeName: found?.name ?? code,
+                      });
+                    }}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white outline-none"
+                  >
+                    {allRoutes.map((r) => (
+                      <option key={r.id} value={r.code}>
+                        {r.code} · {r.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Viatura</label>
+                  <select
+                    value={scheduleForm.vehicleId}
+                    onChange={(e) =>
+                      setScheduleForm({
+                        ...scheduleForm,
+                        vehicleId: e.target.value ? Number(e.target.value) : "",
+                      })
+                    }
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white outline-none"
+                  >
+                    <option value="">Por alocar</option>
+                    {(overview?.vehicles ?? []).map((v) => (
+                      <option key={v.id} value={v.id}>
+                        Autocarro {v.fleetNumber} ({v.plate})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Motorista</label>
+                  <select
+                    value={scheduleForm.driverId}
+                    onChange={(e) =>
+                      setScheduleForm({
+                        ...scheduleForm,
+                        driverId: e.target.value ? Number(e.target.value) : "",
+                      })
+                    }
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white outline-none"
+                  >
+                    <option value="">Automático / Por alocar</option>
+                    {(overview?.drivers ?? []).map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.fullName}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="text-[11px] text-slide-dim font-semibold block mb-1">Dias da Semana</label>
+                <div className="flex flex-wrap gap-1.5">
+                  {WEEKDAY_OPTIONS.map((w) => {
+                    const checked = scheduleForm.days.includes(w.id);
+                    return (
+                      <button
+                        key={w.id}
+                        type="button"
+                        onClick={() =>
+                          setScheduleForm((prev) => ({
+                            ...prev,
+                            days: checked ? prev.days.filter((d) => d !== w.id) : [...prev.days, w.id],
+                          }))
+                        }
+                        className={`px-2.5 py-1 rounded-lg border text-[11px] font-bold cursor-pointer ${
+                          checked
+                            ? "bg-slide-accent text-white border-slide-accent"
+                            : "bg-slide-bg border-white/15 text-slide-dim"
+                        }`}
+                      >
+                        {w.short}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Turno</label>
+                  <select
+                    value={scheduleForm.shiftType}
+                    onChange={(e) =>
+                      setScheduleForm({
+                        ...scheduleForm,
+                        shiftType: e.target.value === "afternoon" ? "afternoon" : "morning",
+                      })
+                    }
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white outline-none"
+                  >
+                    <option value="morning">Manhã</option>
+                    <option value="afternoon">Tarde</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Partida</label>
+                  <input
+                    required
+                    type="time"
+                    value={scheduleForm.departureTime}
+                    onChange={(e) => setScheduleForm({ ...scheduleForm, departureTime: e.target.value })}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white font-mono outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slide-dim font-semibold block mb-1">Chegada</label>
+                  <input
+                    required
+                    type="time"
+                    value={scheduleForm.arrivalTime}
+                    onChange={(e) => setScheduleForm({ ...scheduleForm, arrivalTime: e.target.value })}
+                    className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2.5 text-white font-mono outline-none"
+                  />
+                </div>
+              </div>
+              <button
+                type="submit"
+                disabled={savingSchedule}
+                className="w-full rounded-xl bg-slide-ok text-white py-3 font-bold cursor-pointer disabled:opacity-50"
+              >
+                {savingSchedule ? "A guardar..." : editingScheduleId ? "Guardar Alterações" : "Agendar Escala"}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Remover Escala Recorrente */}
+      {deleteScheduleTarget && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-sm rounded-2xl bg-slide-paper-ink text-slide-paper p-6 border border-red-500/35 space-y-4 text-xs">
+            <div className="flex items-center gap-2 text-red-400 font-bold">
+              <AlertTriangle className="w-4 h-4" />
+              <span>Remover Escala Recorrente</span>
+            </div>
+            <p className="text-slide-dim leading-relaxed">
+              Confirmar remoção da escala <strong className="text-white">{deleteScheduleTarget.routeCode}</strong> ({deleteScheduleTarget.schoolName})?
+            </p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                disabled={deletingSchedule}
+                onClick={() => void handleConfirmDeleteSchedule()}
+                className="flex-1 rounded-xl bg-red-600 hover:bg-red-500 text-white py-2.5 font-bold cursor-pointer disabled:opacity-50"
+              >
+                {deletingSchedule ? "A remover..." : "Confirmar"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setDeleteScheduleTarget(null)}
+                className="rounded-xl bg-slide-surface px-4 py-2.5 font-semibold cursor-pointer"
+              >
+                Cancelar
+              </button>
+            </div>
           </div>
         </div>
       )}

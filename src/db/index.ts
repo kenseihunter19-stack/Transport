@@ -6,6 +6,21 @@ declare global {
   var _postgresPool: Pool | undefined;
 }
 
+function isTransientIdleDisconnect(err: unknown): boolean {
+  const code = typeof err === 'object' && err !== null && 'code' in err ? String((err as { code?: unknown }).code ?? '') : '';
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return (
+    msg.includes('Connection terminated unexpectedly') ||
+    msg.includes('Connection terminated') ||
+    code === 'ECONNRESET' ||
+    code === 'EPIPE' ||
+    code === 'ETIMEDOUT' ||
+    code === '57P01' ||
+    code === '57P02' ||
+    code === '57P03'
+  );
+}
+
 export const createPool = () => {
   if (!global._postgresPool) {
     global._postgresPool = new Pool({
@@ -15,10 +30,20 @@ export const createPool = () => {
       database: process.env.SQL_DB_NAME,
       max: 10,
       connectionTimeoutMillis: 15000,
+      idleTimeoutMillis: 10000,
+      maxLifetimeSeconds: 300,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10000,
+      allowExitOnIdle: true,
     });
 
     global._postgresPool.on('error', (err) => {
-      console.error('Unexpected error on idle SQL pool client:', err);
+      const msg = err instanceof Error ? err.message : String(err ?? 'Unknown SQL pool error');
+      if (isTransientIdleDisconnect(err)) {
+        console.warn(`[SQL Pool] Idle connection closed (${msg}); pool will reconnect on next query.`);
+        return;
+      }
+      console.error(`[SQL Pool] Error on idle SQL pool client: ${msg}`);
     });
   }
   return global._postgresPool;

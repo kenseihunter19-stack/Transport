@@ -1,5 +1,3 @@
-import { downloadDocument } from "@/lib/operations";
-
 export interface SyncedContract {
   id: string;
   client: string;
@@ -64,24 +62,8 @@ export interface SyncedPricingConfig {
   ivaPercent: number;
   companyName: string;
   companyNif: string;
+  companyAddress?: string;
   multicaixaEntityCode?: string;
-  agtCertCode: string;
-}
-
-export interface SyncedPayment {
-  id: string;
-  invoice: string;
-  student: string;
-  guardian: string;
-  phone: string;
-  amount: string;
-  amountValue: number;
-  date: string;
-  time: string;
-  status: "Validado" | "Pendente";
-  emisRef: string;
-  agtCert: string;
-  hashFiscal: string;
 }
 
 export interface MoBussSyncState {
@@ -91,7 +73,6 @@ export interface MoBussSyncState {
   ratings: SyncedDriverRating[];
   alerts: SyncedAlert[];
   pricing: SyncedPricingConfig;
-  payments: SyncedPayment[];
 }
 
 const STORAGE_KEY = "mobuss_platform_sync_v3";
@@ -109,72 +90,9 @@ export const DEFAULT_PRICING: SyncedPricingConfig = {
   ivaPercent: 14,
   companyName: "MôBuss Angola Transporte Escolar Lda.",
   companyNif: "5417209418",
+  companyAddress: "Av. Comandante Valódia, Luanda, Angola",
   multicaixaEntityCode: "00845",
-  agtCertCode: "AGT-CERT/2026/MOBUSS",
 };
-
-export const INITIAL_PAYMENTS: SyncedPayment[] = [
-  {
-    id: "pay-1",
-    invoice: "FT-MOBUSS-2026/8192",
-    student: "Maria Domingos",
-    guardian: "Sra. Luísa Domingos",
-    phone: "+244 923 456 789",
-    amount: "3 000 Kz",
-    amountValue: 3000,
-    date: "27 Out 2026",
-    time: "07:15",
-    status: "Validado",
-    emisRef: "MCX-901824-EMIS",
-    agtCert: "AGT-CERT/2026/8192-VALID",
-    hashFiscal: "e7a9-90b1-4f12-88ca",
-  },
-  {
-    id: "pay-2",
-    invoice: "FT-MOBUSS-2026/8193",
-    student: "Edson Manuel",
-    guardian: "Sr. Manuel Neto",
-    phone: "+244 912 345 678",
-    amount: "3 000 Kz",
-    amountValue: 3000,
-    date: "27 Out 2026",
-    time: "07:22",
-    status: "Validado",
-    emisRef: "MCX-482019-EMIS",
-    agtCert: "AGT-CERT/2026/8193-VALID",
-    hashFiscal: "b3c4-11d8-7a92-31ef",
-  },
-  {
-    id: "pay-3",
-    invoice: "FT-MOBUSS-2026/8194",
-    student: "Sofia Pedro",
-    guardian: "Sra. Isabel Pedro",
-    phone: "+244 923 888 777",
-    amount: "3 000 Kz",
-    amountValue: 3000,
-    date: "26 Out 2026",
-    time: "18:40",
-    status: "Validado",
-    emisRef: "MCX-194029-EMIS",
-    agtCert: "AGT-CERT/2026/8194-VALID",
-    hashFiscal: "91f0-52a6-6e04-19cd",
-  },
-  {
-    id: "pay-4",
-    invoice: "FT-MOBUSS-2026/8195",
-    student: "Bruno Neto",
-    guardian: "Sr. Carlos Neto",
-    phone: "+244 945 678 901",
-    amount: "3 000 Kz",
-    amountValue: 3000,
-    date: "26 Out 2026",
-    time: "20:05",
-    status: "Pendente",
-    emisRef: "MCX-582910-EMIS",
-    agtCert: "AGT-CERT/2026/8195-AWAIT",
-    hashFiscal: "40d2-88e1-2b77-05aa",
-  },
-];
 
 export const INITIAL_CONTRACTS: SyncedContract[] = [
   {
@@ -308,7 +226,6 @@ const DEFAULT_SYNC_STATE: MoBussSyncState = {
   ],
   alerts: INITIAL_ALERTS,
   pricing: DEFAULT_PRICING,
-  payments: INITIAL_PAYMENTS,
 };
 
 export function readMoBussSync(): MoBussSyncState {
@@ -323,7 +240,6 @@ export function readMoBussSync(): MoBussSyncState {
       ratings: Array.isArray(parsed.ratings) ? parsed.ratings : DEFAULT_SYNC_STATE.ratings,
       alerts: Array.isArray(parsed.alerts) && parsed.alerts.length > 0 ? parsed.alerts : INITIAL_ALERTS,
       pricing: parsed.pricing ? { ...DEFAULT_PRICING, ...parsed.pricing } : DEFAULT_PRICING,
-      payments: Array.isArray(parsed.payments) && parsed.payments.length > 0 ? parsed.payments : INITIAL_PAYMENTS,
     };
   } catch {
     return DEFAULT_SYNC_STATE;
@@ -365,74 +281,6 @@ export function updatePricingConfig(partial: Partial<SyncedPricingConfig>) {
       ...partial,
     },
   }));
-}
-
-export function recordSyncedPayment(payment: Omit<SyncedPayment, "id" | "hashFiscal">) {
-  const hashFiscal = `${Math.random().toString(16).slice(2, 6)}-${Math.random().toString(16).slice(2, 6)}-${Math.random().toString(16).slice(2, 6)}-${Math.random().toString(16).slice(2, 6)}`;
-  return writeMoBussSync((prev) => ({
-    ...prev,
-    payments: [
-      {
-        ...payment,
-        id: `pay-${Date.now()}`,
-        hashFiscal,
-      },
-      ...prev.payments,
-    ],
-  }));
-}
-
-export function exportAgtReceipt(payment: {
-  invoice: string;
-  student: string;
-  guardian: string;
-  phone: string;
-  amountValue: number;
-  date: string;
-  time?: string;
-  emisRef: string;
-  agtCert: string;
-  hashFiscal?: string;
-  status?: string;
-  school?: string;
-  routeLabel?: string;
-}, pricing: SyncedPricingConfig) {
-  const ivaRate = Math.max(0, pricing.ivaPercent) / 100;
-  const baseValue = ivaRate > 0 ? Math.round(payment.amountValue / (1 + ivaRate)) : payment.amountValue;
-  const ivaAmount = Math.max(0, payment.amountValue - baseValue);
-
-  const isVerifiedFiscal = payment.status === "Validado" && !payment.invoice.startsWith("PRO-");
-
-  const content = `=====================================================
-COMPROVATIVO DE PAGAMENTO / DOCUMENTO PROVISÓRIO
-${pricing.companyName}
-NIF Emitente: ${pricing.companyNif} · Luanda, Angola
-=====================================================
-Documento: ${isVerifiedFiscal ? "Factura-Recibo" : "Nota Provisória"} nº ${payment.invoice}
-Data de Emissão: ${payment.date}${payment.time ? ` às ${payment.time}` : ""}
-Estado: ${payment.status === "Pendente" ? "AGUARDA CONFIRMAÇÃO DO PROVEDOR" : isVerifiedFiscal ? "LIQUIDADO / CONCILIADO" : "LIQUIDADO (SANDBOX — NÃO FISCAL)"}
-Canal de Pagamento: Multicaixa Express (EMIS / GPO)
-Referência: ${payment.emisRef}
-
-DADOS DO ADQUIRENTE / ENCARREGADO:
-Encarregado: ${payment.guardian}
-Educando: ${payment.student}
-Escola / Corredor: ${payment.school || "Rede Escolar Luanda"}${payment.routeLabel ? ` · ${payment.routeLabel}` : ""}
-Telefone Registado: ${payment.phone}
-
-RESUMO DE SERVIÇO (AOA):
-- Serviço: Transporte Escolar Mensal (Ida e Volta)
-- Valor Base: ${formatAOA(baseValue)}
-- IVA (${pricing.ivaPercent}%): ${formatAOA(ivaAmount)}
------------------------------------------------------
-TOTAL: ${formatAOA(payment.amountValue)}
------------------------------------------------------
-Configuração Fiscal: ${pricing.agtCertCode}
-Aviso: Documento emitido em ambiente de homologação/staging.
-A emissão fiscal certificada AGT requer integração de produção aprovada.
-=====================================================`;
-
-  downloadDocument(`Comprovativo_MoBuss_${payment.invoice.replace(/[\/\s]+/g, "_")}`, content);
 }
 
 export function addSyncedContract(contract: Omit<SyncedContract, "id" | "status">) {

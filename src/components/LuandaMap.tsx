@@ -1,7 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import "leaflet/dist/leaflet.css";
-import type { Map as LMap, Marker, Polyline, CircleMarker } from "leaflet";
-import { LUANDA_ROUTES, pointAtRoute, type RouteStop } from "@/lib/route-luanda";
+import type { Map as LMap, Marker, Polyline, CircleMarker, Circle } from "leaflet";
+import { pointAtRoute, type RouteDto, type RouteStopDto } from "@/lib/luanda-geofence";
 
 export interface LuandaFleetMarker {
   id: number;
@@ -19,10 +19,13 @@ export interface LuandaFleetMarker {
 
 interface LuandaMapProps {
   progress: number;
+  busLatLng?: [number, number] | null;
   emergency?: boolean;
   className?: string;
-  routeId?: string;
-  visibleRouteIds?: string[];
+  route?: RouteDto | null;
+  routes?: RouteDto[];
+  routeCode?: string;
+  visibleRouteCodes?: string[];
   multiRouteMode?: boolean;
   enableClustering?: boolean;
   scopeKey?: string;
@@ -32,16 +35,21 @@ interface LuandaMapProps {
   fleetMarkers?: LuandaFleetMarker[];
   selectedVehicleId?: number | null;
   onSelectVehicle?: (vehicleId: number) => void;
+  onMapClick?: (lat: number, lng: number) => void;
+  draftPin?: { lat: number; lng: number; label?: string; radiusM?: number } | null;
 }
 
 const LUANDA_DEFAULT_CENTER: [number, number] = [-8.855, 13.234];
 
 export function LuandaMap({
   progress,
+  busLatLng = null,
   emergency,
   className = "h-56",
-  routeId = "route_a",
-  visibleRouteIds,
+  route = null,
+  routes = [],
+  routeCode,
+  visibleRouteCodes,
   multiRouteMode = false,
   enableClustering = false,
   scopeKey,
@@ -51,10 +59,14 @@ export function LuandaMap({
   fleetMarkers = [],
   selectedVehicleId = null,
   onSelectVehicle,
+  onMapClick,
+  draftPin = null,
 }: LuandaMapProps) {
   const el = useRef<HTMLDivElement>(null);
   const map = useRef<LMap | null>(null);
   const bus = useRef<Marker | null>(null);
+  const draftMarker = useRef<Marker | null>(null);
+  const draftCircle = useRef<Circle | null>(null);
   const fleetLayerMarkers = useRef<Marker[]>([]);
   const routeLines = useRef<Polyline[]>([]);
   const stopMarkers = useRef<CircleMarker[]>([]);
@@ -62,6 +74,8 @@ export function LuandaMap({
 
   const onSelectVehicleRef = useRef(onSelectVehicle);
   onSelectVehicleRef.current = onSelectVehicle;
+  const onMapClickRef = useRef(onMapClick);
+  onMapClickRef.current = onMapClick;
   const fleetMarkersRef = useRef(fleetMarkers);
   fleetMarkersRef.current = fleetMarkers;
   const selectedVehicleIdRef = useRef(selectedVehicleId);
@@ -71,11 +85,49 @@ export function LuandaMap({
   const expandedClusterRef = useRef<string | null>(null);
   const lastScopeKeyRef = useRef<string | undefined>(undefined);
 
-  const activeRoute = LUANDA_ROUTES[routeId] || LUANDA_ROUTES.route_a;
-  const resolvedRouteIds = multiRouteMode
-    ? Array.from(new Set((visibleRouteIds ?? []).filter((id) => Boolean(LUANDA_ROUTES[id]))))
-    : [activeRoute.id];
-  const resolvedRouteIdsKey = resolvedRouteIds.join(",");
+  const allRoutesList = useMemo(() => {
+    if (route && !routes.some((r) => r.id === route.id && r.code === route.code)) {
+      return [route, ...routes];
+    }
+    return routes;
+  }, [route, routes]);
+
+  const activeRoute = useMemo(() => {
+    if (route) return route;
+    if (routeCode) {
+      const normalized = routeCode.trim().toUpperCase();
+      const matched = allRoutesList.find((r) => r.code.trim().toUpperCase() === normalized);
+      if (matched) return matched;
+    }
+    return allRoutesList[0] ?? null;
+  }, [route, routeCode, allRoutesList]);
+
+  const resolvedRoutes = useMemo(() => {
+    if (multiRouteMode) {
+      if (!visibleRouteCodes || visibleRouteCodes.length === 0) {
+        return allRoutesList.filter((r) => r.active);
+      }
+      const allowed = new Set(visibleRouteCodes.map((c) => c.trim().toUpperCase()));
+      return allRoutesList.filter((r) => allowed.has(r.code.trim().toUpperCase()));
+    }
+    return activeRoute ? [activeRoute] : [];
+  }, [multiRouteMode, visibleRouteCodes, allRoutesList, activeRoute]);
+
+  const routesRenderKey = useMemo(
+    () =>
+      resolvedRoutes
+        .map(
+          (r) =>
+            `${r.id}:${r.code}:${r.pathCoordinates.length}:${r.stops
+              .map((s) => `${s.id ?? s.position}:${s.latitude}:${s.longitude}:${s.name}`)
+              .join("|")}`
+        )
+        .join(";"),
+    [resolvedRoutes]
+  );
+
+  const resolvedRoutesRef = useRef(resolvedRoutes);
+  resolvedRoutesRef.current = resolvedRoutes;
 
   const renderRoutes = () => {
     const m = map.current;
@@ -87,49 +139,57 @@ export function LuandaMap({
     stopMarkers.current.forEach((sm) => sm.remove());
     stopMarkers.current = [];
 
+    const toDraw = resolvedRoutesRef.current;
     const selectedVehicle = fleetMarkersRef.current.find((f) => f.id === selectedVehicleIdRef.current);
-    const highlightedRouteId = multiRouteMode
+    const highlightedRouteCode = multiRouteMode
       ? selectedVehicle
-        ? Object.values(LUANDA_ROUTES).find((r) => r.code === selectedVehicle.routeCode)?.id ?? null
-        : resolvedRouteIds[0] ?? null
-      : activeRoute.id;
+        ? selectedVehicle.routeCode.trim().toUpperCase()
+        : toDraw[0]?.code.trim().toUpperCase() ?? null
+      : activeRoute?.code.trim().toUpperCase() ?? null;
 
-    resolvedRouteIds.forEach((id) => {
-      const cfg = LUANDA_ROUTES[id];
-      if (!cfg) return;
-      const isHighlighted = !multiRouteMode || id === highlightedRouteId;
+    toDraw.forEach((cfg) => {
+      const isHighlighted = !multiRouteMode || cfg.code.trim().toUpperCase() === highlightedRouteCode;
+      const lineCoords: [number, number][] =
+        cfg.pathCoordinates.length >= 2
+          ? cfg.pathCoordinates
+          : cfg.stops.map((st) => [st.latitude, st.longitude] as [number, number]);
 
-      const casing = L.polyline(cfg.path, {
-        color: darkMode ? "#ffffff" : "#09090b",
-        weight: isHighlighted ? 8 : 5,
-        opacity: isHighlighted ? (darkMode ? 0.32 : 0.72) : darkMode ? 0.14 : 0.3,
-      }).addTo(m);
+      if (lineCoords.length >= 2) {
+        const casing = L.polyline(lineCoords, {
+          color: darkMode ? "#ffffff" : "#09090b",
+          weight: isHighlighted ? 8 : 5,
+          opacity: isHighlighted ? (darkMode ? 0.32 : 0.72) : darkMode ? 0.14 : 0.3,
+        }).addTo(m);
 
-      const line = L.polyline(cfg.path, {
-        color: isHighlighted ? "#e11d2e" : "#38bdf8",
-        weight: isHighlighted ? 5 : 3,
-        opacity: isHighlighted ? 0.96 : 0.58,
-        dashArray: isHighlighted ? undefined : "6 6",
-      })
-        .bindTooltip(`${cfg.code} · ${cfg.corridor}`, { sticky: true })
-        .addTo(m);
+        const line = L.polyline(lineCoords, {
+          color: isHighlighted ? "#e11d2e" : "#38bdf8",
+          weight: isHighlighted ? 5 : 3,
+          opacity: isHighlighted ? 0.96 : 0.58,
+          dashArray: isHighlighted ? undefined : "6 6",
+        })
+          .bindTooltip(`${cfg.code} · ${cfg.corridor || cfg.name}`, { sticky: true })
+          .addTo(m);
 
-      routeLines.current.push(casing, line);
+        routeLines.current.push(casing, line);
+      }
 
-      if (!multiRouteMode || isHighlighted || resolvedRouteIds.length <= 2) {
-        cfg.stops.forEach((s: RouteStop, index: number) => {
+      if (!multiRouteMode || isHighlighted || toDraw.length <= 2) {
+        cfg.stops.forEach((s: RouteStopDto, index: number) => {
           const isEnd = index === cfg.stops.length - 1;
-          const marker = L.circleMarker(pointAtRoute(cfg.path, s.at), {
-            radius: isHighlighted ? (isEnd ? 7.5 : 5) : 4,
+          const marker = L.circleMarker([s.latitude, s.longitude], {
+            radius: isHighlighted ? (isEnd ? 7.5 : 5.5) : 4,
             color: "#ffffff",
             weight: isHighlighted ? 2.5 : 1.5,
             fillColor: isEnd ? "#16a34a" : "#09090b",
             fillOpacity: isHighlighted ? 1 : 0.75,
           })
-            .bindTooltip(`${cfg.code} · ${index + 1}. ${s.name}`, {
-              permanent: false,
-              direction: "top",
-            })
+            .bindTooltip(
+              `${cfg.code} · ${index + 1}. ${s.name}${s.scheduledTime ? ` (${s.scheduledTime})` : ""}`,
+              {
+                permanent: false,
+                direction: "top",
+              }
+            )
             .addTo(m);
           stopMarkers.current.push(marker);
         });
@@ -190,7 +250,6 @@ export function LuandaMap({
       return;
     }
 
-    // Zoom-aware screen-space clustering (~44px radius)
     const thresholdPx = 44;
     const clusters: Array<{
       anchorPt: { x: number; y: number };
@@ -281,9 +340,11 @@ export function LuandaMap({
   const fitMapToScope = (m: LMap, L: typeof import("leaflet")) => {
     const pts: [number, number][] = [];
     fleetMarkersRef.current.forEach((f) => pts.push([f.lat, f.lng]));
-    resolvedRouteIds.forEach((id) => {
-      const cfg = LUANDA_ROUTES[id];
-      if (cfg) pts.push(...cfg.path);
+    resolvedRoutesRef.current.forEach((cfg) => {
+      if (cfg.pathCoordinates.length > 0) {
+        pts.push(...cfg.pathCoordinates);
+      }
+      cfg.stops.forEach((st) => pts.push([st.latitude, st.longitude]));
     });
 
     if (pts.length >= 2) {
@@ -294,6 +355,106 @@ export function LuandaMap({
       m.setView(LUANDA_DEFAULT_CENTER, 12);
     }
   };
+
+  const busLatLngRef = useRef<[number, number] | null>(busLatLng);
+  busLatLngRef.current = busLatLng;
+  const progressRef = useRef(progress);
+  progressRef.current = progress;
+  const showBusMarkerRef = useRef(showBusMarker);
+  showBusMarkerRef.current = showBusMarker;
+  const emergencyRef = useRef(emergency);
+  emergencyRef.current = emergency;
+  const activeRouteRef = useRef(activeRoute);
+  activeRouteRef.current = activeRoute;
+  const draftPinRef = useRef(draftPin);
+  draftPinRef.current = draftPin;
+
+  const syncSingleBusMarker = () => {
+    const m = map.current;
+    const L = leafletRef.current;
+    if (!m || !L) return;
+
+    if (!showBusMarkerRef.current) {
+      if (bus.current) {
+        bus.current.remove();
+        bus.current = null;
+      }
+      return;
+    }
+
+    const activePath =
+      activeRouteRef.current?.pathCoordinates && activeRouteRef.current.pathCoordinates.length > 0
+        ? activeRouteRef.current.pathCoordinates
+        : activeRouteRef.current?.stops.map((s) => [s.latitude, s.longitude] as [number, number]) ?? [];
+
+    const pos: [number, number] =
+      busLatLngRef.current ??
+      (activePath.length > 0 ? pointAtRoute(activePath, progressRef.current) : LUANDA_DEFAULT_CENTER);
+
+    if (!busLatLngRef.current && activePath.length === 0) {
+      if (bus.current) {
+        bus.current.remove();
+        bus.current = null;
+      }
+      return;
+    }
+
+    if (!bus.current) {
+      bus.current = L.marker(pos, {
+        icon: L.divIcon({
+          className: "",
+          html: '<div class="tg-bus"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6v6"/><path d="M15 6v6"/><path d="M2 12h19.6"/><path d="M18 18h3s.5-1.7.8-2.8c.1-.4.2-.8.2-1.2 0-.4-.1-.8-.2-1.2l-1.4-5C20.1 6.8 19.1 6 18 6H4a2 2 0 0 0-2 2v10h3"/><circle cx="7" cy="18" r="2"/><path d="M9 18h5"/><circle cx="16" cy="18" r="2"/></svg></div>',
+          iconSize: [38, 38],
+          iconAnchor: [19, 19],
+        }),
+      }).addTo(m);
+    } else {
+      bus.current.setLatLng(pos);
+    }
+    bus.current.getElement()?.querySelector(".tg-bus")?.classList.toggle("tg-sos", !!emergencyRef.current);
+  };
+
+  const syncDraftPin = () => {
+    const m = map.current;
+    const L = leafletRef.current;
+    if (!m || !L) return;
+
+    if (draftMarker.current) {
+      draftMarker.current.remove();
+      draftMarker.current = null;
+    }
+    if (draftCircle.current) {
+      draftCircle.current.remove();
+      draftCircle.current = null;
+    }
+
+    const pin = draftPinRef.current;
+    if (!pin || !Number.isFinite(pin.lat) || !Number.isFinite(pin.lng)) return;
+
+    draftMarker.current = L.marker([pin.lat, pin.lng], {
+      zIndexOffset: 950,
+      icon: L.divIcon({
+        className: "",
+        html: '<div style="width:18px;height:18px;border-radius:9999px;background:#e11d2e;border:3px solid #ffffff;box-shadow:0 4px 14px rgba(0,0,0,0.55);"></div>',
+        iconSize: [18, 18],
+        iconAnchor: [9, 9],
+      }),
+    })
+      .bindTooltip(pin.label || "Ponto selecionado", { permanent: false, direction: "top" })
+      .addTo(m);
+
+    if (pin.radiusM && pin.radiusM > 0) {
+      draftCircle.current = L.circle([pin.lat, pin.lng], {
+        radius: pin.radiusM,
+        color: "#e11d2e",
+        weight: 1.5,
+        fillColor: "#e11d2e",
+        fillOpacity: 0.12,
+      }).addTo(m);
+    }
+  };
+
+  const activeRouteKey = activeRoute ? `${activeRoute.id}:${activeRoute.code}` : "none";
 
   useEffect(() => {
     let cancelled = false;
@@ -321,19 +482,11 @@ export function LuandaMap({
       fitMapToScope(m, L);
       renderRoutes();
 
-      if (showBusMarker) {
-        const currentPos = pointAtRoute(activeRoute.path, progress);
-        bus.current = L.marker(currentPos, {
-          icon: L.divIcon({
-            className: "",
-            html: '<div class="tg-bus"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6v6"/><path d="M15 6v6"/><path d="M2 12h19.6"/><path d="M18 18h3s.5-1.7.8-2.8c.1-.4.2-.8.2-1.2 0-.4-.1-.8-.2-1.2l-1.4-5C20.1 6.8 19.1 6 18 6H4a2 2 0 0 0-2 2v10h3"/><circle cx="7" cy="18" r="2"/><path d="M9 18h5"/><circle cx="16" cy="18" r="2"/></svg></div>',
-            iconSize: [38, 38],
-            iconAnchor: [19, 19],
-          }),
-        }).addTo(m);
-      } else {
-        bus.current = null;
-      }
+      bus.current = null;
+      draftMarker.current = null;
+      draftCircle.current = null;
+      syncSingleBusMarker();
+      syncDraftPin();
 
       const handleViewportChange = () => {
         if (enableClusteringRef.current) {
@@ -343,6 +496,12 @@ export function LuandaMap({
 
       m.on("zoomend", handleViewportChange);
       m.on("moveend", handleViewportChange);
+      m.on("click", (evt) => {
+        onMapClickRef.current?.(
+          Number(evt.latlng.lat.toFixed(6)),
+          Number(evt.latlng.lng.toFixed(6))
+        );
+      });
       syncFleetMarkers();
     });
 
@@ -352,12 +511,13 @@ export function LuandaMap({
       routeLines.current = [];
       stopMarkers.current = [];
       bus.current = null;
+      draftMarker.current = null;
+      draftCircle.current = null;
       map.current?.remove();
       map.current = null;
     };
-  }, [multiRouteMode ? "multi" : routeId, darkMode, showBusMarker, showZoomControl]);
+  }, [multiRouteMode ? "multi" : activeRouteKey, darkMode, showZoomControl]);
 
-  // Re-draw visible routes & re-fit bounds when school/filter scope changes
   useEffect(() => {
     const m = map.current;
     const L = leafletRef.current;
@@ -370,27 +530,21 @@ export function LuandaMap({
       expandedClusterRef.current = null;
       fitMapToScope(m, L);
     }
-  }, [resolvedRouteIdsKey, selectedVehicleId, scopeKey, darkMode]);
+  }, [routesRenderKey, selectedVehicleId, scopeKey, darkMode]);
 
-  // Update simulator bus position when progress changes
   useEffect(() => {
-    if (!bus.current) return;
-    const pos = pointAtRoute(activeRoute.path, progress);
-    bus.current.setLatLng(pos);
-  }, [progress, activeRoute]);
+    syncSingleBusMarker();
+  }, [showBusMarker, progress, busLatLng, emergency, activeRouteKey, darkMode, showZoomControl]);
 
-  // SOS pulse animation
   useEffect(() => {
-    bus.current?.getElement()?.querySelector(".tg-bus")?.classList.toggle("tg-sos", !!emergency);
-  }, [emergency, progress]);
+    syncDraftPin();
+  }, [draftPin?.lat, draftPin?.lng, draftPin?.label, draftPin?.radiusM, darkMode]);
 
-  // Sync real fleet GPS markers
   useEffect(() => {
     expandedClusterRef.current = null;
     syncFleetMarkers();
   }, [fleetMarkers, selectedVehicleId, enableClustering, darkMode, showZoomControl]);
 
-  // Pan smoothly to selected vehicle if it has coordinates
   useEffect(() => {
     const m = map.current;
     if (!m || !selectedVehicleId) return;
@@ -403,7 +557,9 @@ export function LuandaMap({
   return (
     <div
       ref={el}
-      className={`overflow-hidden z-0 ${darkMode ? "bg-[#0d1117] mobuss-map-dark" : "bg-zinc-200"} ${className}`}
+      className={`overflow-hidden z-0 ${onMapClick ? "cursor-crosshair" : ""} ${
+        darkMode ? "bg-[#0d1117] mobuss-map-dark" : "bg-zinc-200"
+      } ${className}`}
     />
   );
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   AlertTriangle,
@@ -45,13 +45,37 @@ import {
   X,
 } from "lucide-react";
 import { LuandaMap } from "@/components/LuandaMap";
-import { LUANDA_ROUTES, type LuandaRouteConfig } from "@/lib/route-luanda";
+import { useAuth } from "@/contexts/AuthContext";
+import { useTelemetrySocket } from "@/hooks/useTelemetrySocket";
+import {
+  computeRemainingStopsEta,
+  DELAY_REASONS,
+  DELAY_REASON_LABELS,
+  estimateRouteProgressFromPath,
+  haversineMeters,
+  resolveRouteByCode,
+  type DelayReason,
+  type RouteDto,
+} from "@/lib/luanda-geofence";
 import { MulticaixaModal } from "@/components/MulticaixaModal";
 import { AttendanceReportModal } from "@/components/AttendanceReportModal";
 import { VehicleDocumentsModal } from "@/components/VehicleDocumentsModal";
+import { Geolocation } from "@capacitor/geolocation";
+import {
+  enqueueOfflineLocation,
+  flushOfflineLocations,
+  getQueuedLocations,
+} from "@/lib/offline-queue";
+import { watchDeviceNetwork } from "@/lib/native-bridge";
+import { isNativeCapacitor } from "@/lib/runtime-config";
+import { downloadInvoicePdf } from "@/lib/invoice-pdf";
+import {
+  formatNotificationTimestampPt,
+  NOTIFICATION_TYPE_LABEL,
+  type AppNotification,
+} from "@/lib/notifications";
 import {
   clearHazardForBus,
-  exportAgtReceipt,
   formatAOA,
   publishHazardReport,
   publishSimulatorAlert,
@@ -104,6 +128,104 @@ export type QuickMessage = {
   text: string;
   time: string;
 };
+
+interface GuardianActiveTrip {
+  id: number;
+  tripCode: string;
+  routeName: string;
+  legType: string;
+  state: string;
+  gpsStatus: string;
+  lastLat: string | null;
+  lastLng: string | null;
+  lastLocationAt: string | null;
+  delayReason?: string | null;
+  delayNote?: string | null;
+  delayReportedAt?: string | null;
+  vehiclePlate: string | null;
+  fleetNumber: number | null;
+  driverName: string | null;
+  driverPhone?: string | null;
+}
+
+interface GuardianBackendStudent {
+  id: number;
+  fullName: string;
+  schoolName: string;
+  routeCode: string;
+  stopName: string;
+  stopIndex?: number;
+  currentJourneyState: string;
+  pinPolicy: string;
+  route?: RouteDto | null;
+  handoverCredential: {
+    maskedDisplay: string;
+    status: string;
+    expiresAt: string;
+    tripScope: string;
+    lockedUntil: string | null;
+  } | null;
+  activeTrip: GuardianActiveTrip | null;
+}
+
+interface GuardianBackendInvoice {
+  id: number;
+  invoiceNumber: string;
+  studentName: string;
+  description?: string | null;
+  amountAoa: number;
+  paymentMethod: string;
+  paymentEntity?: string | null;
+  paymentReferencePin?: string | null;
+  status: string;
+  providerReference?: string | null;
+  createdAt: string;
+  confirmedAt?: string | null;
+}
+
+const PARENT_LOCATION_FRESH_MS = 5 * 60 * 1000;
+
+function formatLastUpdateTime(isoTimestamp: string | null): string {
+  if (!isoTimestamp) return "sem registo";
+  const parsed = Date.parse(isoTimestamp);
+  if (!Number.isFinite(parsed)) return "sem registo";
+  const date = new Date(parsed);
+  const now = new Date();
+  const sameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+  return sameDay
+    ? date.toLocaleTimeString("pt-AO", { hour: "2-digit", minute: "2-digit" })
+    : date.toLocaleString("pt-AO", {
+        day: "2-digit",
+        month: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+}
+
+interface DriverBackendTrip {
+  id: number;
+  tripCode: string;
+  routeCode: string;
+  routeName?: string;
+  state: string;
+  gpsStatus?: string;
+  lastLat?: string | null;
+  lastLng?: string | null;
+  delayReason?: string | null;
+  delayNote?: string | null;
+  delayReportedAt?: string | null;
+}
+
+function isLocationPermissionDeniedError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const errObj = error as { code?: unknown; message?: unknown };
+  if (errObj.code === 1) return true;
+  const msg = String(errObj.message ?? error).toLowerCase();
+  return msg.includes("denied") || msg.includes("permission") || msg.includes("permiss");
+}
 
 const EMERGENCY_TYPES = [
   { label: "Problema de saúde súbito de aluno", kind: "health" },
@@ -212,11 +334,23 @@ export function NativeMobileApp({
   });
   const [tutorialStep, setTutorialStep] = useState(0);
 
-  // Multi-route Luanda selector
-  const [selectedRouteId, setSelectedRouteId] = useState<string>("route_a");
-  const currentRoute: LuandaRouteConfig = LUANDA_ROUTES[selectedRouteId] || LUANDA_ROUTES.route_a;
+  // API-loaded Luanda routes (parent & company) + strictly assigned route (driver)
+  const [apiRoutes, setApiRoutes] = useState<RouteDto[]>([]);
+  const [selectedRouteCode, setSelectedRouteCode] = useState<string>("ROTA-A");
+  const [assignedDriverRoute, setAssignedDriverRoute] = useState<RouteDto | null>(null);
+  const [assignedVehicleInfo, setAssignedVehicleInfo] = useState<{
+    id: number;
+    fleetNumber: number;
+    plate: string;
+    routeCode: string;
+  } | null>(null);
+  const [assignedDriverInfo, setAssignedDriverInfo] = useState<{
+    id: number;
+    fullName: string;
+    phone: string;
+  } | null>(null);
 
-  // Route & simulation states
+  // Route & trip progression states
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
@@ -259,6 +393,41 @@ export function NativeMobileApp({
   const [ratingTags, setRatingTags] = useState<string[]>([]);
   const [ratingSubmitted, setRatingSubmitted] = useState(false);
   const [syncPricing, setSyncPricing] = useState(() => readMoBussSync().pricing);
+  const { isAuthenticated, dbUser, apiFetch, getAuthToken } = useAuth();
+  const [guardianStudents, setGuardianStudents] = useState<GuardianBackendStudent[]>([]);
+  const [guardianInvoices, setGuardianInvoices] = useState<GuardianBackendInvoice[]>([]);
+  const [downloadingInvoiceId, setDownloadingInvoiceId] = useState<number | null>(null);
+  const [selectedBackendStudentId, setSelectedBackendStudentId] = useState<number | null>(null);
+  const [liveTripLocation, setLiveTripLocation] = useState<{
+    tripId?: number;
+    routeCode: string;
+    lat: number;
+    lng: number;
+    gpsStatus: string;
+    updatedAt: string;
+    progress?: number;
+  } | null>(null);
+  const [locationClockTick, setLocationClockTick] = useState(() => Date.now());
+  const lastProximityKeyRef = useRef<string | null>(null);
+
+  // Driver live GPS & offline queue state
+  const [driverTrips, setDriverTrips] = useState<DriverBackendTrip[]>([]);
+  const [isDeviceOnline, setIsDeviceOnline] = useState<boolean>(() =>
+    typeof navigator === "undefined" ? true : navigator.onLine
+  );
+  const [driverGpsActive, setDriverGpsActive] = useState(false);
+  const [driverGpsPermissionDenied, setDriverGpsPermissionDenied] = useState(false);
+  const [driverGpsRetryNonce, setDriverGpsRetryNonce] = useState(0);
+  const [queuedGpsCount, setQueuedGpsCount] = useState(0);
+  const [lastGpsUploadAt, setLastGpsUploadAt] = useState<string | null>(null);
+  const gpsOfflineSeqRef = useRef<number>(Date.now());
+  const gpsFlushInFlightRef = useRef<boolean>(false);
+  const driverCurrentGpsRef = useRef<{ latitude: number; longitude: number } | null>(null);
+  const [delayModalOpen, setDelayModalOpen] = useState(false);
+  const [delayReasonInput, setDelayReasonInput] = useState<DelayReason>("trânsito intenso");
+  const [delayNoteInput, setDelayNoteInput] = useState("");
+  const [submittingDelayReport, setSubmittingDelayReport] = useState(false);
+  const [delayReportError, setDelayReportError] = useState<string | null>(null);
 
   useEffect(() => {
     setSyncPricing(readMoBussSync().pricing);
@@ -290,14 +459,13 @@ export function NativeMobileApp({
     },
   ]);
 
-  // Notifications history log
+  // Notifications history log (driver/company local log + parent server-backed inbox)
   const [notifications, setNotifications] = useState<
     Array<{ id: string; time: string; text: string; type: "info" | "alert" | "success" }>
-  >([
-    { id: "1", time: "07:35", text: "Autocarro 12 iniciou a rota da manhã em Mutamba.", type: "info" },
-    { id: "2", time: "07:42", text: "Maria Domingos registada a bordo com validação segura.", type: "success" },
-    { id: "3", time: "Ontem 16:30", text: "Viagem da tarde concluída sem incidentes.", type: "info" },
-  ]);
+  >([]);
+  const [inboxNotifications, setInboxNotifications] = useState<AppNotification[]>([]);
+  const [inboxUnreadCount, setInboxUnreadCount] = useState(0);
+  const [markingNotificationId, setMarkingNotificationId] = useState<number | null>(null);
 
   // Students list
   const [students, setStudents] = useState<Student[]>([
@@ -351,23 +519,609 @@ export function NativeMobileApp({
     },
   ]);
 
-  // Bus movement simulation & Proximity geofencing calculation
+  const activeBackendStudent = useMemo(() => {
+    if (guardianStudents.length === 0) return null;
+    return guardianStudents.find((s) => s.id === selectedBackendStudentId) ?? guardianStudents[0] ?? null;
+  }, [guardianStudents, selectedBackendStudentId]);
+
+  const loadGuardianDashboard = useCallback(async () => {
+    if (role !== "parent" || !isAuthenticated) return;
+    try {
+      const res = await apiFetch<{
+        students: GuardianBackendStudent[];
+        routes?: RouteDto[];
+        invoices?: GuardianBackendInvoice[];
+        pricing?: { studentMonthlyFeeAoa?: number; multicaixaEntityCode?: string; ivaPercent?: number } | null;
+      }>("/api/v1/guardian/dashboard");
+      const list = res.students ?? [];
+      setGuardianStudents(list);
+      setGuardianInvoices(Array.isArray(res.invoices) ? res.invoices : []);
+      if (res.pricing) {
+        setSyncPricing((prev) => ({
+          ...prev,
+          studentMonthlyFee: res.pricing?.studentMonthlyFeeAoa ?? prev.studentMonthlyFee,
+          multicaixaEntityCode: res.pricing?.multicaixaEntityCode ?? prev.multicaixaEntityCode,
+          ivaPercent: res.pricing?.ivaPercent ?? prev.ivaPercent,
+        }));
+      }
+      if (Array.isArray(res.routes)) {
+        setApiRoutes(res.routes);
+      }
+      if (list.length > 0) {
+        setSelectedBackendStudentId((prev) =>
+          prev && list.some((s) => s.id === prev) ? prev : list[0]!.id
+        );
+      }
+    } catch {
+      // Keep unavailable state when backend dashboard cannot be loaded
+    }
+  }, [role, isAuthenticated, apiFetch]);
+
+  const loadCompanyRoutes = useCallback(async () => {
+    if (role !== "company" || !isAuthenticated) return;
+    try {
+      const res = await apiFetch<{ routes: RouteDto[] }>("/api/v1/routes");
+      const list = res.routes ?? [];
+      setApiRoutes(list);
+      if (list.length > 0) {
+        setSelectedRouteCode((prev) =>
+          list.some((r) => r.code.toUpperCase() === prev.toUpperCase()) ? prev : list[0]!.code
+        );
+      }
+    } catch {
+      // Keep current routes if offline
+    }
+  }, [role, isAuthenticated, apiFetch]);
+
+  const loadParentNotifications = useCallback(async () => {
+    if (role !== "parent" || !isAuthenticated) return;
+    try {
+      const res = await apiFetch<{
+        notifications: AppNotification[];
+        unreadCount: number;
+      }>("/api/v1/notifications");
+      const items = Array.isArray(res.notifications) ? res.notifications : [];
+      setInboxNotifications(items);
+      setInboxUnreadCount(
+        typeof res.unreadCount === "number"
+          ? res.unreadCount
+          : items.filter((n) => n.readAt == null).length
+      );
+    } catch {
+      // Keep existing inbox items if offline
+    }
+  }, [role, isAuthenticated, apiFetch]);
+
+  const markParentNotificationRead = useCallback(
+    async (notificationId: number) => {
+      if (!isAuthenticated) return;
+      setMarkingNotificationId(notificationId);
+      try {
+        const res = await apiFetch<{
+          notification: AppNotification;
+          unreadCount?: number;
+        }>(`/api/v1/notifications/${notificationId}/read`, {
+          method: "PATCH",
+        });
+        setInboxNotifications((prev) => {
+          const next = prev.map((n) =>
+            n.id === notificationId
+              ? res.notification ?? { ...n, readAt: n.readAt ?? new Date().toISOString() }
+              : n
+          );
+          setInboxUnreadCount(
+            typeof res.unreadCount === "number"
+              ? res.unreadCount
+              : next.filter((n) => n.readAt == null).length
+          );
+          return next;
+        });
+      } catch {
+        // Ignore read mark failure when offline
+      } finally {
+        setMarkingNotificationId(null);
+      }
+    },
+    [isAuthenticated, apiFetch]
+  );
+
   useEffect(() => {
-    if (!running) return;
+    if (role === "parent") {
+      setRunning(false);
+      if (isAuthenticated) {
+        void loadGuardianDashboard();
+        void loadParentNotifications();
+      } else {
+        setGuardianStudents([]);
+        setGuardianInvoices([]);
+        setInboxNotifications([]);
+        setInboxUnreadCount(0);
+        setApiRoutes([]);
+        setLiveTripLocation(null);
+      }
+    } else if (role === "company") {
+      if (isAuthenticated) {
+        void loadCompanyRoutes();
+      } else {
+        setApiRoutes([]);
+      }
+    }
+  }, [role, isAuthenticated, loadGuardianDashboard, loadParentNotifications, loadCompanyRoutes]);
+
+  useEffect(() => {
+    if (role !== "parent") return;
+    const id = setInterval(() => {
+      setLocationClockTick(Date.now());
+    }, 15000);
+    return () => clearInterval(id);
+  }, [role]);
+
+  useEffect(() => {
+    if (role !== "parent" || !activeBackendStudent) return;
+    const targetCode = activeBackendStudent.route?.code ?? activeBackendStudent.routeCode;
+    if (targetCode) {
+      setSelectedRouteCode(targetCode);
+    }
+  }, [role, activeBackendStudent?.id, activeBackendStudent?.routeCode, activeBackendStudent?.route?.code]);
+
+  const currentRoute: RouteDto | null = useMemo(() => {
+    if (role === "driver") {
+      return assignedDriverRoute;
+    }
+    if (role === "parent" && activeBackendStudent?.route) {
+      if (
+        !selectedRouteCode ||
+        activeBackendStudent.route.code.toUpperCase() === selectedRouteCode.toUpperCase()
+      ) {
+        return activeBackendStudent.route;
+      }
+    }
+    return resolveRouteByCode(apiRoutes, selectedRouteCode) ?? apiRoutes[0] ?? null;
+  }, [role, assignedDriverRoute, activeBackendStudent, apiRoutes, selectedRouteCode]);
+
+  const activeRouteCode = currentRoute?.code ?? (role === "parent" ? activeBackendStudent?.routeCode ?? "" : "");
+  const activeRouteName = currentRoute?.name ?? "Rota Escolar";
+  const activeRouteStops = currentRoute?.stops ?? [];
+  const activeSchoolName =
+    (role === "parent" ? activeBackendStudent?.schoolName : null) ??
+    currentRoute?.schoolName ??
+    "Escola Parceira";
+
+  useTelemetrySocket((event) => {
+    if (role === "driver") {
+      if (event.type === "trip:state") {
+        const tripId = event.payload.tripId != null ? Number(event.payload.tripId) : null;
+        const nextState = String(event.payload.state ?? "");
+        if (tripId && nextState) {
+          setDriverTrips((prev) =>
+            prev.map((t) =>
+              t.id === tripId
+                ? {
+                    ...t,
+                    state: nextState,
+                    ...(event.payload.delayReason !== undefined
+                      ? { delayReason: event.payload.delayReason ? String(event.payload.delayReason) : null }
+                      : {}),
+                    ...(event.payload.delayNote !== undefined
+                      ? { delayNote: event.payload.delayNote ? String(event.payload.delayNote) : null }
+                      : {}),
+                    ...(event.payload.delayReportedAt !== undefined
+                      ? {
+                          delayReportedAt: event.payload.delayReportedAt
+                            ? String(event.payload.delayReportedAt)
+                            : null,
+                        }
+                      : {}),
+                  }
+                : t
+            )
+          );
+        }
+      }
+      return;
+    }
+
+    if (role !== "parent") return;
+
+    if (event.type === "notification:created") {
+      const incoming = event.payload.notification as AppNotification | undefined;
+      if (!incoming || typeof incoming.id !== "number") return;
+      setInboxNotifications((prev) => {
+        if (prev.some((n) => n.id === incoming.id)) return prev;
+        const next = [incoming, ...prev];
+        setInboxUnreadCount(next.filter((n) => n.readAt == null).length);
+        return next;
+      });
+      notify(incoming.body || incoming.title, "success", true);
+      return;
+    }
+
+    if (event.type === "trip:location") {
+      const lat = Number(event.payload.lat);
+      const lng = Number(event.payload.lng);
+      const routeCode = String(event.payload.routeCode ?? "").trim();
+      const tripId = event.payload.tripId != null ? Number(event.payload.tripId) : undefined;
+      if (!Number.isFinite(lat) || !Number.isFinite(lng) || !routeCode) return;
+
+      const targetTripId = activeBackendStudent?.activeTrip?.id;
+      const targetRouteCode = activeBackendStudent?.routeCode || activeRouteCode;
+      const matchesTrip =
+        (targetTripId != null && tripId != null && tripId === targetTripId) ||
+        (Boolean(targetRouteCode) && routeCode.toUpperCase() === targetRouteCode.toUpperCase());
+      if (!matchesTrip) return;
+
+      setLiveTripLocation({
+        tripId,
+        routeCode,
+        lat,
+        lng,
+        gpsStatus: String(event.payload.gpsStatus || "live"),
+        updatedAt: event.timestamp || new Date().toISOString(),
+        progress: event.payload.progress != null ? Number(event.payload.progress) : undefined,
+      });
+      setLocationClockTick(Date.now());
+      return;
+    }
+
+    if (event.type === "geofence:approach_500m") {
+      const routeCode = String(event.payload.routeCode ?? "").trim();
+      const tripId = event.payload.tripId != null ? Number(event.payload.tripId) : undefined;
+      const targetTripId = activeBackendStudent?.activeTrip?.id;
+      const targetRouteCode = activeBackendStudent?.routeCode || activeRouteCode;
+      const matchesTrip =
+        (targetTripId != null && tripId != null && tripId === targetTripId) ||
+        (routeCode && targetRouteCode && routeCode.toUpperCase() === targetRouteCode.toUpperCase());
+      if (!matchesTrip) return;
+
+      const stopName = String(event.payload.stopName ?? activeBackendStudent?.stopName ?? "Paragem");
+      const distanceMeters = Number(event.payload.distanceMeters ?? 0);
+      const etaMinutes = Math.max(1, Number(event.payload.etaMinutes ?? 1));
+      if (Number.isFinite(distanceMeters) && distanceMeters > 0 && distanceMeters <= 550) {
+        const alertKey = `${routeCode}:${stopName}:${Math.round(distanceMeters / 50)}`;
+        setProximityAlert({
+          visible: true,
+          stopName,
+          distanceMeters,
+          minutesAway: etaMinutes,
+        });
+        if (lastProximityKeyRef.current !== alertKey) {
+          lastProximityKeyRef.current = alertKey;
+          notify(`APROXIMAÇÃO: O autocarro está a ${distanceMeters}m de ${stopName}!`, "alert");
+        }
+      }
+      return;
+    }
+
+    if (
+      event.type === "trip:state" ||
+      event.type === "attendance:updated" ||
+      event.type === "pin:validated" ||
+      event.type === "incident:created"
+    ) {
+      if (event.type === "trip:state") {
+        const tripId = event.payload.tripId != null ? Number(event.payload.tripId) : null;
+        const nextState = String(event.payload.state ?? "");
+        if (tripId && nextState) {
+          setGuardianStudents((prev) =>
+            prev.map((st) =>
+              st.activeTrip?.id === tripId
+                ? {
+                    ...st,
+                    activeTrip: {
+                      ...st.activeTrip,
+                      state: nextState,
+                      ...(event.payload.delayReason !== undefined
+                        ? {
+                            delayReason: event.payload.delayReason
+                              ? String(event.payload.delayReason)
+                              : null,
+                          }
+                        : {}),
+                      ...(event.payload.delayNote !== undefined
+                        ? { delayNote: event.payload.delayNote ? String(event.payload.delayNote) : null }
+                        : {}),
+                      ...(event.payload.delayReportedAt !== undefined
+                        ? {
+                            delayReportedAt: event.payload.delayReportedAt
+                              ? String(event.payload.delayReportedAt)
+                              : null,
+                          }
+                        : {}),
+                    },
+                  }
+                : st
+            )
+          );
+        }
+      }
+      void loadGuardianDashboard();
+    }
+  });
+
+  const activeDriverTrip = useMemo(() => {
+    if (driverTrips.length === 0) return null;
+    return (
+      driverTrips.find((t) => t.state !== "completed" && t.state !== "cancelled") ??
+      driverTrips[0] ??
+      null
+    );
+  }, [driverTrips]);
+
+  const isDriverOnline = isDeviceOnline && !offlineMode;
+  const isBackendDriverTripEnded =
+    activeDriverTrip?.state === "completed" || activeDriverTrip?.state === "cancelled";
+  const isDriverBackendInProgress =
+    activeDriverTrip != null &&
+    [
+      "driver_checked_in",
+      "in_progress",
+      "at_stop",
+      "boarding",
+      "at_school",
+      "return_in_progress",
+      "handover_pending",
+      "delayed",
+    ].includes(activeDriverTrip.state);
+  const isDriverTripInProgress =
+    role === "driver" && running && progress < 1 && !isBackendDriverTripEnded;
+  const isCanReportDelay =
+    role === "driver" && !isBackendDriverTripEnded && progress < 1 && (isDriverTripInProgress || isDriverBackendInProgress);
+
+  const isDriverOnlineRef = useRef(isDriverOnline);
+  isDriverOnlineRef.current = isDriverOnline;
+  const activeDriverTripIdRef = useRef<number | null>(activeDriverTrip?.id ?? null);
+  activeDriverTripIdRef.current = activeDriverTrip?.id ?? null;
+  const isAuthenticatedRef = useRef(isAuthenticated);
+  isAuthenticatedRef.current = isAuthenticated;
+
+  const loadDriverDashboard = useCallback(async () => {
+    if (role !== "driver" || !isAuthenticated) return;
+    try {
+      const res = await apiFetch<{
+        trips: DriverBackendTrip[];
+        assignedRoute?: RouteDto | null;
+        assignedVehicle?: { id: number; fleetNumber: number; plate: string; routeCode: string } | null;
+        assignedDriver?: { id: number; fullName: string; phone: string } | null;
+      }>("/api/v1/driver/dashboard");
+      setDriverTrips(res.trips ?? []);
+      setAssignedDriverRoute(res.assignedRoute ?? null);
+      setAssignedVehicleInfo(res.assignedVehicle ?? null);
+      setAssignedDriverInfo(res.assignedDriver ?? null);
+      if (res.assignedRoute?.code) {
+        setSelectedRouteCode(res.assignedRoute.code);
+      }
+    } catch {
+      // Keep cached trips if temporarily unreachable
+    }
+  }, [role, isAuthenticated, apiFetch]);
+
+  const refreshQueuedGpsCount = useCallback(async () => {
+    const queued = await getQueuedLocations();
+    setQueuedGpsCount(queued.length);
+  }, []);
+
+  const flushQueuedGpsPoints = useCallback(async (): Promise<number> => {
+    if (gpsFlushInFlightRef.current) {
+      const queued = await getQueuedLocations();
+      return queued.length;
+    }
+    if (!isAuthenticatedRef.current || !isDriverOnlineRef.current) {
+      const queued = await getQueuedLocations();
+      return queued.length;
+    }
+    gpsFlushInFlightRef.current = true;
+    try {
+      const result = await flushOfflineLocations(apiFetch);
+      setQueuedGpsCount(result.remainingCount);
+      if (result.syncedCount > 0 && result.lastUploadedAt) {
+        setLastGpsUploadAt(result.lastUploadedAt);
+      }
+      return result.remainingCount;
+    } finally {
+      gpsFlushInFlightRef.current = false;
+    }
+  }, [apiFetch]);
+
+  // Monitor network connectivity and queued GPS count for driver role
+  useEffect(() => {
+    if (role !== "driver") return;
+    void refreshQueuedGpsCount();
+    return watchDeviceNetwork((connected) => {
+      setIsDeviceOnline(connected);
+    });
+  }, [role, refreshQueuedGpsCount]);
+
+  // Load driver's active trip from backend when authenticated
+  useEffect(() => {
+    if (role !== "driver") return;
+    if (isAuthenticated) {
+      void loadDriverDashboard();
+    } else {
+      setDriverTrips([]);
+      setAssignedDriverRoute(null);
+      setAssignedVehicleInfo(null);
+      setAssignedDriverInfo(null);
+    }
+  }, [role, isAuthenticated, loadDriverDashboard]);
+
+  // Flush queued GPS points in FIFO order whenever connection returns
+  useEffect(() => {
+    if (role !== "driver" || !isDriverOnline || !isAuthenticated) return;
+    void flushQueuedGpsPoints();
+  }, [role, isDriverOnline, isAuthenticated, flushQueuedGpsPoints]);
+
+  // Sample GPS via @capacitor/geolocation every 10s while trip is in progress
+  useEffect(() => {
+    if (!isDriverTripInProgress) {
+      setDriverGpsActive(false);
+      return;
+    }
+
+    let cancelled = false;
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+
+    const ensureGpsPermission = async (): Promise<boolean> => {
+      try {
+        if (isNativeCapacitor()) {
+          const perm = await Geolocation.requestPermissions();
+          if (perm.location !== "granted" && perm.coarseLocation !== "granted") {
+            return false;
+          }
+          return true;
+        }
+        const perm = await Geolocation.checkPermissions();
+        if (perm.location === "denied" && perm.coarseLocation === "denied") {
+          return false;
+        }
+        return true;
+      } catch (err) {
+        if (isLocationPermissionDeniedError(err)) {
+          return false;
+        }
+        // Web Geolocation checkPermissions/requestPermissions may not be implemented on some browsers
+        return true;
+      }
+    };
+
+    const sampleAndTransmitGps = async () => {
+      if (cancelled) return;
+      try {
+        const position = await Geolocation.getCurrentPosition({
+          enableHighAccuracy: true,
+          timeout: 9000,
+          maximumAge: 5000,
+        });
+        if (cancelled) return;
+
+        setDriverGpsPermissionDenied(false);
+        setDriverGpsActive(true);
+
+        const tripId = activeDriverTripIdRef.current;
+        if (!tripId) {
+          return;
+        }
+
+        const latitude = position.coords.latitude;
+        const longitude = position.coords.longitude;
+        driverCurrentGpsRef.current = { latitude, longitude };
+        const accuracy =
+          typeof position.coords.accuracy === "number" && Number.isFinite(position.coords.accuracy)
+            ? position.coords.accuracy
+            : null;
+        const speed =
+          position.coords.speed != null && Number.isFinite(position.coords.speed)
+            ? position.coords.speed
+            : null;
+        const heading =
+          position.coords.heading != null && Number.isFinite(position.coords.heading)
+            ? position.coords.heading
+            : null;
+        const timestamp = new Date(position.timestamp || Date.now()).toISOString();
+
+        const queuePoint = async () => {
+          gpsOfflineSeqRef.current += 1;
+          await enqueueOfflineLocation({
+            pointId: `gps_${tripId}_${Date.now()}_${gpsOfflineSeqRef.current}`,
+            tripId,
+            latitude,
+            longitude,
+            accuracy,
+            speed,
+            heading,
+            timestamp,
+            offlineSequence: gpsOfflineSeqRef.current,
+          });
+          await refreshQueuedGpsCount();
+        };
+
+        if (!isDriverOnlineRef.current || !isAuthenticatedRef.current) {
+          await queuePoint();
+          return;
+        }
+
+        const remainingBeforeCurrent = await flushQueuedGpsPoints();
+        if (remainingBeforeCurrent > 0) {
+          // Preserve strict FIFO ordering if earlier points could not flush yet
+          await queuePoint();
+          return;
+        }
+
+        try {
+          await apiFetch("/api/v1/driver/location-batches", {
+            method: "POST",
+            body: JSON.stringify({
+              tripId,
+              latitude,
+              longitude,
+              accuracy,
+              speed,
+              heading,
+              timestamp,
+            }),
+          });
+          if (!cancelled) {
+            setLastGpsUploadAt(new Date().toISOString());
+          }
+        } catch {
+          await queuePoint();
+        }
+      } catch (err) {
+        if (cancelled) return;
+        if (isLocationPermissionDeniedError(err)) {
+          setDriverGpsPermissionDenied(true);
+          setDriverGpsActive(false);
+          if (intervalId) {
+            clearInterval(intervalId);
+            intervalId = null;
+          }
+        }
+      }
+    };
+
+    void (async () => {
+      const permitted = await ensureGpsPermission();
+      if (cancelled) return;
+      if (!permitted) {
+        setDriverGpsPermissionDenied(true);
+        setDriverGpsActive(false);
+        return;
+      }
+      setDriverGpsPermissionDenied(false);
+      await sampleAndTransmitGps();
+      if (!cancelled && !intervalId) {
+        intervalId = setInterval(() => {
+          void sampleAndTransmitGps();
+        }, 10_000);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (intervalId) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
+      setDriverGpsActive(false);
+    };
+  }, [isDriverTripInProgress, driverGpsRetryNonce, apiFetch, flushQueuedGpsPoints, refreshQueuedGpsCount]);
+
+  // Bus movement progression (company preview & visual route tracking only)
+  useEffect(() => {
+    if (!running || role === "parent") return;
     const id = setInterval(() => {
       setProgress((p) => {
         const next = Math.min(p + 0.004, 1);
 
-        // Check if approaching parent's stop (stop 1: Largo do Kinaxixi, around at = 0.25)
-        if (next > 0.18 && next < 0.28 && !proximityAlert.visible) {
+        const targetAlertStop = activeRouteStops[1] ?? activeRouteStops[0];
+        if (next > 0.18 && next < 0.28 && !proximityAlert.visible && targetAlertStop) {
           setProximityAlert({
             visible: true,
-            stopName: currentRoute.stops[1]?.name || "Paragem",
-            distanceMeters: 450,
+            stopName: targetAlertStop.name || "Paragem",
+            distanceMeters: targetAlertStop.geofenceRadiusM || 450,
             minutesAway: 2,
           });
           notify(
-            `APROXIMAÇÃO: O autocarro ${currentRoute.busId} está a 450m de ${currentRoute.stops[1]?.name}!`,
+            `APROXIMAÇÃO: O autocarro está a ${targetAlertStop.geofenceRadiusM || 450}m de ${targetAlertStop.name}!`,
             "alert"
           );
         }
@@ -380,12 +1134,14 @@ export function NativeMobileApp({
       });
     }, 120);
     return () => clearInterval(id);
-  }, [running, proximityAlert.visible, currentRoute]);
+  }, [running, role, proximityAlert.visible, activeRouteStops]);
 
-  function notify(msg: string, type: "info" | "alert" | "success" = "info") {
+  function notify(msg: string, type: "info" | "alert" | "success" = "info", toastOnly = false) {
     setToast(msg);
-    const now = new Date().toLocaleTimeString("pt-AO", { hour: "2-digit", minute: "2-digit" });
-    setNotifications((prev) => [{ id: String(Date.now()), time: now, text: msg, type }, ...prev]);
+    if (!toastOnly) {
+      const now = new Date().toLocaleTimeString("pt-AO", { hour: "2-digit", minute: "2-digit" });
+      setNotifications((prev) => [{ id: String(Date.now()), time: now, text: msg, type }, ...prev]);
+    }
     setTimeout(() => setToast(null), 3800);
   }
 
@@ -398,13 +1154,30 @@ export function NativeMobileApp({
     }
   }
 
+  const activeDriverName =
+    role === "parent"
+      ? activeBackendStudent?.activeTrip?.driverName ?? "Motorista MôBuss"
+      : assignedDriverInfo?.fullName ?? dbUser?.fullName ?? "Motorista Oficial";
+  const activeDriverPhone =
+    role === "parent"
+      ? activeBackendStudent?.activeTrip?.driverPhone ?? ""
+      : assignedDriverInfo?.phone ?? dbUser?.phone ?? "";
+  const activeBusNumber =
+    role === "parent"
+      ? activeBackendStudent?.activeTrip?.fleetNumber ?? 12
+      : assignedVehicleInfo?.fleetNumber ?? 12;
+  const activeBusPlate =
+    role === "parent"
+      ? activeBackendStudent?.activeTrip?.vehiclePlate ?? "—"
+      : assignedVehicleInfo?.plate ?? "—";
+
   function sendQuickMessage(text: string) {
     const now = new Date().toLocaleTimeString("pt-AO", { hour: "2-digit", minute: "2-digit" });
     const isDriver = role === "driver";
     const newMsg: QuickMessage = {
       id: String(Date.now()),
       sender: isDriver ? "driver" : "parent",
-      senderName: isDriver ? `${currentRoute.driver} (Motorista)` : "Sra. Luísa Domingos",
+      senderName: isDriver ? `${activeDriverName} (Motorista)` : (dbUser?.fullName || "Encarregado"),
       text,
       time: now,
     };
@@ -419,15 +1192,15 @@ export function NativeMobileApp({
       type,
       from,
       time: now,
-      busNumber: currentRoute.busId,
-      details: `Alerta emitido no corredor ${currentRoute.name} de Luanda.`,
+      busNumber: activeBusNumber,
+      details: `Alerta emitido na rota ${activeRouteName} de Luanda.`,
     });
     publishSimulatorAlert({
       time: now,
-      bus: currentRoute.busId,
-      route: `${currentRoute.code} · ${currentRoute.name}`,
+      bus: activeBusNumber,
+      route: `${activeRouteCode || "ROTA"} · ${activeRouteName}`,
       type,
-      from: `${from} (${role === "driver" ? currentRoute.driver : currentKid.guardian})`,
+      from: `${from} (${role === "driver" ? activeDriverName : currentKid.guardian})`,
       notes: `Alerta SOS emitido em tempo real a partir do simulador móvel.`,
     });
     setRunning(false);
@@ -450,20 +1223,267 @@ export function NativeMobileApp({
     }
   }
 
+  async function handleSubmitDriverDelayReport(e: React.FormEvent) {
+    e.preventDefault();
+    if (!activeDriverTrip?.id) {
+      setDelayReportError("Nenhuma viagem ativa encontrada para reportar desvio.");
+      return;
+    }
+    if (!isAuthenticated) {
+      setDelayReportError("Inicie sessão para enviar o reporte de desvio à central.");
+      return;
+    }
+    setDelayReportError(null);
+    setSubmittingDelayReport(true);
+    try {
+      let latitude: number | null = driverCurrentGpsRef.current?.latitude ?? null;
+      let longitude: number | null = driverCurrentGpsRef.current?.longitude ?? null;
+      try {
+        const pos = await Geolocation.getCurrentPosition({
+          enableHighAccuracy: true,
+          timeout: 5000,
+          maximumAge: 10000,
+        });
+        latitude = pos.coords.latitude;
+        longitude = pos.coords.longitude;
+        driverCurrentGpsRef.current = { latitude, longitude };
+      } catch {
+        if (latitude == null || longitude == null) {
+          const fallbackLat = activeDriverTrip.lastLat != null ? Number(activeDriverTrip.lastLat) : NaN;
+          const fallbackLng = activeDriverTrip.lastLng != null ? Number(activeDriverTrip.lastLng) : NaN;
+          if (Number.isFinite(fallbackLat) && Number.isFinite(fallbackLng)) {
+            latitude = fallbackLat;
+            longitude = fallbackLng;
+          }
+        }
+      }
+
+      const trimmedNote = delayNoteInput.trim();
+      const res = await apiFetch<{
+        trip: DriverBackendTrip;
+        message: string;
+      }>(`/api/v1/driver/trips/${activeDriverTrip.id}/delay-report`, {
+        method: "POST",
+        body: JSON.stringify({
+          tripId: activeDriverTrip.id,
+          reason: delayReasonInput,
+          note: trimmedNote,
+          latitude,
+          longitude,
+        }),
+      });
+
+      setDriverTrips((prev) =>
+        prev.map((t) =>
+          t.id === activeDriverTrip.id
+            ? {
+                ...t,
+                state: res.trip?.state ?? "delayed",
+                delayReason: res.trip?.delayReason ?? delayReasonInput,
+                delayNote: res.trip?.delayNote ?? (trimmedNote || null),
+                delayReportedAt: res.trip?.delayReportedAt ?? new Date().toISOString(),
+              }
+            : t
+        )
+      );
+      setDelayModalOpen(false);
+      setDelayNoteInput("");
+      sendQuickMessage(
+        `Desvio / Trânsito (${delayReasonInput})${trimmedNote ? `: ${trimmedNote}` : "."}`
+      );
+      notify(res.message || `Desvio reportado (${delayReasonInput}).`, "alert");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Erro ao enviar desvio para a central.";
+      setDelayReportError(msg);
+    } finally {
+      setSubmittingDelayReport(false);
+    }
+  }
+
   const currentKid = students.find((s) => s.id === selectedKidId) || students[0]!;
   const isMapView = activeTab === "home";
   const isDriverDark = role === "driver";
-  const etaMinutes = Math.max(
-    1,
-    Math.round(((currentRoute.stops[currentKid.stop]?.at || 0.2) - progress) * 60)
-  );
-  const journeyStep = currentKid.droppedOff
-    ? 4
-    : currentKid.onBoard
-    ? 3
-    : running || progress > 0
-    ? 2
-    : 1;
+
+  const parentTelemetry = useMemo(() => {
+    const trip = activeBackendStudent?.activeTrip ?? null;
+    const studentRouteCode = (activeBackendStudent?.routeCode || "").toUpperCase();
+    const selectedCode = activeRouteCode.toUpperCase();
+    const matchesSelectedCorridor =
+      !studentRouteCode || !selectedCode || studentRouteCode === selectedCode;
+
+    if (!matchesSelectedCorridor) {
+      return {
+        hasRecentLocation: false,
+        latLng: null as [number, number] | null,
+        progress: 0,
+        lastLocationAt: null as string | null,
+        lastUpdateLabel: "sem registo",
+        etaMinutes: null as number | null,
+        arrivalHHMM: null as string | null,
+        tripState: null as string | null,
+        isDelayed: false,
+        delayReason: null as string | null,
+        delayNote: null as string | null,
+      };
+    }
+
+    const wsMatches =
+      liveTripLocation &&
+      ((trip?.id != null && liveTripLocation.tripId != null && liveTripLocation.tripId === trip.id) ||
+        liveTripLocation.routeCode.toUpperCase() === selectedCode);
+
+    const dbLat = trip?.lastLat != null ? Number(trip.lastLat) : NaN;
+    const dbLng = trip?.lastLng != null ? Number(trip.lastLng) : NaN;
+    const dbTimeMs = trip?.lastLocationAt ? Date.parse(trip.lastLocationAt) : NaN;
+    const wsTimeMs = wsMatches ? Date.parse(liveTripLocation.updatedAt) : NaN;
+
+    const useWs =
+      Boolean(wsMatches) &&
+      Number.isFinite(wsTimeMs) &&
+      (!Number.isFinite(dbTimeMs) || wsTimeMs >= dbTimeMs);
+
+    const rawLat = useWs ? liveTripLocation!.lat : dbLat;
+    const rawLng = useWs ? liveTripLocation!.lng : dbLng;
+    const rawGpsStatus = useWs ? liveTripLocation!.gpsStatus : (trip?.gpsStatus ?? "unavailable");
+    const lastLocationAt = useWs ? liveTripLocation!.updatedAt : (trip?.lastLocationAt ?? null);
+    const updatedMs = lastLocationAt ? Date.parse(lastLocationAt) : NaN;
+
+    const hasCoords = Number.isFinite(rawLat) && Number.isFinite(rawLng);
+    const isFresh =
+      hasCoords &&
+      rawGpsStatus !== "unavailable" &&
+      rawGpsStatus !== "stale" &&
+      Number.isFinite(updatedMs) &&
+      locationClockTick - updatedMs <= PARENT_LOCATION_FRESH_MS;
+
+    const pathCoords =
+      currentRoute?.pathCoordinates && currentRoute.pathCoordinates.length >= 2
+        ? currentRoute.pathCoordinates
+        : activeRouteStops.map((s) => [s.latitude, s.longitude] as [number, number]);
+
+    const computedProgress = isFresh
+      ? useWs && liveTripLocation?.progress != null
+        ? liveTripLocation.progress
+        : estimateRouteProgressFromPath(pathCoords, rawLat, rawLng)
+      : 0;
+
+    const tripState = trip?.state ?? null;
+    const isDelayed =
+      tripState !== "completed" &&
+      tripState !== "cancelled" &&
+      (tripState === "delayed" || Boolean(trip?.delayReason));
+    const isChildOnBoard =
+      activeBackendStudent?.currentJourneyState === "boarded" ||
+      activeBackendStudent?.currentJourneyState === "in_transit" ||
+      currentKid.onBoard;
+
+    const remainingEta =
+      isFresh && activeRouteStops.length > 0
+        ? computeRemainingStopsEta(activeRouteStops, pathCoords, rawLat, rawLng, {
+            targetStopName: activeBackendStudent?.stopName,
+            targetStopIndex: activeBackendStudent?.stopIndex ?? currentKid.stop,
+            destinationIsFinalStop: isChildOnBoard,
+            delayed: isDelayed,
+            nowMs: Math.max(Date.now(), updatedMs),
+          })
+        : null;
+
+    return {
+      hasRecentLocation: isFresh,
+      latLng: isFresh ? ([rawLat, rawLng] as [number, number]) : null,
+      progress: computedProgress,
+      lastLocationAt,
+      lastUpdateLabel: formatLastUpdateTime(lastLocationAt),
+      etaMinutes: remainingEta?.etaMinutes ?? null,
+      arrivalHHMM: remainingEta?.arrivalHHMM ?? null,
+      tripState,
+      isDelayed,
+      delayReason: trip?.delayReason ?? null,
+      delayNote: trip?.delayNote ?? null,
+    };
+  }, [activeBackendStudent, activeRouteCode, currentRoute, activeRouteStops, liveTripLocation, locationClockTick, currentKid.stop, currentKid.onBoard]);
+
+  // Base parent proximity alert (~500m) strictly on real backend position & DB stop coordinates
+  useEffect(() => {
+    if (role !== "parent") return;
+    if (
+      !parentTelemetry.hasRecentLocation ||
+      !parentTelemetry.latLng ||
+      parentTelemetry.tripState === "completed" ||
+      parentTelemetry.tripState === "cancelled"
+    ) {
+      setProximityAlert((prev) => (prev.visible ? { ...prev, visible: false } : prev));
+      return;
+    }
+
+    const [realLat, realLng] = parentTelemetry.latLng;
+    const stopNameLower = (activeBackendStudent?.stopName || "").trim().toLowerCase();
+    const targetStop =
+      activeRouteStops.find((s) => s.name.toLowerCase() === stopNameLower) ??
+      activeRouteStops[activeBackendStudent?.stopIndex ?? currentKid.stop] ??
+      activeRouteStops[0];
+
+    if (!targetStop) return;
+    const distanceMeters = haversineMeters(realLat, realLng, targetStop.latitude, targetStop.longitude);
+    const radiusM = targetStop.geofenceRadiusM || 500;
+
+    if (distanceMeters <= radiusM) {
+      const minutesAway = Math.max(1, Math.round(distanceMeters / 350));
+      const alertKey = `${activeRouteCode}:${targetStop.name}:${Math.round(distanceMeters / 50)}`;
+      setProximityAlert({
+        visible: true,
+        stopName: activeBackendStudent?.stopName || targetStop.name,
+        distanceMeters,
+        minutesAway,
+      });
+      if (lastProximityKeyRef.current !== alertKey) {
+        lastProximityKeyRef.current = alertKey;
+        notify(
+          `APROXIMAÇÃO: O autocarro está a ${distanceMeters}m de ${activeBackendStudent?.stopName || targetStop.name}!`,
+          "alert"
+        );
+      }
+    } else {
+      setProximityAlert((prev) => (prev.visible ? { ...prev, visible: false } : prev));
+    }
+  }, [role, parentTelemetry, activeBackendStudent, activeRouteStops, activeRouteCode, currentKid.stop]);
+
+  const parentBusId = activeBusNumber;
+  const parentBusPlate = activeBusPlate;
+  const parentDriverName = activeDriverName;
+  const parentStudentName = activeBackendStudent?.fullName ?? currentKid.name;
+  const parentStopName = activeBackendStudent?.stopName ?? activeRouteStops[currentKid.stop]?.name ?? "Paragem Oficial";
+  const parentSchoolName = activeSchoolName;
+  const parentPickupPin = activeBackendStudent
+    ? activeBackendStudent.handoverCredential?.maskedDisplay ?? "••••"
+    : currentKid.pickupPin;
+
+  const parentJourneyStep = (() => {
+    if (!activeBackendStudent) {
+      return parentTelemetry.hasRecentLocation ? 2 : 1;
+    }
+    const js = activeBackendStudent.currentJourneyState;
+    const ts = activeBackendStudent.activeTrip?.state;
+    if (js === "handed_over" || js === "at_destination" || ts === "completed" || ts === "at_school") return 4;
+    if (js === "boarded" || js === "in_transit" || js === "handover_pending") return 3;
+    if (
+      parentTelemetry.hasRecentLocation ||
+      (ts && ["driver_checked_in", "in_progress", "at_stop", "boarding", "return_in_progress", "delayed"].includes(ts))
+    ) {
+      return 2;
+    }
+    return 1;
+  })();
+  const journeyStep =
+    role === "parent"
+      ? parentJourneyStep
+      : currentKid.droppedOff
+      ? 4
+      : currentKid.onBoard
+      ? 3
+      : running || progress > 0
+      ? 2
+      : 1;
   const activeTutorial = TUTORIAL_STEPS[role][tutorialStep] || TUTORIAL_STEPS[role][0];
 
   return (
@@ -491,7 +1511,9 @@ export function NativeMobileApp({
               </div>
               <div className="text-[10px] text-zinc-400 font-medium flex items-center gap-1.5 mt-0.5 tabular-nums">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
-                <span>Autocarro {currentRoute.busId} · {currentRoute.busPlate}</span>
+                <span>
+                  Autocarro {activeBusNumber} · {activeBusPlate}
+                </span>
               </div>
             </div>
           </div>
@@ -531,7 +1553,7 @@ export function NativeMobileApp({
                 <Building2 className="w-3 h-3 text-[#e11d2e]" />
               )}
               <span className="text-[10px] font-bold text-white">
-                {role === "parent" ? "Sra. Luísa" : role === "driver" ? "João M." : "Operações"}
+                {role === "parent" ? (dbUser?.fullName?.split(" ").slice(0, 2).join(" ") || "Encarregado") : role === "driver" ? "João M." : "Operações"}
               </span>
             </div>
 
@@ -594,7 +1616,7 @@ export function NativeMobileApp({
                   <Bell className="w-3 h-3" />
                   <span>Aproximação GPS · {proximityAlert.distanceMeters}m</span>
                 </div>
-                <div className="font-semibold truncate">Autocarro {currentRoute.busId} a {proximityAlert.minutesAway} min de {proximityAlert.stopName}</div>
+                <div className="font-semibold truncate">Autocarro {parentBusId} a {proximityAlert.minutesAway} min de {proximityAlert.stopName}</div>
               </div>
               <button
                 onClick={() => setProximityAlert((p) => ({ ...p, visible: false }))}
@@ -613,9 +1635,12 @@ export function NativeMobileApp({
                   {/* Full-Screen Live Map */}
                   <div className="absolute inset-0 z-0">
                     <LuandaMap
-                      progress={progress}
+                      progress={parentTelemetry.progress}
+                      busLatLng={parentTelemetry.latLng}
+                      showBusMarker={parentTelemetry.hasRecentLocation}
                       emergency={!!emergency}
-                      routeId={selectedRouteId}
+                      route={currentRoute}
+                      routeCode={activeRouteCode}
                       className="h-full w-full rounded-none"
                     />
                   </div>
@@ -624,18 +1649,16 @@ export function NativeMobileApp({
                   <div className="relative z-10 px-2.5 pt-2.5 space-y-2 pointer-events-none">
                     <div className="flex items-center gap-1.5 justify-between pointer-events-auto">
                       <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5">
-                        {Object.values(LUANDA_ROUTES).map((r) => (
+                        {apiRoutes.map((r) => (
                           <button
                             key={r.id}
                             onClick={() => {
-                              setSelectedRouteId(r.id);
-                              setProgress(0);
-                              setRunning(false);
+                              setSelectedRouteCode(r.code);
                               setProximityAlert((p) => ({ ...p, visible: false }));
                               notify(`Corredor alterado para ${r.name}`, "info");
                             }}
                             className={`px-2.5 py-1 rounded-full text-[10px] font-bold whitespace-nowrap transition cursor-pointer shadow-sm backdrop-blur-md ${
-                              selectedRouteId === r.id
+                              activeRouteCode.toUpperCase() === r.code.toUpperCase()
                                 ? "bg-[#09090b] text-white ring-1 ring-white/20"
                                 : "bg-white/90 text-zinc-900 border border-zinc-200/80 hover:bg-white"
                             }`}
@@ -646,21 +1669,49 @@ export function NativeMobileApp({
                       </div>
 
                       <div className="flex items-center gap-1 bg-white/90 backdrop-blur-md p-0.5 rounded-full border border-zinc-200/80 shadow-sm shrink-0">
-                        {students.slice(0, 2).map((k) => (
-                          <button
-                            key={k.id}
-                            onClick={() => setSelectedKidId(k.id)}
-                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold transition cursor-pointer ${
-                              selectedKidId === k.id
-                                ? "bg-[#e11d2e] text-white shadow-xs"
-                                : "text-zinc-600 hover:text-zinc-950"
-                            }`}
-                          >
-                            {k.name.split(" ")[0]}
-                          </button>
-                        ))}
+                        {guardianStudents.length > 0
+                          ? guardianStudents.slice(0, 2).map((k) => (
+                              <button
+                                key={k.id}
+                                onClick={() => setSelectedBackendStudentId(k.id)}
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold transition cursor-pointer ${
+                                  activeBackendStudent?.id === k.id
+                                    ? "bg-[#e11d2e] text-white shadow-xs"
+                                    : "text-zinc-600 hover:text-zinc-950"
+                                }`}
+                              >
+                                {k.fullName.split(" ")[0]}
+                              </button>
+                            ))
+                          : students.slice(0, 2).map((k) => (
+                              <button
+                                key={k.id}
+                                onClick={() => setSelectedKidId(k.id)}
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold transition cursor-pointer ${
+                                  selectedKidId === k.id
+                                    ? "bg-[#e11d2e] text-white shadow-xs"
+                                    : "text-zinc-600 hover:text-zinc-950"
+                                }`}
+                              >
+                                {k.name.split(" ")[0]}
+                              </button>
+                            ))}
                       </div>
                     </div>
+
+                    {!parentTelemetry.hasRecentLocation && (
+                      <div className="pointer-events-auto rounded-2xl bg-[#09090b]/90 backdrop-blur-md text-white border border-white/15 px-3 py-2 text-xs shadow-lg flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="text-[10px] font-black uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+                            <WifiOff className="w-3 h-3 shrink-0" />
+                            <span>Localização indisponível</span>
+                          </div>
+                          <div className="text-[11px] text-zinc-300 truncate tabular-nums">
+                            Última atualização: {parentTelemetry.lastUpdateLabel}
+                          </div>
+                        </div>
+                      </div>
+                    )}
 
                     {/* Floating SOS Banner */}
                     {emergency && (
@@ -687,7 +1738,7 @@ export function NativeMobileApp({
                             <span>A {proximityAlert.distanceMeters}m da Paragem</span>
                           </div>
                           <div className="font-semibold text-[11px] truncate">
-                            Autocarro {currentRoute.busId} chega a {proximityAlert.stopName} em {proximityAlert.minutesAway} min
+                            Autocarro {parentBusId} chega a {proximityAlert.stopName} em {proximityAlert.minutesAway} min
                           </div>
                         </div>
                         <button
@@ -699,20 +1750,31 @@ export function NativeMobileApp({
                       </div>
                     )}
 
-                    {/* Floating Traffic Delay / Waze Hazard Alert */}
-                    {(delay || activeHazard) && (
-                      <div className="pointer-events-auto rounded-xl bg-red-950/90 backdrop-blur-md text-white border border-[#e11d2e]/50 px-3 py-1.5 text-[11px] font-bold flex items-center gap-2 shadow-md">
-                        <AlertTriangle className="w-3.5 h-3.5 text-[#e11d2e] shrink-0" />
-                        <span className="truncate">
-                          {activeHazard
-                            ? `Alerta na via: ${activeHazard} (+5 min)`
-                            : `Motorista reportou +${delay} min de atraso no corredor.`}
-                        </span>
+                    {/* Floating Backend Delay / Traffic Alert */}
+                    {(parentTelemetry.isDelayed || delay || activeHazard) && (
+                      <div className="pointer-events-auto rounded-xl bg-amber-950/95 backdrop-blur-md text-white border border-amber-400/60 px-3 py-2 text-[11px] font-bold flex items-start gap-2 shadow-md">
+                        <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                        <div className="min-w-0">
+                          <div>
+                            {parentTelemetry.isDelayed
+                              ? parentTelemetry.hasRecentLocation && parentTelemetry.arrivalHHMM
+                                ? `Atraso: ${parentTelemetry.delayReason || "atraso na rota"}. Nova previsão: ${parentTelemetry.arrivalHHMM}`
+                                : `Atraso: ${parentTelemetry.delayReason || "atraso na rota"}. Nova previsão indisponível (sem sinal GPS recente)`
+                              : activeHazard
+                              ? `Alerta na via: ${activeHazard} (+5 min)`
+                              : `Motorista reportou +${delay} min de atraso no corredor.`}
+                          </div>
+                          {parentTelemetry.isDelayed && parentTelemetry.delayNote && (
+                            <div className="text-[10px] font-normal text-amber-200 truncate mt-0.5">
+                              Nota: {parentTelemetry.delayNote}
+                            </div>
+                          )}
+                        </div>
                       </div>
                     )}
                   </div>
 
-                  {/* Floating Map Actions: Geofence Test + Safety Share */}
+                  {/* Floating Map Actions: Safety Share */}
                   <div className="mt-auto self-end mr-3 mb-2 relative z-10 flex items-center gap-1.5">
                     <button
                       onClick={() => setShareModalOpen(true)}
@@ -721,22 +1783,6 @@ export function NativeMobileApp({
                     >
                       <Share2 className="w-3 h-3 text-[#e11d2e]" />
                       <span>Partilhar</span>
-                    </button>
-
-                    <button
-                      onClick={() => {
-                        setProximityAlert({
-                          visible: true,
-                          stopName: currentRoute.stops[1]?.name || "Paragem",
-                          distanceMeters: 450,
-                          minutesAway: 2,
-                        });
-                        notify(`Teste: Autocarro a 450m da sua paragem!`, "alert");
-                      }}
-                      className="bg-[#09090b]/90 backdrop-blur-md text-white px-3 py-1.5 rounded-full text-[10px] font-bold shadow-lg border border-white/15 hover:bg-[#e11d2e] active:scale-95 transition cursor-pointer inline-flex items-center gap-1.5"
-                    >
-                      <Bell className="w-3 h-3 text-[#e11d2e]" />
-                      <span>Testar Geofence</span>
                     </button>
                   </div>
 
@@ -766,36 +1812,56 @@ export function NativeMobileApp({
                           <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
                             <span
                               className={`w-1.5 h-1.5 rounded-full ${
-                                emergency ? "bg-[#e11d2e] animate-ping" : running ? "bg-emerald-500 animate-pulse" : "bg-zinc-400"
+                                emergency
+                                  ? "bg-[#e11d2e] animate-ping"
+                                  : parentTelemetry.hasRecentLocation
+                                  ? "bg-emerald-500 animate-pulse"
+                                  : "bg-zinc-400"
                               }`}
                             />
-                            <span className="truncate">{currentKid.name} · {currentRoute.code}</span>
+                            <span className="truncate">{parentStudentName} · {activeRouteCode || "ROTA"}</span>
                           </div>
                           <div className="text-xl font-black tracking-tight tabular-nums text-zinc-950 leading-tight mt-0.5">
                             {emergency
                               ? "Em emergência"
-                              : currentKid.absent
+                              : activeBackendStudent?.currentJourneyState === "absent" || currentKid.absent
                               ? "Ausência justificada"
-                              : currentKid.droppedOff
+                              : activeBackendStudent?.currentJourneyState === "handed_over" || currentKid.droppedOff
                               ? "Entregue em segurança"
-                              : !running && progress === 0
-                              ? "Ainda não partiu"
-                              : progress >= 1
+                              : !parentTelemetry.hasRecentLocation
+                              ? "Localização indisponível"
+                              : parentTelemetry.tripState === "completed" || parentTelemetry.tripState === "at_school"
                               ? "Chegou à escola"
-                              : currentKid.onBoard
+                              : activeBackendStudent?.currentJourneyState === "boarded" ||
+                                activeBackendStudent?.currentJourneyState === "in_transit" ||
+                                currentKid.onBoard
                               ? "A bordo do autocarro"
-                              : `Chega em ${etaMinutes} min`}
+                              : parentTelemetry.etaMinutes != null
+                              ? `Chega em ${parentTelemetry.etaMinutes} min`
+                              : "Em rota"}
                           </div>
                           <div className="text-[11px] text-zinc-500 font-medium truncate">
-                            Paragem: <strong className="text-zinc-800">{currentRoute.stops[currentKid.stop]?.name || "Paragem Oficial"}</strong>
+                            Paragem: <strong className="text-zinc-800">{parentStopName}</strong>
+                            {!parentTelemetry.hasRecentLocation && (
+                              <span className="ml-1.5 text-zinc-400 tabular-nums">
+                                · Última atualização: {parentTelemetry.lastUpdateLabel}
+                              </span>
+                            )}
                           </div>
+                          {parentTelemetry.isDelayed && (
+                            <div className="mt-1 text-[11px] font-bold text-amber-700">
+                              {parentTelemetry.hasRecentLocation && parentTelemetry.arrivalHHMM
+                                ? `Atraso: ${parentTelemetry.delayReason || "atraso na rota"}. Nova previsão: ${parentTelemetry.arrivalHHMM}`
+                                : `Atraso: ${parentTelemetry.delayReason || "atraso na rota"}. Nova previsão indisponível (sem sinal GPS recente)`}
+                            </div>
+                          )}
                         </div>
 
                         {/* Compact Secure Pickup PIN Badge */}
                         <div className="rounded-2xl bg-emerald-50 border border-emerald-200 px-2.5 py-1.5 text-center shrink-0">
                           <div className="text-[8px] font-black uppercase tracking-wider text-emerald-700">PIN Seguro</div>
                           <div className="text-base font-mono font-black text-emerald-800 leading-tight tabular-nums">
-                            {currentKid.pickupPin}
+                            {parentPickupPin}
                           </div>
                         </div>
                       </div>
@@ -838,12 +1904,12 @@ export function NativeMobileApp({
                       {/* Driver Safety Strip */}
                       <div className="rounded-2xl bg-zinc-50 border border-zinc-200/80 p-2.5 flex items-center gap-2.5">
                         <div className="w-9 h-9 rounded-xl bg-[#09090b] text-white grid place-items-center font-black text-xs shrink-0">
-                          {currentRoute.driver.split(" ").map((n) => n[0]).join("")}
+                          {parentDriverName.split(" ").map((n) => n[0]).join("")}
                         </div>
                         <div className="flex-1 min-w-0">
-                          <div className="font-extrabold text-xs text-zinc-950 truncate">{currentRoute.driver}</div>
+                          <div className="font-extrabold text-xs text-zinc-950 truncate">{parentDriverName}</div>
                           <div className="text-[10px] text-zinc-500 font-medium truncate tabular-nums">
-                            Autocarro {currentRoute.busId} · {currentRoute.busPlate}
+                            Autocarro {parentBusId} · {parentBusPlate}
                           </div>
                         </div>
                         <div className="flex items-center gap-1.5 shrink-0">
@@ -864,7 +1930,7 @@ export function NativeMobileApp({
                             <MessageSquare className="w-4 h-4" />
                           </button>
                           <a
-                            href={`tel:${currentRoute.driverPhone}`}
+                            href={activeDriverPhone ? `tel:${activeDriverPhone}` : "#"}
                             className="rounded-full bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white w-8 h-8 grid place-items-center shadow-xs transition"
                             title="Ligar ao motorista"
                             aria-label="Ligar ao motorista"
@@ -888,7 +1954,7 @@ export function NativeMobileApp({
                               <div className="text-xs font-extrabold">
                                 {ratingSubmitted
                                   ? "Obrigado pelo seu feedback!"
-                                  : `Como foi a viagem com ${currentRoute.driver}?`}
+                                  : `Como foi a viagem com ${activeDriverName}?`}
                               </div>
                             </div>
                             {ratingSubmitted && (
@@ -948,13 +2014,13 @@ export function NativeMobileApp({
                                 onClick={() => {
                                   setRatingSubmitted(true);
                                   recordDriverRating({
-                                    driver: currentRoute.driver,
-                                    routeCode: currentRoute.code,
+                                    driver: activeDriverName,
+                                    routeCode: activeRouteCode || "ROTA",
                                     rating: tripRating,
                                     tags: ratingTags,
                                     parentName: currentKid.guardian,
                                   });
-                                  notify(`Avaliação de ${tripRating} estrelas registada para ${currentRoute.driver}!`, "success");
+                                  notify(`Avaliação de ${tripRating} estrelas registada para ${activeDriverName}!`, "success");
                                 }}
                                 className="w-full py-2 rounded-xl bg-white text-zinc-950 text-xs font-black disabled:opacity-40 cursor-pointer active:scale-[0.98] transition"
                               >
@@ -1140,98 +2206,168 @@ export function NativeMobileApp({
                   </div>
 
                   <div className="space-y-2">
-                    <div className="text-xs font-bold opacity-75">HISTÓRICO DE MENSALIDADES (HOMOLOGAÇÃO)</div>
-                    {[
-                      {
-                        month: "Outubro 2026",
-                        invoice: "PRO-MOB-2026/8192",
-                        amountValue: syncPricing.studentMonthlyFee,
-                        emisRef: "MCX-901824-EMIS",
-                        cert: "HOMOLOGAÇÃO · NÃO FISCAL",
-                      },
-                      {
-                        month: "Setembro 2026",
-                        invoice: "PRO-MOB-2026/7741",
-                        amountValue: syncPricing.studentMonthlyFee,
-                        emisRef: "MCX-774102-EMIS",
-                        cert: "HOMOLOGAÇÃO · NÃO FISCAL",
-                      },
-                    ].map((item) => (
-                      <div
-                        key={item.month}
-                        className="rounded-xl border border-slide-line p-3 flex justify-between items-center gap-2 bg-slide-paper"
-                      >
-                        <div className="min-w-0">
-                          <div className="font-bold text-xs">{item.month}</div>
-                          <div className="text-[10px] text-zinc-500 font-mono truncate">{item.cert}</div>
-                        </div>
-                        <div className="flex items-center gap-2.5 shrink-0">
-                          <div className="text-right">
-                            <div className="font-mono text-xs font-bold tabular-nums">{formatAOA(item.amountValue)}</div>
-                            <span className="text-[10px] font-bold text-slide-ok inline-flex items-center gap-1 justify-end">
-                              <span>Pago via MCX</span>
-                              <CheckCircle2 className="w-3 h-3" />
-                            </span>
-                          </div>
-                          <button
-                            onClick={() => {
-                              exportAgtReceipt(
-                                {
-                                  invoice: item.invoice,
-                                  student: currentKid.name,
-                                  guardian: currentKid.guardian,
-                                  phone: currentKid.phone,
-                                  amountValue: item.amountValue,
-                                  date: item.month,
-                                  emisRef: item.emisRef,
-                                  agtCert: item.cert,
-                                  status: "Validado",
-                                  school: currentKid.school,
-                                  routeLabel: currentRoute.name,
-                                },
-                                syncPricing
-                              );
-                              notify(`Nota provisória (${item.invoice}) descarregada.`, "success");
-                            }}
-                            className="p-2 rounded-lg bg-zinc-100 hover:bg-zinc-200 text-zinc-900 cursor-pointer transition"
-                            title="Descarregar Comprovativo Provisório"
-                          >
-                            <FileText className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
+                    <div className="text-xs font-bold opacity-75">HISTÓRICO DE MENSALIDADES</div>
+                    {guardianInvoices.length === 0 ? (
+                      <div className="rounded-xl border border-slide-line p-3.5 text-xs text-zinc-500 bg-slide-paper">
+                        Ainda não existem faturas registadas para a sua conta de encarregado.
                       </div>
-                    ))}
+                    ) : (
+                      guardianInvoices.map((inv) => {
+                        const isPaid = inv.status === "confirmed";
+                        const issueLabel = new Date(inv.createdAt).toLocaleDateString("pt-AO", {
+                          day: "2-digit",
+                          month: "short",
+                          year: "numeric",
+                        });
+                        return (
+                          <div
+                            key={inv.id}
+                            className="rounded-xl border border-slide-line p-3 flex justify-between items-center gap-2 bg-slide-paper"
+                          >
+                            <div className="min-w-0">
+                              <div className="font-bold text-xs truncate">
+                                {inv.description || `${inv.invoiceNumber} · ${inv.studentName}`}
+                              </div>
+                              <div className="text-[10px] text-zinc-500 font-mono truncate">
+                                {inv.invoiceNumber} · {issueLabel}
+                                {!isPaid && inv.paymentReferencePin
+                                  ? ` · Ent. ${inv.paymentEntity || "00845"} / Ref. ${inv.paymentReferencePin}`
+                                  : ""}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2.5 shrink-0">
+                              <div className="text-right">
+                                <div className="font-mono text-xs font-bold tabular-nums">{formatAOA(inv.amountAoa)}</div>
+                                {isPaid ? (
+                                  <span className="text-[10px] font-bold text-slide-ok inline-flex items-center gap-1 justify-end">
+                                    <span>Pago</span>
+                                    <CheckCircle2 className="w-3 h-3" />
+                                  </span>
+                                ) : (
+                                  <span className="text-[10px] font-bold text-amber-600 inline-flex items-center gap-1 justify-end">
+                                    <span>Pendente</span>
+                                    <Clock className="w-3 h-3" />
+                                  </span>
+                                )}
+                              </div>
+                              <button
+                                type="button"
+                                disabled={downloadingInvoiceId === inv.id}
+                                onClick={async () => {
+                                  setDownloadingInvoiceId(inv.id);
+                                  try {
+                                    await downloadInvoicePdf({
+                                      invoiceId: inv.id,
+                                      invoiceNumber: inv.invoiceNumber,
+                                      isPaid,
+                                      getAuthToken,
+                                    });
+                                    notify(
+                                      isPaid
+                                        ? `Recibo PDF (${inv.invoiceNumber}) descarregado.`
+                                        : `Fatura proforma PDF (${inv.invoiceNumber}) descarregada.`,
+                                      "success"
+                                    );
+                                  } catch (err) {
+                                    notify(
+                                      err instanceof Error ? err.message : "Erro ao descarregar PDF.",
+                                      "alert"
+                                    );
+                                  } finally {
+                                    setDownloadingInvoiceId(null);
+                                  }
+                                }}
+                                className="p-2 rounded-lg bg-zinc-100 hover:bg-zinc-200 disabled:opacity-50 text-zinc-900 cursor-pointer transition"
+                                title={isPaid ? "Descarregar Recibo PDF" : "Descarregar Fatura Proforma PDF"}
+                              >
+                                <FileText className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
                   </div>
                 </div>
               )}
 
-              {/* Tab: Activity Notifications */}
+              {/* Tab: Activity Notifications Inbox */}
               {activeTab === "alerts" && (
                 <div className="space-y-3">
-                  <h2 className="text-xl font-black" style={{ fontFamily: "var(--font-display)" }}>
-                    Notificações da Rota
-                  </h2>
-
-                  <div className="space-y-2">
-                    {notifications.map((n) => (
-                      <div
-                        key={n.id}
-                        className={`rounded-2xl p-3.5 border ${
-                          n.type === "alert"
-                            ? "bg-destructive/10 border-destructive/30 text-destructive"
-                            : n.type === "success"
-                            ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-950"
-                            : "bg-slide-paper border-slide-line text-slide-paper-ink"
-                        }`}
-                      >
-                        <div className="flex justify-between items-center text-[10px] opacity-60 mb-1">
-                          <span className="font-bold uppercase">MôBuss Angola</span>
-                          <span className="font-mono">{n.time}</span>
-                        </div>
-                        <div className="text-xs font-semibold">{n.text}</div>
-                      </div>
-                    ))}
+                  <div className="flex items-center justify-between gap-2">
+                    <h2 className="text-xl font-black" style={{ fontFamily: "var(--font-display)" }}>
+                      Notificações da Rota
+                    </h2>
+                    {inboxUnreadCount > 0 && (
+                      <span className="rounded-lg bg-destructive/15 border border-destructive/30 px-2 py-0.5 text-[10px] font-black text-destructive">
+                        {inboxUnreadCount} por ler
+                      </span>
+                    )}
                   </div>
+
+                  {!isAuthenticated ? (
+                    <div className="rounded-2xl p-4 border bg-slide-paper border-slide-line text-xs text-slide-paper-ink/70">
+                      Inicie sessão como encarregado para consultar as notificações dos seus educandos.
+                    </div>
+                  ) : inboxNotifications.length === 0 ? (
+                    <div className="rounded-2xl p-4 border bg-slide-paper border-slide-line text-xs text-slide-paper-ink/70">
+                      Ainda não existem notificações registadas para os seus educandos.
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {inboxNotifications.map((n) => {
+                        const isUnread = n.readAt == null;
+                        const isAlertStyle = n.type === "incident" || n.type === "trip_delayed";
+                        const isSuccessStyle = n.type === "boarded" || n.type === "handover_completed";
+                        return (
+                          <div
+                            key={n.id}
+                            onClick={() => {
+                              if (isUnread) {
+                                void markParentNotificationRead(n.id);
+                              }
+                            }}
+                            className={`rounded-2xl p-3.5 border transition ${
+                              isUnread ? "cursor-pointer shadow-sm" : "opacity-80"
+                            } ${
+                              isAlertStyle
+                                ? "bg-destructive/10 border-destructive/30 text-destructive"
+                                : isSuccessStyle
+                                ? "bg-emerald-500/10 border-emerald-500/25 text-emerald-950"
+                                : "bg-slide-paper border-slide-line text-slide-paper-ink"
+                            }`}
+                          >
+                            <div className="flex justify-between items-center text-[10px] mb-1 gap-2">
+                              <span className="font-bold uppercase inline-flex items-center gap-1.5 opacity-75">
+                                {isUnread && <span className="w-2 h-2 rounded-full bg-destructive shrink-0" />}
+                                <span>{NOTIFICATION_TYPE_LABEL[n.type] ?? "MôBuss"}</span>
+                              </span>
+                              <span className="font-mono opacity-65 shrink-0">
+                                {formatNotificationTimestampPt(n.createdAt)}
+                              </span>
+                            </div>
+                            <div className="text-xs font-black">{n.title}</div>
+                            <div className="text-xs font-medium mt-0.5">{n.body}</div>
+                            {isUnread && (
+                              <div className="mt-2 flex justify-end">
+                                <button
+                                  type="button"
+                                  disabled={markingNotificationId === n.id}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void markParentNotificationRead(n.id);
+                                  }}
+                                  className="text-[10px] font-bold underline cursor-pointer disabled:opacity-50"
+                                >
+                                  {markingNotificationId === n.id ? "A guardar..." : "Marcar como lida"}
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
             </>
@@ -1247,34 +2383,25 @@ export function NativeMobileApp({
                     <LuandaMap
                       progress={progress}
                       emergency={!!emergency}
-                      routeId={selectedRouteId}
+                      route={currentRoute}
+                      routeCode={activeRouteCode}
                       darkMode={true}
                       className="h-full w-full rounded-none"
                     />
                   </div>
 
-                  {/* Floating Top Bar: Corridors + Pauta + Carbon Next-Stop HUD */}
+                  {/* Floating Top Bar: Read-Only Assigned Route Badge + Pauta + Carbon Next-Stop HUD */}
                   <div className="relative z-10 px-2.5 pt-2.5 space-y-2 pointer-events-none">
                     <div className="flex items-center justify-between gap-1.5 pointer-events-auto">
-                      <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5">
-                        {Object.values(LUANDA_ROUTES).map((r) => (
-                          <button
-                            key={r.id}
-                            onClick={() => {
-                              setSelectedRouteId(r.id);
-                              setProgress(0);
-                              setRunning(false);
-                              notify(`Corredor alterado para ${r.name}`, "info");
-                            }}
-                            className={`px-2.5 py-1 rounded-full text-[10px] font-bold whitespace-nowrap transition cursor-pointer shadow-sm backdrop-blur-md ${
-                              selectedRouteId === r.id
-                                ? "bg-[#e11d2e] text-white ring-1 ring-white/25"
-                                : "bg-[#09090b]/85 text-zinc-200 border border-white/15 hover:bg-[#14151a]"
-                            }`}
-                          >
-                            {r.code}
-                          </button>
-                        ))}
+                      <div className="px-3 py-1 rounded-full text-[10px] font-bold whitespace-nowrap bg-[#09090b]/90 text-white border border-white/15 shadow-sm backdrop-blur-md inline-flex items-center gap-1.5 min-w-0 max-w-[70%]">
+                        <span className="w-1.5 h-1.5 rounded-full bg-[#e11d2e] shrink-0" />
+                        <span className="truncate">
+                          {currentRoute
+                            ? `${currentRoute.code} · ${currentRoute.name}`
+                            : activeDriverTrip
+                            ? `${activeDriverTrip.routeCode} · ${activeDriverTrip.routeName || "Rota atribuída"}`
+                            : "Sem rota atribuída à viagem"}
+                        </span>
                       </div>
 
                       <button
@@ -1295,10 +2422,17 @@ export function NativeMobileApp({
                         <div className="min-w-0">
                           <div className="text-[9px] text-zinc-400 uppercase tracking-wider font-bold flex items-center gap-1.5">
                             <span className="w-1.5 h-1.5 rounded-full bg-[#e11d2e] animate-pulse" />
-                            <span>PRÓXIMA PARAGEM · {currentRoute.code}</span>
+                            <span>PRÓXIMA PARAGEM · {activeRouteCode || "ATRIBUÍDA"}</span>
                           </div>
                           <div className="font-black text-sm text-white truncate mt-0.5">
-                            {currentRoute.stops.find((s) => s.at > progress)?.name || currentRoute.school}
+                            {(() => {
+                              if (activeRouteStops.length === 0) return activeSchoolName;
+                              const nextIdx = Math.min(
+                                activeRouteStops.length - 1,
+                                Math.floor(progress * Math.max(1, activeRouteStops.length - 1)) + 1
+                              );
+                              return activeRouteStops[nextIdx]?.name || activeSchoolName;
+                            })()}
                           </div>
                         </div>
                       </div>
@@ -1336,6 +2470,30 @@ export function NativeMobileApp({
                         </button>
                       </div>
                     )}
+
+                    {driverGpsPermissionDenied && (
+                      <div
+                        role="alert"
+                        className="pointer-events-auto rounded-xl bg-[#e11d2e]/95 backdrop-blur-md text-white px-3 py-2 text-[11px] font-bold flex items-center justify-between gap-2 shadow-lg border border-white/15"
+                      >
+                        <span className="flex items-center gap-1.5 min-w-0">
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                          <span>
+                            Permissão de localização recusada. Ative o acesso ao GPS nas definições para enviar a rota.
+                          </span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDriverGpsPermissionDenied(false);
+                            setDriverGpsRetryNonce((n) => n + 1);
+                          }}
+                          className="underline text-[10px] font-black shrink-0 cursor-pointer"
+                        >
+                          Tentar novamente
+                        </button>
+                      </div>
+                    )}
                   </div>
 
                   {/* Expandable Driver Dark-Mode Bottom Sheet */}
@@ -1359,6 +2517,64 @@ export function NativeMobileApp({
 
                     {/* Pinned Thumb-Zone Drive Controls */}
                     <div className="px-4 pb-3 border-b border-white/10 shrink-0 space-y-2.5">
+                      {/* Driver Telemetry & Queue Status Strip */}
+                      <div className="rounded-xl bg-[#181a20] border border-white/10 px-3 py-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span
+                            className={`w-2 h-2 rounded-full shrink-0 ${
+                              driverGpsPermissionDenied
+                                ? "bg-[#e11d2e]"
+                                : driverGpsActive
+                                ? "bg-emerald-400"
+                                : "bg-zinc-500"
+                            }`}
+                          />
+                          <span className="text-zinc-400">GPS:</span>
+                          <span className="font-bold text-zinc-100 truncate">
+                            {driverGpsPermissionDenied
+                              ? "Desligado (sem permissão)"
+                              : driverGpsActive
+                              ? "Ligado"
+                              : "Desligado"}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center justify-end gap-1.5 min-w-0">
+                          <span
+                            className={`w-2 h-2 rounded-full shrink-0 ${
+                              isDriverOnline ? "bg-emerald-400" : "bg-amber-400"
+                            }`}
+                          />
+                          <span className="text-zinc-400">Rede:</span>
+                          <span
+                            className={`font-bold ${
+                              isDriverOnline ? "text-emerald-400" : "text-amber-300"
+                            }`}
+                          >
+                            {isDriverOnline ? "Online" : "Offline"}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="text-zinc-400">Em fila:</span>
+                          <span className="font-mono font-bold text-zinc-100 tabular-nums">
+                            {queuedGpsCount} {queuedGpsCount === 1 ? "ponto" : "pontos"}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center justify-end gap-1.5 min-w-0">
+                          <span className="text-zinc-400">Último envio:</span>
+                          <span className="font-mono font-bold text-zinc-100 tabular-nums truncate">
+                            {lastGpsUploadAt
+                              ? new Date(lastGpsUploadAt).toLocaleTimeString("pt-AO", {
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                  second: "2-digit",
+                                })
+                              : "Sem envios"}
+                          </span>
+                        </div>
+                      </div>
                       {/* Anti-Forgetting Empty Bus Sweep Check at End of Route */}
                       {progress >= 1 && (
                         <button
@@ -1367,10 +2583,10 @@ export function NativeMobileApp({
                             setEmptyBusChecked(next);
                             if (next) {
                               recordEmptyBusSweep({
-                                busNumber: currentRoute.busId,
-                                plate: currentRoute.busPlate,
-                                driver: currentRoute.driver,
-                                routeName: `${currentRoute.code} · ${currentRoute.name}`,
+                                busNumber: activeBusNumber,
+                                plate: activeBusPlate,
+                                driver: activeDriverName,
+                                routeName: `${activeRouteCode || "ROTA"} · ${activeRouteName}`,
                               });
                               notify("Verificação anti-esquecimento concluída: 0 alunos no autocarro.", "success");
                             }
@@ -1426,12 +2642,33 @@ export function NativeMobileApp({
                           <button
                             disabled={!!emergency}
                             onClick={() => {
-                              setRunning(!running);
-                              if (!running)
+                              const nextRunning = !running;
+                              setRunning(nextRunning);
+                              if (nextRunning) {
                                 notify(
-                                  `Viagem iniciada por ${currentRoute.driver} — encarregados notificados.`,
+                                  `Viagem iniciada por ${activeDriverName} — encarregados notificados.`,
                                   "info"
                                 );
+                                if (activeDriverTrip?.id && isAuthenticated && (activeDriverTrip.state === "scheduled" || activeDriverTrip.state === "driver_checked_in")) {
+                                  void (async () => {
+                                    try {
+                                      if (activeDriverTrip.state === "scheduled") {
+                                        await apiFetch(`/api/v1/driver/trips/${activeDriverTrip.id}/transition`, {
+                                          method: "POST",
+                                          body: JSON.stringify({ nextState: "driver_checked_in" }),
+                                        });
+                                      }
+                                      await apiFetch(`/api/v1/driver/trips/${activeDriverTrip.id}/transition`, {
+                                        method: "POST",
+                                        body: JSON.stringify({ nextState: "in_progress" }),
+                                      });
+                                      await loadDriverDashboard();
+                                    } catch {
+                                      // Keep local trip active if offline
+                                    }
+                                  })();
+                                }
+                              }
                             }}
                             className={`flex-1 rounded-2xl py-3 font-black text-sm shadow cursor-pointer active:scale-[0.98] transition inline-flex items-center justify-center gap-2 ${
                               running
@@ -1479,6 +2716,28 @@ export function NativeMobileApp({
                           <span>{delay ? "+10m Ativo" : "+10m Atraso"}</span>
                         </button>
                       </div>
+
+                      {isCanReportDelay && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDelayReportError(null);
+                            setDelayModalOpen(true);
+                          }}
+                          className={`w-full rounded-2xl px-3.5 py-2.5 font-bold text-xs cursor-pointer shadow active:scale-[0.98] transition inline-flex items-center justify-center gap-2 border ${
+                            activeDriverTrip?.state === "delayed"
+                              ? "bg-amber-500/20 border-amber-400/50 text-amber-200"
+                              : "bg-zinc-900 border-amber-400/35 text-amber-300 hover:bg-zinc-800"
+                          }`}
+                        >
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                          <span>
+                            {activeDriverTrip?.state === "delayed" && activeDriverTrip.delayReason
+                              ? `Desvio / Trânsito (${activeDriverTrip.delayReason})`
+                              : "Desvio / Trânsito"}
+                          </span>
+                        </button>
+                      )}
                     </div>
 
                     {/* Scrollable Body: Waze Hazard Bar + Walkie-Talkie + Passenger Boarding Checklist */}
@@ -1494,7 +2753,7 @@ export function NativeMobileApp({
                             <button
                               onClick={() => {
                                 setActiveHazard(null);
-                                clearHazardForBus(currentRoute.busId);
+                                clearHazardForBus(activeBusNumber);
                                 notify("Alerta de via removido.", "info");
                               }}
                               className="text-[10px] text-zinc-300 underline cursor-pointer"
@@ -1519,15 +2778,15 @@ export function NativeMobileApp({
                                   if (next) {
                                     publishHazardReport({
                                       label,
-                                      routeCode: currentRoute.code,
-                                      routeName: currentRoute.name,
-                                      driver: currentRoute.driver,
-                                      busNumber: currentRoute.busId,
+                                      routeCode: activeRouteCode || "ROTA",
+                                      routeName: activeRouteName,
+                                      driver: activeDriverName,
+                                      busNumber: activeBusNumber,
                                     });
-                                    sendQuickMessage(`Alerta na via: ${label} no corredor ${currentRoute.code}.`);
+                                    sendQuickMessage(`Alerta na via: ${label} na rota ${activeRouteCode || "atribuída"}.`);
                                     notify(`Alerta Waze publicado: ${label}`, "alert");
                                   } else {
-                                    clearHazardForBus(currentRoute.busId);
+                                    clearHazardForBus(activeBusNumber);
                                   }
                                 }}
                                 className={`px-2 py-1.5 rounded-xl border text-[10px] font-bold flex flex-col items-center gap-1 cursor-pointer active:scale-95 transition ${
@@ -1594,7 +2853,7 @@ export function NativeMobileApp({
                                   )}
                                 </div>
                                 <div className="text-[10px] text-zinc-400 truncate">
-                                  {currentRoute.stops[s.stop]?.name || "Paragem Oficial"}
+                                  {activeRouteStops[s.stop]?.name || "Paragem Oficial"}
                                 </div>
                               </div>
 
@@ -1660,7 +2919,7 @@ export function NativeMobileApp({
                 <div className="space-y-3.5 text-zinc-50">
                   <div className="flex justify-between items-center gap-2">
                     <h2 className="text-lg font-black truncate" style={{ fontFamily: "var(--font-display)" }}>
-                      Paragens · {currentRoute.code}
+                      Paragens · {activeRouteCode || "Rota Atribuída"}
                     </h2>
                     <button
                       onClick={() => setDocsModalOpen(true)}
@@ -1671,33 +2930,39 @@ export function NativeMobileApp({
                     </button>
                   </div>
 
-                  <div className="space-y-2">
-                    {currentRoute.stops.map((st, i) => (
-                      <div
-                        key={st.id}
-                        className="rounded-2xl border border-white/10 p-3 bg-[#14151a] flex items-center justify-between"
-                      >
-                        <div className="flex items-center gap-3 min-w-0">
-                          <div className="w-8 h-8 rounded-full bg-[#e11d2e] text-white grid place-items-center font-bold text-xs shrink-0">
-                            {i + 1}
-                          </div>
-                          <div className="min-w-0">
-                            <div className="font-bold text-xs text-white truncate">{st.name}</div>
-                            <div className="text-[10px] text-zinc-400">
-                              {i === 0
-                                ? "Partida Inicial · 07:30"
-                                : i === currentRoute.stops.length - 1
-                                ? `Destino (${currentRoute.school})`
-                                : `Paragem intermédia (+${st.etaMinutes} min)`}
+                  {activeRouteStops.length === 0 ? (
+                    <div className="rounded-2xl border border-white/10 p-4 bg-[#14151a] text-xs text-zinc-400">
+                      Nenhuma paragem configurada para a sua viagem atribuída.
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {activeRouteStops.map((st, i) => (
+                        <div
+                          key={st.id}
+                          className="rounded-2xl border border-white/10 p-3 bg-[#14151a] flex items-center justify-between"
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="w-8 h-8 rounded-full bg-[#e11d2e] text-white grid place-items-center font-bold text-xs shrink-0">
+                              {i + 1}
+                            </div>
+                            <div className="min-w-0">
+                              <div className="font-bold text-xs text-white truncate">{st.name}</div>
+                              <div className="text-[10px] text-zinc-400">
+                                {i === 0
+                                  ? `Partida Inicial · ${st.scheduledTime || "06:30"}`
+                                  : i === activeRouteStops.length - 1
+                                  ? `Destino (${activeSchoolName}) · ${st.scheduledTime || "07:30"}`
+                                  : `Paragem intermédia · ${st.scheduledTime || "07:00"} · Raio ${st.geofenceRadiusM}m`}
+                              </div>
                             </div>
                           </div>
+                          <span className="text-[11px] font-bold text-white bg-white/10 border border-white/10 px-2 py-0.5 rounded-lg shrink-0">
+                            {students.filter((s) => s.stop === i).length} alunos
+                          </span>
                         </div>
-                        <span className="text-[11px] font-bold text-white bg-white/10 border border-white/10 px-2 py-0.5 rounded-lg shrink-0">
-                          {students.filter((s) => s.stop === i).length} alunos
-                        </span>
-                      </div>
-                    ))}
-                  </div>
+                      ))}
+                    </div>
+                  )}
 
                   {/* Fuel Quick-Log Card */}
                   <div className="rounded-2xl bg-[#14151a] p-3.5 border border-white/10">
@@ -1705,7 +2970,7 @@ export function NativeMobileApp({
                       <Fuel className="w-4 h-4 text-[#e11d2e]" />
                       <span>Registo de Abastecimento (Luanda)</span>
                     </div>
-                    <div className="text-[11px] text-zinc-400 mb-2">Autocarro {currentRoute.busId} · Posto Pumangol</div>
+                    <div className="text-[11px] text-zinc-400 mb-2">Autocarro {activeBusNumber} · Posto Pumangol</div>
                     <div className="flex gap-2">
                       <input
                         placeholder="Litros (ex: 45L)"
@@ -1732,7 +2997,8 @@ export function NativeMobileApp({
                 <LuandaMap
                   progress={progress}
                   emergency={!!emergency}
-                  routeId={selectedRouteId}
+                  route={currentRoute}
+                  routeCode={activeRouteCode}
                   className="h-full w-full rounded-none"
                 />
               </div>
@@ -1741,17 +3007,17 @@ export function NativeMobileApp({
               <div className="relative z-10 px-2.5 pt-2.5 space-y-2 pointer-events-none">
                 <div className="flex items-center justify-between gap-1.5 pointer-events-auto">
                   <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5">
-                    {Object.values(LUANDA_ROUTES).map((r) => (
+                    {apiRoutes.map((r) => (
                       <button
                         key={r.id}
                         onClick={() => {
-                          setSelectedRouteId(r.id);
+                          setSelectedRouteCode(r.code);
                           setProgress(0);
                           setRunning(false);
                           notify(`Corredor alterado para ${r.name}`, "info");
                         }}
                         className={`px-2.5 py-1 rounded-full text-[10px] font-bold whitespace-nowrap transition cursor-pointer shadow-sm backdrop-blur-md ${
-                          selectedRouteId === r.id
+                          activeRouteCode.toUpperCase() === r.code.toUpperCase()
                             ? "bg-[#09090b] text-white ring-1 ring-white/20"
                             : "bg-white/90 text-zinc-900 border border-zinc-200/80 hover:bg-white"
                         }`}
@@ -1856,13 +3122,13 @@ export function NativeMobileApp({
 
                   <div className="rounded-2xl border border-zinc-200 p-3 bg-white space-y-1.5">
                     <div className="flex justify-between items-center text-xs">
-                      <span className="font-bold text-zinc-950">{currentRoute.school}</span>
+                      <span className="font-bold text-zinc-950">{activeSchoolName}</span>
                       <span className="bg-emerald-600 text-white font-bold px-2 py-0.5 rounded-full text-[10px]">
                         Em operação
                       </span>
                     </div>
                     <div className="text-[11px] text-zinc-600">
-                      {currentRoute.name} · Motorista: {currentRoute.driver} ({currentRoute.busPlate})
+                      {activeRouteName} · {activeRouteStops.length} paragem(ns) configuradas
                     </div>
                   </div>
                 </div>
@@ -1932,9 +3198,9 @@ export function NativeMobileApp({
               >
                 <div className="relative leading-none">
                   <Bell className="w-[18px] h-[18px]" />
-                  {notifications.length > 0 && (
+                  {inboxUnreadCount > 0 && (
                     <span className="absolute -top-1 -right-1.5 min-w-[14px] h-3.5 px-0.5 rounded-full bg-destructive text-white text-[8px] font-black flex items-center justify-center">
-                      {notifications.length}
+                      {inboxUnreadCount}
                     </span>
                   )}
                 </div>
@@ -2182,7 +3448,7 @@ export function NativeMobileApp({
                   <div>
                     <h3 className="font-extrabold text-base leading-tight">Walkie-Talkie MôBuss</h3>
                     <p className={`text-[11px] ${isDriverDark ? "text-zinc-400" : "text-zinc-500"}`}>
-                      {role === "driver" ? "Canal com os Encarregados" : `Canal com ${currentRoute.driver} (Motorista)`}
+                      {role === "driver" ? "Canal com os Encarregados" : `Canal com ${activeDriverName} (Motorista)`}
                     </p>
                   </div>
                 </div>
@@ -2275,7 +3541,7 @@ export function NativeMobileApp({
               </div>
 
               <p className="text-xs text-slide-paper-ink/70 mb-3">
-                Ao reportar a falta com antecedência, o autocarro não fará a paragem de {currentRoute.stops[currentKid.stop]?.name || "Mutamba"}, poupando tempo para os restantes alunos.
+                Ao reportar a falta com antecedência, o autocarro não fará a paragem de {activeRouteStops[currentKid.stop]?.name || activeBackendStudent?.stopName || "Mutamba"}, poupando tempo para os restantes alunos.
               </p>
 
               <div className="space-y-2 mb-4">
@@ -2404,11 +3670,15 @@ export function NativeMobileApp({
         <MulticaixaModal
           isOpen={multicaixaModalOpen}
           onClose={() => setMulticaixaModalOpen(false)}
-          onSuccess={() => notify("Pagamento Multicaixa Express validado com sucesso!", "success")}
-          studentName={currentKid.name}
-          guardianName={currentKid.guardian}
-          schoolName={currentKid.school}
-          routeLabel={currentRoute.name}
+          onSuccess={() => {
+            void loadGuardianDashboard();
+          }}
+          studentId={role === "parent" ? activeBackendStudent?.id : undefined}
+          studentName={role === "parent" ? (activeBackendStudent?.fullName ?? "") : currentKid.name}
+          guardianName={role === "parent" ? (dbUser?.fullName ?? "") : currentKid.guardian}
+          phone={role === "parent" ? (dbUser?.phone ?? "") : currentKid.phone}
+          schoolName={role === "parent" ? parentSchoolName : currentKid.school}
+          routeLabel={activeBackendStudent?.activeTrip?.routeName || activeRouteName}
           amountValue={syncPricing.studentMonthlyFee}
         />
 
@@ -2417,18 +3687,18 @@ export function NativeMobileApp({
           isOpen={attendanceModalOpen}
           onClose={() => setAttendanceModalOpen(false)}
           students={students}
-          routeName={currentRoute.name}
-          busNumber={currentRoute.busId}
-          driverName={currentRoute.driver}
-          schoolName={currentRoute.school}
+          routeName={activeRouteName}
+          busNumber={activeBusNumber}
+          driverName={activeDriverName}
+          schoolName={activeSchoolName}
         />
 
         {/* MODAL: VEHICLE DOCUMENTS & DNVT */}
         <VehicleDocumentsModal
           isOpen={docsModalOpen}
           onClose={() => setDocsModalOpen(false)}
-          busId={currentRoute.busId}
-          busPlate={currentRoute.busPlate}
+          busId={activeBusNumber}
+          busPlate={activeBusPlate}
         />
 
         {/* SOS EMERGENCY MODAL */}
@@ -2544,14 +3814,14 @@ export function NativeMobileApp({
                     Link ao Vivo · {currentKid.name}
                   </div>
                   <div className="text-xs font-mono font-bold text-zinc-900 truncate">
-                    https://mobuss.ao/track/LD-{currentRoute.busId}-{currentKid.pickupPin}
+                    https://mobuss.ao/track/LD-{activeBusNumber}-{currentKid.pickupPin}
                   </div>
                 </div>
                 <button
                   onClick={() => {
                     try {
                       navigator.clipboard?.writeText(
-                        `https://mobuss.ao/track/LD-${currentRoute.busId}-${currentKid.pickupPin}`
+                        `https://mobuss.ao/track/LD-${activeBusNumber}-${currentKid.pickupPin}`
                       );
                     } catch {
                       // ignore clipboard restrictions inside iframe
@@ -2592,6 +3862,100 @@ export function NativeMobileApp({
                 </div>
               </div>
             </motion.div>
+          </div>
+        )}
+
+        {/* DRIVER DELAY / DETOUR REPORT MODAL */}
+        {delayModalOpen && role === "driver" && (
+          <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-end sm:items-center justify-center p-3">
+            <form
+              onSubmit={handleSubmitDriverDelayReport}
+              className="w-full max-w-sm rounded-3xl bg-[#14151a] text-zinc-50 border border-white/15 p-4 space-y-3.5 shadow-2xl"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-300 grid place-items-center shrink-0">
+                    <AlertTriangle className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-black leading-tight">Desvio / Trânsito</h3>
+                    <p className="text-[10px] text-zinc-400">
+                      {activeDriverTrip?.tripCode || "Viagem em curso"} · {activeRouteCode || "Rota atribuída"}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDelayModalOpen(false)}
+                  className="w-7 h-7 rounded-full bg-zinc-800 text-zinc-300 grid place-items-center cursor-pointer"
+                  aria-label="Fechar desvio"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+                  Selecione o motivo:
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {DELAY_REASONS.map((reasonKey) => {
+                    const selected = delayReasonInput === reasonKey;
+                    return (
+                      <button
+                        key={reasonKey}
+                        type="button"
+                        onClick={() => setDelayReasonInput(reasonKey)}
+                        className={`px-2.5 py-2 rounded-xl text-[11px] font-bold border text-left transition cursor-pointer ${
+                          selected
+                            ? "bg-amber-500 text-zinc-950 border-amber-400"
+                            : "bg-[#09090b] text-zinc-200 border-white/10 hover:border-white/25"
+                        }`}
+                      >
+                        {DELAY_REASON_LABELS[reasonKey]}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 block">
+                  Nota breve (opcional):
+                </label>
+                <textarea
+                  rows={2}
+                  maxLength={240}
+                  value={delayNoteInput}
+                  onChange={(e) => setDelayNoteInput(e.target.value)}
+                  placeholder="Ex: Desvio pela via paralela junto ao cruzamento..."
+                  className="w-full rounded-xl bg-[#09090b] border border-white/15 px-3 py-2 text-xs text-white placeholder:text-zinc-500 outline-none focus:border-amber-400 resize-none"
+                />
+              </div>
+
+              {delayReportError && (
+                <div className="rounded-xl bg-red-500/15 border border-red-500/40 px-3 py-2 text-[11px] text-red-200 font-semibold">
+                  {delayReportError}
+                </div>
+              )}
+
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDelayModalOpen(false)}
+                  className="px-4 py-2.5 rounded-xl bg-zinc-800 text-zinc-200 text-xs font-bold cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={submittingDelayReport}
+                  className="flex-1 py-2.5 rounded-xl bg-amber-500 text-zinc-950 text-xs font-black cursor-pointer disabled:opacity-50"
+                >
+                  {submittingDelayReport ? "A enviar..." : "Enviar Alerta de Atraso"}
+                </button>
+              </div>
+            </form>
           </div>
         )}
       </div>

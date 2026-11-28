@@ -12,6 +12,8 @@ import {
   invoices,
   pricingConfigs,
   recurringRouteSchedules,
+  routes,
+  routeStops,
   schoolContractRequests,
   schools,
   students,
@@ -20,6 +22,7 @@ import {
   vehicleOwners,
   vehicles,
 } from './schema.ts';
+import { LUANDA_ROUTES, pointAtRoute } from '../lib/route-luanda.ts';
 import { hashPin } from '../middleware/auth.ts';
 import crypto from 'node:crypto';
 
@@ -48,12 +51,67 @@ async function runStagingSeed() {
       ivaPercent: 14,
       companyName: 'MôBuss Angola Transporte Escolar Lda.',
       companyNif: '5417209418',
+      companyAddress: 'Av. Comandante Valódia, Luanda, Angola',
       fiscalIntegrationStatus: 'sandbox_pending_agt_certification',
     });
   }
 
+  async function ensureInitialRoutesSeeded() {
+    const existingRoutes = await db.select({ total: count() }).from(routes);
+    if (Number(existingRoutes[0]?.total ?? 0) > 0) {
+      return;
+    }
+
+    const allSchools = await db.select().from(schools);
+    const schoolByName = new Map(allSchools.map((s) => [s.name.trim().toLowerCase(), s]));
+
+    const formatStopTime = (offsetMinutes: number) => {
+      const totalMins = 6 * 60 + 30 + Math.max(0, Math.round(offsetMinutes));
+      const hh = String(Math.floor(totalMins / 60) % 24).padStart(2, '0');
+      const mm = String(totalMins % 60).padStart(2, '0');
+      return `${hh}:${mm}`;
+    };
+
+    for (const cfg of Object.values(LUANDA_ROUTES)) {
+      const matchedSchool = schoolByName.get(cfg.school.trim().toLowerCase()) ?? null;
+      const insertedRouteRows = await db
+        .insert(routes)
+        .values({
+          code: cfg.code.trim().toUpperCase(),
+          name: cfg.name,
+          corridor: cfg.corridor,
+          schoolId: matchedSchool?.id ?? null,
+          pathCoordinates: cfg.path,
+          active: true,
+        })
+        .onConflictDoNothing()
+        .returning();
+
+      const insertedRoute = insertedRouteRows[0];
+      if (!insertedRoute) continue;
+
+      if (cfg.stops.length > 0) {
+        await db.insert(routeStops).values(
+          cfg.stops.map((st, idx) => {
+            const [lat, lng] = pointAtRoute(cfg.path, st.at);
+            return {
+              routeId: insertedRoute.id,
+              position: idx,
+              name: st.name,
+              latitude: Number(lat.toFixed(6)),
+              longitude: Number(lng.toFixed(6)),
+              scheduledTime: formatStopTime(st.etaMinutes),
+              geofenceRadiusM: 500,
+            };
+          })
+        );
+      }
+    }
+  }
+
   const existingSchools = await db.select({ total: count() }).from(schools);
   if (Number(existingSchools[0]?.total ?? 0) > 0) {
+    await ensureInitialRoutesSeeded();
     // Ensure idempotent backfill for newly added recurring_route_schedules & vehicle school link on existing staging DBs
     const existingSchedules = await db.select({ total: count() }).from(recurringRouteSchedules);
     if (Number(existingSchedules[0]?.total ?? 0) === 0) {
@@ -130,6 +188,86 @@ async function runStagingSeed() {
         await db.insert(recurringRouteSchedules).values(initialSchedules);
       }
     }
+
+    // One-time safe backfill so already-seeded drivers and vehicles belong to their school without overwriting later edits
+    const backfillMarker = await db
+      .select({ id: auditLogs.id })
+      .from(auditLogs)
+      .where(eq(auditLogs.action, 'system.backfill_school_ownership_v1'))
+      .limit(1);
+
+    if (!backfillMarker[0]) {
+      const allSchools = await db.select().from(schools).orderBy(schools.id);
+      const morroBento =
+        allSchools.find((s) => s.name.toLowerCase().includes('morro bento')) ?? allSchools[0] ?? null;
+      const saoPaulo =
+        allSchools.find((s) => s.name.toLowerCase().includes('são paulo') || s.name.toLowerCase().includes('sao paulo')) ??
+        allSchools[1] ??
+        morroBento;
+      const talatona =
+        allSchools.find((s) => s.name.toLowerCase().includes('talatona')) ?? allSchools[2] ?? morroBento;
+
+      const plateSchoolMap = new Map<string, number | undefined>([
+        ['LD-24-61-AB', morroBento?.id],
+        ['LD-31-02-CK', saoPaulo?.id],
+        ['LD-05-49-HM', talatona?.id],
+        ['LD-22-88-PL', talatona?.id],
+        ['LD-18-77-FE', morroBento?.id],
+      ]);
+
+      const driverSchoolMap = new Map<string, number | undefined>([
+        ['João Mateus', morroBento?.id],
+        ['Paulo Cassoma', saoPaulo?.id],
+        ['Teresa Lunda', talatona?.id],
+        ['Adão Bento', talatona?.id],
+        ['Rosa Tchissola', morroBento?.id],
+      ]);
+
+      const existingVehicles = await db.select().from(vehicles);
+      for (const v of existingVehicles) {
+        const mappedSchoolId = plateSchoolMap.get(v.plate);
+        if (mappedSchoolId) {
+          await db
+            .update(vehicles)
+            .set({
+              ownershipType: 'school_owned',
+              assignedSchoolId: v.assignedSchoolId ?? mappedSchoolId,
+            })
+            .where(eq(vehicles.id, v.id));
+        }
+      }
+
+      const existingDrivers = await db.select().from(drivers);
+      for (const d of existingDrivers) {
+        const mappedSchoolId = driverSchoolMap.get(d.fullName);
+        if (mappedSchoolId && d.employerSchoolId == null) {
+          await db
+            .update(drivers)
+            .set({
+              employerType: 'school',
+              employerSchoolId: mappedSchoolId,
+            })
+            .where(eq(drivers.id, d.id));
+        }
+      }
+
+      if (talatona) {
+        const rotaC = await db.select().from(routes).where(eq(routes.code, 'ROTA-C')).limit(1);
+        if (rotaC[0] && rotaC[0].schoolId == null) {
+          await db.update(routes).set({ schoolId: talatona.id }).where(eq(routes.id, rotaC[0].id));
+        }
+      }
+
+      await db.insert(auditLogs).values({
+        actorUid: 'system-migration',
+        actorEmail: 'ops@mobuss.ao',
+        actorRole: 'mobuss_super_admin',
+        action: 'system.backfill_school_ownership_v1',
+        targetEntity: 'database',
+        targetId: 'drivers_vehicles',
+        summary: 'Motoristas e viaturas iniciais associados às respetivas escolas.',
+      });
+    }
     return;
   }
 
@@ -173,6 +311,9 @@ async function runStagingSeed() {
   const schoolMorroBento = insertedSchools[0]!;
   const schoolSaoPaulo = insertedSchools[1]!;
   const schoolTalatona = insertedSchools[2]!;
+
+  await ensureInitialRoutesSeeded();
+  await db.update(routes).set({ schoolId: schoolTalatona.id }).where(eq(routes.code, 'ROTA-C'));
 
   // 2. Seed contracts with configurable payerModel & dual PIN policy (boarding + dropoff)
   const insertedContracts = await db
@@ -288,7 +429,7 @@ async function runStagingSeed() {
     ])
     .returning();
 
-  // 5. Seed drivers
+  // 5. Seed drivers (linked to their employer schools)
   const insertedDrivers = await db
     .insert(drivers)
     .values([
@@ -298,6 +439,8 @@ async function runStagingSeed() {
         licenceCategory: 'Pesados Profissional D',
         licenceNumber: 'LD-DRV-2022-8841',
         licenceExpiry: '2028-04-15',
+        employerType: 'school',
+        employerSchoolId: schoolMorroBento.id,
         engagementType: 'employed',
         verificationStatus: 'verified',
         availabilityStatus: 'in_service',
@@ -312,6 +455,8 @@ async function runStagingSeed() {
         licenceCategory: 'Pesados Profissional D',
         licenceNumber: 'LD-DRV-2021-4410',
         licenceExpiry: '2027-09-20',
+        employerType: 'school',
+        employerSchoolId: schoolSaoPaulo.id,
         engagementType: 'contractor',
         verificationStatus: 'verified',
         availabilityStatus: 'in_service',
@@ -326,6 +471,8 @@ async function runStagingSeed() {
         licenceCategory: 'Pesados Profissional D',
         licenceNumber: 'LD-DRV-2023-1920',
         licenceExpiry: '2028-11-30',
+        employerType: 'school',
+        employerSchoolId: schoolTalatona.id,
         engagementType: 'employed',
         verificationStatus: 'verified',
         availabilityStatus: 'in_service',
@@ -340,6 +487,8 @@ async function runStagingSeed() {
         licenceCategory: 'Pesados Profissional D',
         licenceNumber: 'LD-DRV-2020-7712',
         licenceExpiry: '2027-02-10',
+        employerType: 'school',
+        employerSchoolId: schoolTalatona.id,
         engagementType: 'owner_driver',
         verificationStatus: 'verified',
         availabilityStatus: 'in_service',
@@ -354,6 +503,8 @@ async function runStagingSeed() {
         licenceCategory: 'Pesados Profissional D',
         licenceNumber: 'LD-DRV-2023-9901',
         licenceExpiry: '2028-06-18',
+        employerType: 'school',
+        employerSchoolId: schoolMorroBento.id,
         engagementType: 'employed',
         verificationStatus: 'verified',
         availabilityStatus: 'available',
@@ -365,14 +516,14 @@ async function runStagingSeed() {
     ])
     .returning();
 
-  // 6. Seed vehicles (separated into mobuss_owned and partner_owned)
+  // 6. Seed vehicles (assigned & owned by their respective schools)
   const insertedVehicles = await db
     .insert(vehicles)
     .values([
       {
         fleetNumber: 12,
         plate: 'LD-24-61-AB',
-        ownershipType: 'mobuss_owned',
+        ownershipType: 'school_owned',
         ownerId: insertedOwners[0]!.id,
         assignedDriverId: insertedDrivers[0]!.id,
         assignedSchoolId: schoolMorroBento.id,
@@ -390,7 +541,7 @@ async function runStagingSeed() {
       {
         fleetNumber: 7,
         plate: 'LD-31-02-CK',
-        ownershipType: 'partner_owned',
+        ownershipType: 'school_owned',
         ownerId: insertedOwners[1]!.id,
         assignedDriverId: insertedDrivers[1]!.id,
         assignedSchoolId: schoolSaoPaulo.id,
@@ -408,9 +559,10 @@ async function runStagingSeed() {
       {
         fleetNumber: 9,
         plate: 'LD-05-49-HM',
-        ownershipType: 'partner_owned',
+        ownershipType: 'school_owned',
         ownerId: insertedOwners[2]!.id,
         assignedDriverId: insertedDrivers[3]!.id,
+        assignedSchoolId: schoolTalatona.id,
         routeCode: 'ROTA-C',
         routeName: 'Rota C · Viana Sul',
         capacity: 25,
@@ -425,9 +577,10 @@ async function runStagingSeed() {
       {
         fleetNumber: 4,
         plate: 'LD-22-88-PL',
-        ownershipType: 'mobuss_owned',
+        ownershipType: 'school_owned',
         ownerId: insertedOwners[0]!.id,
         assignedDriverId: insertedDrivers[2]!.id,
+        assignedSchoolId: schoolTalatona.id,
         routeCode: 'ROTA-D',
         routeName: 'Rota D · Baixa & Miramar',
         capacity: 20,
@@ -442,9 +595,10 @@ async function runStagingSeed() {
       {
         fleetNumber: 3,
         plate: 'LD-18-77-FE',
-        ownershipType: 'mobuss_owned',
+        ownershipType: 'school_owned',
         ownerId: insertedOwners[0]!.id,
         assignedDriverId: insertedDrivers[4]!.id,
+        assignedSchoolId: schoolMorroBento.id,
         routeCode: 'RESERVA',
         routeName: 'Reserva Central · Morro Bento',
         capacity: 22,
@@ -742,33 +896,48 @@ async function runStagingSeed() {
   ]);
 
   // 12. Provisional Invoices (NEVER labelled as AGT-certified until verified!)
+  const seedDueDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
   await db.insert(invoices).values([
     {
       invoiceNumber: 'PRO-MOB-2026/8192',
       schoolId: schoolMorroBento.id,
+      guardianId: insertedGuardians[0]!.id,
+      studentId: insertedStudents[0]!.id,
       studentName: 'Maria Domingos',
       guardianName: 'Sra. Luísa Domingos',
       payerType: 'guardian',
       phone: '+244 923 456 789',
+      description: 'Transporte escolar – mês de novembro de 2026',
       amountAoa: 3000,
-      paymentMethod: 'multicaixa_express',
+      ivaPercent: 14,
+      paymentMethod: 'multicaixa_express_entity',
+      paymentEntity: '00845',
+      paymentReferencePin: '819 204 511',
       status: 'confirmed',
-      providerReference: 'MCX-SANDBOX-8192',
+      providerReference: 'CONC-00845-8192',
       fiscalStatus: 'proforma_unverified',
+      dueDate: seedDueDate,
       confirmedAt: new Date(),
     },
     {
       invoiceNumber: 'PRO-MOB-2026/8195',
       schoolId: schoolMorroBento.id,
+      guardianId: insertedGuardians[3]!.id,
+      studentId: insertedStudents[3]!.id,
       studentName: 'Bruno Neto',
       guardianName: 'Sr. Carlos Neto',
       payerType: 'guardian',
       phone: '+244 945 678 901',
+      description: 'Transporte escolar – mês de novembro de 2026',
       amountAoa: 3000,
-      paymentMethod: 'multicaixa_express',
+      ivaPercent: 14,
+      paymentMethod: 'multicaixa_express_entity',
+      paymentEntity: '00845',
+      paymentReferencePin: '819 502 330',
       status: 'pending_provider',
-      providerReference: 'MCX-PENDING-8195',
+      providerReference: null,
       fiscalStatus: 'proforma_unverified',
+      dueDate: seedDueDate,
     },
   ]);
 

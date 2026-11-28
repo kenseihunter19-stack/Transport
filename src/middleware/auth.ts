@@ -37,8 +37,32 @@ export interface AuthRequest extends Request {
   dbUser?: DbUserRecord;
 }
 
-const PIN_PEPPER = process.env.MOBUSS_PIN_PEPPER || 'mobuss-luanda-handover-pepper-2026';
-const SESSION_SECRET = process.env.MOBUSS_AUTH_SECRET || PIN_PEPPER;
+function readAuthSecret(name: 'MOBUSS_PIN_PEPPER' | 'MOBUSS_AUTH_SECRET'): string {
+  const value = process.env[name]?.trim();
+  if (value) {
+    return value;
+  }
+
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      `[MôBuss Startup Error] Missing required environment variable ${name}. Please configure ${name} before starting the server.`
+    );
+  }
+
+  console.warn(
+    `[MôBuss Startup Warning] ${name} is not set; using an ephemeral in-memory development secret. Configure ${name} before running in production.`
+  );
+  return crypto.randomBytes(32).toString('hex');
+}
+
+const PIN_PEPPER = readAuthSecret('MOBUSS_PIN_PEPPER');
+const SESSION_SECRET = readAuthSecret('MOBUSS_AUTH_SECRET');
+
+if (SESSION_SECRET === PIN_PEPPER) {
+  throw new Error(
+    '[MôBuss Startup Error] MOBUSS_AUTH_SECRET must be separate and distinct from MOBUSS_PIN_PEPPER.'
+  );
+}
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function toSafeDbUser(row: typeof users.$inferSelect): DbUserRecord {

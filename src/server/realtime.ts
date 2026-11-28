@@ -2,7 +2,7 @@ import type http from 'node:http';
 import { URL } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
 import { and, eq, inArray } from 'drizzle-orm';
-import { adminMessaging } from '../lib/firebase-admin.ts';
+import { adminMessaging, isPushCredentialsConfigured } from '../lib/firebase-admin.ts';
 import {
   AccountNotProvisionedError,
   resolveDbUserFromToken,
@@ -17,8 +17,8 @@ import {
   students,
   trips,
 } from '../db/schema.ts';
-import { checkStopGeofences, getRouteConfigByCode } from '../lib/luanda-geofence.ts';
-import { pointAtRoute } from '../lib/route-luanda.ts';
+import { checkRouteStopGeofences, pointAtRoute } from '../lib/luanda-geofence.ts';
+import { getRouteWithStopsByCode, loadRoutesWithStops } from './routes-repo.ts';
 
 async function sendMulticastPush(
   userIds: number[],
@@ -26,7 +26,7 @@ async function sendMulticastPush(
   body: string,
   data: Record<string, string>
 ): Promise<void> {
-  if (userIds.length === 0) return;
+  if (userIds.length === 0 || !isPushCredentialsConfigured()) return;
   try {
     const tokenRows = await db
       .select()
@@ -202,6 +202,7 @@ export class TelemetryHub {
       | 'attendance:updated'
       | 'pin:validated'
       | 'incident:created'
+      | 'incident:updated'
       | 'simulation:status',
     payload: Record<string, unknown>,
     options?: { schoolId?: number | null }
@@ -227,6 +228,29 @@ export class TelemetryHub {
 
       client.ws.send(serialized);
     }
+  }
+
+  public sendToUsers(
+    userIds: number[],
+    type: 'notification:created',
+    payload: Record<string, unknown>
+  ): number {
+    if (userIds.length === 0) return 0;
+    const allowedIds = new Set(userIds);
+    const serialized = JSON.stringify({
+      type,
+      payload,
+      timestamp: new Date().toISOString(),
+    });
+
+    let sentCount = 0;
+    for (const client of this.clients) {
+      if (client.ws.readyState !== WebSocket.OPEN) continue;
+      if (!allowedIds.has(client.user.id)) continue;
+      client.ws.send(serialized);
+      sentCount += 1;
+    }
+    return sentCount;
   }
 }
 
@@ -254,7 +278,13 @@ export class TripSimulationRunner {
   }
 
   public async start(routeCode = 'ROTA-A', actor?: DbUserRecord): Promise<SimulationState> {
-    const route = getRouteConfigByCode(routeCode);
+    const requested = await getRouteWithStopsByCode(routeCode, { includeInactive: true });
+    const allRoutes = requested ? [requested] : await loadRoutesWithStops();
+    const route = requested ?? allRoutes[0];
+    if (!route) {
+      throw new Error('Nenhuma rota configurada na base de dados para simular.');
+    }
+
     const matchingTrips = await db.select().from(trips).where(eq(trips.routeCode, route.code));
     const targetTrip = matchingTrips[0] ?? (await db.select().from(trips).limit(1))[0];
     if (!targetTrip) {
@@ -317,14 +347,18 @@ export class TripSimulationRunner {
 
   public async reset(routeCode = 'ROTA-A'): Promise<SimulationState> {
     this.pause();
-    const route = getRouteConfigByCode(routeCode);
+    const requested = await getRouteWithStopsByCode(routeCode, { includeInactive: true });
+    const route = requested ?? (await loadRoutesWithStops())[0];
+    if (!route) {
+      throw new Error('Nenhuma rota configurada na base de dados para reiniciar.');
+    }
     const matchingTrips = await db.select().from(trips).where(eq(trips.routeCode, route.code));
     const targetTrip = matchingTrips[0];
 
     this.state.routeCode = route.code;
     this.state.routeName = route.name;
     this.state.progress = 0.02;
-    const [lat, lng] = pointAtRoute(route.path, 0.02);
+    const [lat, lng] = pointAtRoute(route.pathCoordinates, 0.02);
     this.state.lastLat = lat;
     this.state.lastLng = lng;
     this.state.nearestStopName = route.stops[0]?.name ?? 'Início';
@@ -368,7 +402,8 @@ export class TripSimulationRunner {
 
   private async advanceStep(delta: number) {
     if (!this.state.tripId) return;
-    const route = getRouteConfigByCode(this.state.routeCode);
+    const route = await getRouteWithStopsByCode(this.state.routeCode, { includeInactive: true });
+    if (!route) return;
     let nextProgress = this.state.progress + delta;
     if (nextProgress >= 1) {
       nextProgress = 1;
@@ -377,13 +412,14 @@ export class TripSimulationRunner {
       }
     }
 
-    const [lat, lng] = pointAtRoute(route.path, nextProgress);
-    const geofence = checkStopGeofences(route.code, lat, lng);
+    const [lat, lng] = pointAtRoute(route.pathCoordinates, nextProgress);
+    const geofence = checkRouteStopGeofences(route.stops, lat, lng);
+    const nearestStopName = geofence.nearestStop?.stopName ?? route.name;
 
     this.state.progress = nextProgress;
     this.state.lastLat = lat;
     this.state.lastLng = lng;
-    this.state.nearestStopName = geofence.nearestStop.stopName;
+    this.state.nearestStopName = nearestStopName;
     this.state.lastTickAt = new Date().toISOString();
 
     try {
@@ -408,9 +444,9 @@ export class TripSimulationRunner {
           lat,
           lng,
           progress: nextProgress,
-          nearestStopName: geofence.nearestStop.stopName,
-          distanceToNextStopM: geofence.nearestStop.distanceMeters,
-          etaMinutes: geofence.nearestStop.etaMinutes,
+          nearestStopName,
+          distanceToNextStopM: geofence.nearestStop?.distanceMeters ?? null,
+          etaMinutes: geofence.nearestStop?.etaMinutes ?? null,
           gpsStatus: 'live',
         },
         { schoolId: updatedTrip?.schoolId }

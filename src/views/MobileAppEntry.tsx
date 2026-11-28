@@ -1,6 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import {
   AlertTriangle,
+  Bell,
   Bus,
   CheckCircle2,
   Compass,
@@ -16,7 +17,14 @@ import {
   Wifi,
   WifiOff,
   Copy,
+  Download,
 } from 'lucide-react';
+import { downloadInvoicePdf } from '@/lib/invoice-pdf';
+import {
+  formatNotificationTimestampPt,
+  NOTIFICATION_TYPE_LABEL,
+  type AppNotification,
+} from '@/lib/notifications';
 import { useAuth, ROLE_LABELS } from '@/contexts/AuthContext';
 import { AuthGatePanel } from '@/components/AuthGatePanel';
 import { LegalComplianceModal, type LegalTab } from '@/components/LegalComplianceModal';
@@ -26,7 +34,16 @@ import { useTelemetrySocket } from '@/hooks/useTelemetrySocket';
 const NativeMobileApp = lazy(() =>
   import('@/views/NativeMobileApp').then((m) => ({ default: m.NativeMobileApp }))
 );
-import { estimateRouteProgressFromCoords, getRouteConfigByCode } from '@/lib/luanda-geofence';
+import { Geolocation } from '@capacitor/geolocation';
+import {
+  computeRemainingStopsEta,
+  DELAY_REASONS,
+  DELAY_REASON_LABELS,
+  estimateRouteProgressFromPath,
+  resolveRouteByCode,
+  type DelayReason,
+  type RouteDto,
+} from '@/lib/luanda-geofence';
 import {
   initNativeStatusBar,
   registerNativePush,
@@ -51,6 +68,7 @@ interface GuardianDashboardData {
     stopName: string;
     currentJourneyState: string;
     pinPolicy: string;
+    route?: RouteDto | null;
     handoverCredential: {
       maskedDisplay: string;
       status: string;
@@ -68,11 +86,15 @@ interface GuardianDashboardData {
       lastLat: string | null;
       lastLng: string | null;
       lastLocationAt: string | null;
+      delayReason?: string | null;
+      delayNote?: string | null;
+      delayReportedAt?: string | null;
       vehiclePlate: string | null;
       fleetNumber: number | null;
       driverName: string | null;
     } | null;
   }>;
+  routes?: RouteDto[];
   pricing: {
     studentMonthlyFeeAoa: number;
     multicaixaEntityCode?: string;
@@ -101,8 +123,12 @@ interface DriverDashboardData {
     lastLat: string | null;
     lastLng: string | null;
     lastLocationAt: string | null;
+    delayReason?: string | null;
+    delayNote?: string | null;
+    delayReportedAt?: string | null;
     emptyBusSweepVerified: boolean;
   }>;
+  assignedRoute?: RouteDto | null;
   manifest: Array<{
     id: number;
     fullName: string;
@@ -159,7 +185,7 @@ interface MobileAppEntryProps {
 }
 
 export function MobileAppEntry({ mode }: MobileAppEntryProps) {
-  const { isAuthenticated, dbUser, capabilities, loading: authLoading, apiFetch, signOut } = useAuth();
+  const { isAuthenticated, dbUser, capabilities, loading: authLoading, apiFetch, getAuthToken, signOut } = useAuth();
   const [clientProfile, setClientProfile] = useState<'parent' | 'company'>('parent');
   const [storeSingleScreenPreview, setStoreSingleScreenPreview] = useState(false);
   const [guardianData, setGuardianData] = useState<GuardianDashboardData | null>(null);
@@ -185,15 +211,25 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
     distanceMeters: number;
     etaMinutes: number;
   } | null>(null);
-  const [liveRouteProgress, setLiveRouteProgress] = useState<Record<string, { progress: number; nearestStopName?: string; etaMinutes?: number }>>({});
+  const [liveRouteProgress, setLiveRouteProgress] = useState<
+    Record<string, { progress: number; nearestStopName?: string; etaMinutes?: number; lat?: number; lng?: number; updatedAt?: string }>
+  >({});
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [legalTab, setLegalTab] = useState<LegalTab | null>(null);
+  const [delayTripTarget, setDelayTripTarget] = useState<{ id: number; tripCode: string; routeCode: string } | null>(null);
+  const [delayReason, setDelayReason] = useState<DelayReason>('trânsito intenso');
+  const [delayNote, setDelayNote] = useState('');
+  const [submittingDelay, setSubmittingDelay] = useState(false);
   const [activePaymentPin, setActivePaymentPin] = useState<{
     invoiceNumber: string;
     entity: string;
     pin: string;
     amountAoa: number;
   } | null>(null);
+  const [inboxOpen, setInboxOpen] = useState(false);
+  const [notificationsList, setNotificationsList] = useState<AppNotification[]>([]);
+  const [unreadNotificationsCount, setUnreadNotificationsCount] = useState(0);
+  const [liveNotificationToast, setLiveNotificationToast] = useState<AppNotification | null>(null);
 
   const isVehicleOwner = mode === 'client' && dbUser?.primaryRole === 'vehicle_owner';
 
@@ -205,8 +241,21 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
           const res = await apiFetch<OwnerDashboardData>('/api/v1/owner/dashboard');
           setOwnerData(res);
         } else {
-          const res = await apiFetch<GuardianDashboardData>('/api/v1/guardian/dashboard');
+          const [res, notifRes] = await Promise.all([
+            apiFetch<GuardianDashboardData>('/api/v1/guardian/dashboard'),
+            apiFetch<{ notifications: AppNotification[]; unreadCount: number }>('/api/v1/notifications').catch(() => ({
+              notifications: [] as AppNotification[],
+              unreadCount: 0,
+            })),
+          ]);
           setGuardianData(res);
+          const notifs = Array.isArray(notifRes.notifications) ? notifRes.notifications : [];
+          setNotificationsList(notifs);
+          setUnreadNotificationsCount(
+            typeof notifRes.unreadCount === 'number'
+              ? notifRes.unreadCount
+              : notifs.filter((n) => n.readAt == null).length
+          );
           if (!selectedStudentId && res.students[0]) {
             setSelectedStudentId(res.students[0].id);
           }
@@ -220,16 +269,53 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
     }
   }, [isAuthenticated, mode, dbUser?.primaryRole, capabilities.canAccessDriverApp, apiFetch, selectedStudentId]);
 
+  const handleMarkNotificationRead = useCallback(
+    async (notificationId: number) => {
+      if (!isAuthenticated) return;
+      try {
+        const res = await apiFetch<{ notification: AppNotification; unreadCount?: number }>(
+          `/api/v1/notifications/${notificationId}/read`,
+          { method: 'PATCH' }
+        );
+        setNotificationsList((prev) => {
+          const next = prev.map((n) =>
+            n.id === notificationId
+              ? res.notification ?? { ...n, readAt: n.readAt ?? new Date().toISOString() }
+              : n
+          );
+          setUnreadNotificationsCount(
+            typeof res.unreadCount === 'number'
+              ? res.unreadCount
+              : next.filter((n) => n.readAt == null).length
+          );
+          return next;
+        });
+      } catch {
+        // ignore read error if offline
+      }
+    },
+    [isAuthenticated, apiFetch]
+  );
+
   const { connected: wsConnected } = useTelemetrySocket((event) => {
     if (event.type === 'trip:location') {
       const routeCode = String(event.payload.routeCode ?? '');
       const progress = Number(event.payload.progress ?? 0);
       const nearestStopName = event.payload.nearestStopName ? String(event.payload.nearestStopName) : undefined;
       const etaMinutes = event.payload.etaMinutes != null ? Number(event.payload.etaMinutes) : undefined;
+      const lat = event.payload.lat != null ? Number(event.payload.lat) : undefined;
+      const lng = event.payload.lng != null ? Number(event.payload.lng) : undefined;
       if (routeCode) {
         setLiveRouteProgress((prev) => ({
           ...prev,
-          [routeCode]: { progress, nearestStopName, etaMinutes },
+          [routeCode]: {
+            progress,
+            nearestStopName,
+            etaMinutes,
+            lat: Number.isFinite(lat) ? lat : prev[routeCode]?.lat,
+            lng: Number.isFinite(lng) ? lng : prev[routeCode]?.lng,
+            updatedAt: event.timestamp || new Date().toISOString(),
+          },
         }));
       }
       return;
@@ -242,6 +328,20 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
         distanceMeters: Number(event.payload.distanceMeters ?? 0),
         etaMinutes: Number(event.payload.etaMinutes ?? 1),
       });
+      return;
+    }
+
+    if (event.type === 'notification:created') {
+      const incoming = event.payload.notification as AppNotification | undefined;
+      if (incoming && typeof incoming.id === 'number') {
+        setNotificationsList((prev) => {
+          if (prev.some((n) => n.id === incoming.id)) return prev;
+          const next = [incoming, ...prev];
+          setUnreadNotificationsCount(next.filter((n) => n.readAt == null).length);
+          return next;
+        });
+        setLiveNotificationToast(incoming);
+      }
       return;
     }
 
@@ -514,6 +614,45 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
     }
   }
 
+  async function handleSubmitDelayReport(e: React.FormEvent) {
+    e.preventDefault();
+    if (!delayTripTarget) return;
+    setSubmittingDelay(true);
+    try {
+      let latitude: number | null = gpsCoords?.lat ?? null;
+      let longitude: number | null = gpsCoords?.lng ?? null;
+      try {
+        const pos = await Geolocation.getCurrentPosition({
+          enableHighAccuracy: true,
+          timeout: 5000,
+          maximumAge: 10000,
+        });
+        latitude = pos.coords.latitude;
+        longitude = pos.coords.longitude;
+      } catch {
+        // Keep existing gpsCoords if live poll fails
+      }
+      const res = await apiFetch<{ message: string }>(`/api/v1/driver/trips/${delayTripTarget.id}/delay-report`, {
+        method: 'POST',
+        body: JSON.stringify({
+          tripId: delayTripTarget.id,
+          reason: delayReason,
+          note: delayNote.trim(),
+          latitude,
+          longitude,
+        }),
+      });
+      setDelayTripTarget(null);
+      setDelayNote('');
+      setStatusMessage(res.message);
+      await loadBackendState();
+    } catch (err) {
+      setStatusMessage(err instanceof Error ? err.message : 'Erro ao reportar desvio / trânsito.');
+    } finally {
+      setSubmittingDelay(false);
+    }
+  }
+
   async function handleQueueOrSyncBoarding(studentId: number, studentName?: string) {
     const activeTrip = driverData?.trips[0];
     if (!activeTrip) return;
@@ -647,6 +786,27 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
               <span>{wsConnected ? 'Ao Vivo' : 'A ligar...'}</span>
             </span>
 
+            {mode === 'client' && !isVehicleOwner && (
+              <button
+                type="button"
+                onClick={() => setInboxOpen((v) => !v)}
+                className={`relative rounded-xl border px-3 py-1.5 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer transition ${
+                  inboxOpen
+                    ? 'bg-slide-accent border-slide-accent text-white'
+                    : 'bg-slide-surface border-white/10 text-white hover:bg-white/10'
+                }`}
+                title="Caixa de Notificações"
+              >
+                <Bell className="w-3.5 h-3.5" />
+                <span>Notificações</span>
+                {unreadNotificationsCount > 0 && (
+                  <span className="min-w-[16px] h-4 px-1 rounded-full bg-red-600 text-white text-[10px] font-black inline-flex items-center justify-center">
+                    {unreadNotificationsCount}
+                  </span>
+                )}
+              </button>
+            )}
+
             <button
               onClick={() => void loadBackendState()}
               className="rounded-xl bg-slide-surface border border-white/10 px-3 py-1.5 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer hover:bg-white/10"
@@ -665,6 +825,104 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
             </button>
           </div>
         </div>
+
+        {mode === 'client' && !isVehicleOwner && liveNotificationToast && (
+          <div className="rounded-xl bg-emerald-500/15 border border-emerald-500/40 p-3.5 text-xs flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <Bell className="w-4 h-4 text-emerald-300 shrink-0" />
+              <div className="min-w-0">
+                <span className="font-bold text-emerald-200">{liveNotificationToast.title}: </span>
+                <span className="text-white">{liveNotificationToast.body}</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {liveNotificationToast.readAt == null && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleMarkNotificationRead(liveNotificationToast.id);
+                    setLiveNotificationToast(null);
+                  }}
+                  className="text-emerald-300 underline font-bold cursor-pointer"
+                >
+                  Marcar lida
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setLiveNotificationToast(null)}
+                className="text-slide-dim underline cursor-pointer"
+              >
+                Fechar
+              </button>
+            </div>
+          </div>
+        )}
+
+        {mode === 'client' && !isVehicleOwner && inboxOpen && (
+          <div className="rounded-2xl bg-slide-surface border border-white/10 p-5 space-y-3 text-xs">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Bell className="w-4 h-4 text-slide-accent" />
+                <h3 className="text-sm font-bold text-white">Caixa de Notificações</h3>
+                {unreadNotificationsCount > 0 && (
+                  <span className="px-2 py-0.5 rounded bg-red-500/20 text-red-300 text-[10px] font-bold">
+                    {unreadNotificationsCount} por ler
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setInboxOpen(false)}
+                className="text-slide-dim hover:text-white underline cursor-pointer"
+              >
+                Fechar
+              </button>
+            </div>
+
+            {notificationsList.length === 0 ? (
+              <div className="rounded-xl bg-slide-bg border border-white/10 p-4 text-slide-dim">
+                Ainda não existem notificações registadas para os seus educandos.
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-80 overflow-y-auto">
+                {notificationsList.map((n) => {
+                  const isUnread = n.readAt == null;
+                  return (
+                    <div
+                      key={n.id}
+                      className={`rounded-xl bg-slide-bg border p-3.5 flex items-start justify-between gap-3 ${
+                        isUnread ? 'border-slide-accent/50' : 'border-white/10 opacity-80'
+                      }`}
+                    >
+                      <div className="space-y-1 min-w-0">
+                        <div className="flex items-center gap-2 text-[10px] text-slide-dim">
+                          {isUnread && <span className="w-2 h-2 rounded-full bg-slide-accent shrink-0" />}
+                          <span className="font-bold uppercase text-white/80">
+                            {NOTIFICATION_TYPE_LABEL[n.type] ?? n.type}
+                          </span>
+                          <span>·</span>
+                          <span className="font-mono">{formatNotificationTimestampPt(n.createdAt)}</span>
+                        </div>
+                        <div className="font-bold text-white">{n.title}</div>
+                        <div className="text-slide-ink/90">{n.body}</div>
+                      </div>
+                      {isUnread && (
+                        <button
+                          type="button"
+                          onClick={() => void handleMarkNotificationRead(n.id)}
+                          className="shrink-0 px-2.5 py-1 rounded-lg bg-slide-accent/20 text-slide-accent font-bold text-[10px] hover:bg-slide-accent/30 cursor-pointer"
+                        >
+                          Marcar lida
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
 
         {geofenceAlert && (
           <div className="rounded-xl bg-emerald-500/15 border border-emerald-500/40 p-3.5 text-xs flex items-center justify-between gap-2">
@@ -842,16 +1100,25 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
                 <div className="space-y-4">
                   <div className="rounded-xl overflow-hidden border border-white/10">
                     {(() => {
-                      const routeCfg = getRouteConfigByCode(activeKid.routeCode);
+                      const routeCfg =
+                        activeKid.route ??
+                        resolveRouteByCode(guardianData?.routes ?? [], activeKid.routeCode);
                       const wsLive = liveRouteProgress[activeKid.routeCode];
                       const dbLat = activeKid.activeTrip?.lastLat ? Number(activeKid.activeTrip.lastLat) : null;
                       const dbLng = activeKid.activeTrip?.lastLng ? Number(activeKid.activeTrip.lastLng) : null;
                       const progress =
                         wsLive?.progress ??
-                        (dbLat && dbLng ? estimateRouteProgressFromCoords(activeKid.routeCode, dbLat, dbLng) : 0.05);
+                        (dbLat && dbLng && routeCfg
+                          ? estimateRouteProgressFromPath(routeCfg.pathCoordinates, dbLat, dbLng)
+                          : 0.05);
                       return (
                         <div>
-                          <LuandaMap routeId={routeCfg.id} progress={progress} className="h-44 w-full" />
+                          <LuandaMap
+                            route={routeCfg}
+                            routeCode={activeKid.routeCode}
+                            progress={progress}
+                            className="h-44 w-full"
+                          />
                           <div className="bg-slide-bg px-3 py-2 text-[11px] flex flex-wrap justify-between gap-2 border-t border-white/10">
                             <span className="text-slide-dim">
                               Próxima paragem:{' '}
@@ -893,6 +1160,56 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
                       <div className="text-[11px] text-slide-dim">
                         Escola: <strong className="text-white">{activeKid.schoolName}</strong> · Paragem: {activeKid.stopName}
                       </div>
+                      {activeKid.activeTrip &&
+                        activeKid.activeTrip.state !== 'completed' &&
+                        activeKid.activeTrip.state !== 'cancelled' &&
+                        (activeKid.activeTrip.state === 'delayed' || Boolean(activeKid.activeTrip.delayReason)) && (() => {
+                          const routeCfg =
+                            activeKid.route ??
+                            resolveRouteByCode(guardianData?.routes ?? [], activeKid.routeCode);
+                          const wsLive = liveRouteProgress[activeKid.routeCode];
+                          const realLat =
+                            wsLive?.lat != null && Number.isFinite(wsLive.lat)
+                              ? wsLive.lat
+                              : activeKid.activeTrip?.lastLat != null
+                              ? Number(activeKid.activeTrip.lastLat)
+                              : NaN;
+                          const realLng =
+                            wsLive?.lng != null && Number.isFinite(wsLive.lng)
+                              ? wsLive.lng
+                              : activeKid.activeTrip?.lastLng != null
+                              ? Number(activeKid.activeTrip.lastLng)
+                              : NaN;
+                          const hasRecentGps =
+                            Number.isFinite(realLat) &&
+                            Number.isFinite(realLng) &&
+                            (wsLive?.lat != null || activeKid.activeTrip?.gpsStatus === 'live');
+                          const eta =
+                            hasRecentGps && routeCfg
+                              ? computeRemainingStopsEta(routeCfg.stops, routeCfg.pathCoordinates, realLat, realLng, {
+                                  targetStopName: activeKid.stopName,
+                                  destinationIsFinalStop:
+                                    activeKid.currentJourneyState === 'boarded' ||
+                                    activeKid.currentJourneyState === 'in_transit',
+                                  delayed: true,
+                                })
+                              : null;
+                          const reasonLabel = activeKid.activeTrip?.delayReason || 'atraso na rota';
+                          return (
+                            <div className="rounded-lg bg-amber-500/15 border border-amber-500/40 px-2.5 py-2 text-[11px] text-amber-200 font-bold space-y-0.5">
+                              <div>
+                                {eta
+                                  ? `Atraso: ${reasonLabel}. Nova previsão: ${eta.arrivalHHMM}`
+                                  : `Atraso: ${reasonLabel}. Nova previsão indisponível (sem sinal GPS recente)`}
+                              </div>
+                              {activeKid.activeTrip?.delayNote && (
+                                <div className="text-[10px] font-normal text-amber-100/80">
+                                  Nota: {activeKid.activeTrip.delayNote}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
                     </div>
 
                     <div className="rounded-xl bg-slide-bg border border-white/10 p-4 space-y-2.5">
@@ -1061,6 +1378,33 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
                         >
                           {inv.status === 'confirmed' ? 'Confirmado' : 'Aguarda Pagamento MCX'}
                         </span>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              const isPaid = inv.status === 'confirmed';
+                              await downloadInvoicePdf({
+                                invoiceId: inv.id,
+                                invoiceNumber: inv.invoiceNumber,
+                                isPaid,
+                                getAuthToken,
+                              });
+                              setStatusMessage(
+                                isPaid
+                                  ? `Recibo PDF (${inv.invoiceNumber}) descarregado.`
+                                  : `Fatura proforma PDF (${inv.invoiceNumber}) descarregada.`
+                              );
+                            } catch (err) {
+                              setStatusMessage(
+                                err instanceof Error ? err.message : 'Falha ao descarregar o PDF da fatura.'
+                              );
+                            }
+                          }}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white font-bold text-[10px] cursor-pointer"
+                        >
+                          <Download className="w-3 h-3" />
+                          <span>PDF</span>
+                        </button>
                       </div>
                     </div>
                   ))}
@@ -1132,18 +1476,26 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
                 <span>Viagens Atribuídas & Máquina de Estados</span>
               </h3>
               {driverData?.trips.map((t) => {
-                const routeCfg = getRouteConfigByCode(t.routeCode);
+                const routeCfg =
+                  driverData.assignedRoute &&
+                  driverData.assignedRoute.code.trim().toUpperCase() === t.routeCode.trim().toUpperCase()
+                    ? driverData.assignedRoute
+                    : driverData.assignedRoute ?? null;
                 const wsLive = liveRouteProgress[t.routeCode];
                 const dbLat = t.lastLat ? Number(t.lastLat) : null;
                 const dbLng = t.lastLng ? Number(t.lastLng) : null;
                 const progress =
                   wsLive?.progress ??
-                  (dbLat && dbLng ? estimateRouteProgressFromCoords(t.routeCode, dbLat, dbLng) : 0.05);
+                  (dbLat && dbLng && routeCfg
+                    ? estimateRouteProgressFromPath(routeCfg.pathCoordinates, dbLat, dbLng)
+                    : 0.05);
                 return (
                   <div key={t.id} className="rounded-xl bg-slide-bg border border-white/10 p-4 space-y-3">
                     <div className="flex flex-wrap justify-between items-center gap-2">
                       <div>
-                        <div className="font-bold text-sm text-white">{t.routeName}</div>
+                        <div className="font-bold text-sm text-white">
+                          {routeCfg ? `${routeCfg.code} · ${routeCfg.name}` : t.routeName}
+                        </div>
                         <div className="text-[11px] font-mono text-slide-dim">
                           {t.tripCode} · Estado atual: <strong className="text-slide-accent">{t.state}</strong>
                         </div>
@@ -1155,6 +1507,19 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
                         >
                           Iniciar
                         </button>
+                        {['driver_checked_in', 'in_progress', 'at_stop', 'boarding', 'at_school', 'return_in_progress', 'handover_pending', 'delayed'].includes(t.state) && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDelayReason('trânsito intenso');
+                              setDelayNote('');
+                              setDelayTripTarget({ id: t.id, tripCode: t.tripCode, routeCode: t.routeCode });
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-amber-500/20 border border-amber-400/50 text-amber-200 font-bold cursor-pointer"
+                          >
+                            Desvio / Trânsito
+                          </button>
+                        )}
                         <button
                           onClick={() => void handleEmptySweep(t.id)}
                           className="px-2.5 py-1 rounded-lg bg-slide-surface border border-white/15 text-white font-semibold cursor-pointer"
@@ -1171,7 +1536,13 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
                     </div>
                     {driverData?.trips[0]?.id === t.id && (
                       <div className="rounded-lg overflow-hidden border border-white/10">
-                        <LuandaMap routeId={routeCfg.id} progress={progress} darkMode className="h-36 w-full" />
+                        <LuandaMap
+                          route={routeCfg}
+                          routeCode={t.routeCode}
+                          progress={progress}
+                          darkMode
+                          className="h-36 w-full"
+                        />
                       </div>
                     )}
                   </div>
@@ -1340,6 +1711,65 @@ export function MobileAppEntry({ mode }: MobileAppEntryProps) {
               <button
                 type="button"
                 onClick={() => setPinTargetStudentId(null)}
+                className="rounded-xl bg-slide-surface px-4 py-2.5 font-semibold text-slide-dim cursor-pointer"
+              >
+                Cancelar
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Driver Desvio / Trânsito Modal */}
+      {delayTripTarget && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <form
+            onSubmit={handleSubmitDelayReport}
+            className="w-full max-w-sm rounded-2xl bg-slide-paper-ink border border-white/15 p-6 space-y-4 text-xs"
+          >
+            <div className="flex items-center gap-2 text-amber-300 font-bold uppercase tracking-wider text-[10px]">
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>{delayTripTarget.tripCode} · {delayTripTarget.routeCode}</span>
+            </div>
+            <h3 className="text-base font-black text-white">Desvio / Trânsito</h3>
+
+            <div className="grid grid-cols-2 gap-2">
+              {DELAY_REASONS.map((reasonKey) => (
+                <button
+                  key={reasonKey}
+                  type="button"
+                  onClick={() => setDelayReason(reasonKey)}
+                  className={`py-2 px-2.5 rounded-xl font-bold border text-left cursor-pointer ${
+                    delayReason === reasonKey
+                      ? 'bg-amber-500 border-amber-400 text-zinc-950'
+                      : 'bg-slide-bg border-white/10 text-slide-dim'
+                  }`}
+                >
+                  {DELAY_REASON_LABELS[reasonKey]}
+                </button>
+              ))}
+            </div>
+
+            <textarea
+              rows={2}
+              maxLength={240}
+              value={delayNote}
+              onChange={(e) => setDelayNote(e.target.value)}
+              placeholder="Nota breve opcional (ex: desvio pela avenida paralela)..."
+              className="w-full rounded-xl bg-slide-bg border border-white/15 px-3 py-2 text-xs text-white outline-none resize-none"
+            />
+
+            <div className="flex gap-2">
+              <button
+                type="submit"
+                disabled={submittingDelay}
+                className="flex-1 rounded-xl bg-amber-500 text-zinc-950 py-2.5 font-black cursor-pointer disabled:opacity-50"
+              >
+                {submittingDelay ? 'A enviar...' : 'Enviar Alerta de Atraso'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setDelayTripTarget(null)}
                 className="rounded-xl bg-slide-surface px-4 py-2.5 font-semibold text-slide-dim cursor-pointer"
               >
                 Cancelar

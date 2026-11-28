@@ -27,7 +27,12 @@ const SchoolPortalView = lazy(() => import("./views/SchoolPortalView").then((m) 
 const ContractRequestPage = lazy(() =>
   import("./views/ContractRequestPage").then((m) => ({ default: m.ContractRequestPage }))
 );
-const MockupView = lazy(() => import("./views/MockupView").then((m) => ({ default: m.MockupView })));
+const IS_HUB_TARGET =
+  (typeof __MOBUSS_APP_TARGET__ !== "undefined" ? __MOBUSS_APP_TARGET__ : APP_TARGET) === "hub";
+
+const MockupView = IS_HUB_TARGET
+  ? lazy(() => import("./views/MockupView").then((m) => ({ default: m.MockupView })))
+  : null;
 const DeckView = lazy(() => import("./views/DeckView").then((m) => ({ default: m.DeckView })));
 
 export type ActiveView =
@@ -74,7 +79,7 @@ function resolveInitialView(): ActiveView {
   if (hash.includes("school") || hash.includes("escola")) return "school";
   if (hash.includes("admin")) return "admin";
   if (hash.includes("solicitar") || hash.includes("landing")) return "landing";
-  if (hash.includes("mockup") || hash.includes("simulador")) return "mockup";
+  if (IS_HUB_TARGET && (hash.includes("mockup") || hash.includes("simulador"))) return "mockup";
   if (hash.includes("deck") || hash.includes("slides")) return "deck";
   return "client";
 }
@@ -248,18 +253,20 @@ export default function App() {
 
         {/* Secondary Showcase & Session Controls */}
         <div className="flex items-center gap-2 shrink-0">
-          <button
-            onClick={() => navigateTo("mockup")}
-            className={`hidden sm:inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold border cursor-pointer transition ${
-              view === "mockup"
-                ? "bg-white/15 border-white/25 text-white"
-                : "bg-transparent border-white/10 text-slide-dim hover:text-white"
-            }`}
-            title="Simulador Interativo iPhone"
-          >
-            <Smartphone className="w-3 h-3" />
-            <span className="hidden xl:inline">Simulador</span>
-          </button>
+          {IS_HUB_TARGET && (
+            <button
+              onClick={() => navigateTo("mockup")}
+              className={`hidden sm:inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold border cursor-pointer transition ${
+                view === "mockup"
+                  ? "bg-white/15 border-white/25 text-white"
+                  : "bg-transparent border-white/10 text-slide-dim hover:text-white"
+              }`}
+              title="Simulador Interativo iPhone"
+            >
+              <Smartphone className="w-3 h-3" />
+              <span className="hidden xl:inline">Simulador</span>
+            </button>
+          )}
 
           <button
             onClick={() => navigateTo("deck")}
@@ -315,7 +322,7 @@ export default function App() {
               onNavigate={(v) => navigateTo(v as ActiveView)}
             />
           )}
-          {view === "mockup" && (
+          {IS_HUB_TARGET && MockupView && view === "mockup" && (
             <MockupView
               onNavigate={(v) => navigateTo(v as ActiveView)}
             />

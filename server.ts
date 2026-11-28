@@ -4,7 +4,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
-import { and, desc, eq, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, ne, or, sql } from 'drizzle-orm';
 import { db } from './src/db/index.ts';
 import {
   attendanceEvents,
@@ -17,8 +17,11 @@ import {
   handoverCredentials,
   incidents,
   invoices,
+  notifications,
   pricingConfigs,
   recurringRouteSchedules,
+  routes,
+  routeStops,
   schoolContractRequests,
   schools,
   students,
@@ -46,11 +49,46 @@ import { adminAuth } from './src/lib/firebase-admin.ts';
 import firebaseConfig from './firebase-applet-config.json';
 import {
   dispatchGuardianPushByRoute,
-  dispatchGuardianPushByStudent,
   TelemetryHub,
   TripSimulationRunner,
 } from './src/server/realtime.ts';
-import { checkStopGeofences, estimateRouteProgressFromCoords } from './src/lib/luanda-geofence.ts';
+import { notifyStudentLinkedGuardians } from './src/server/notifications.ts';
+import {
+  checkRouteStopGeofences,
+  DELAY_REASONS,
+  estimateRouteProgressFromPath,
+  type DelayReason,
+  type RouteDto,
+} from './src/lib/luanda-geofence.ts';
+import {
+  computeOverviewSummary,
+  getAdminOverviewVisibility,
+} from './src/lib/overview-types.ts';
+import {
+  getRouteWithStopsByCode,
+  getRouteWithStopsById,
+  loadRoutesWithStops,
+} from './src/server/routes-repo.ts';
+import { generateInvoicePdfBuffer } from './src/server/invoice-pdf.ts';
+import {
+  buildCsvWithBom,
+  formatLuandaDate,
+  formatLuandaDateTime,
+  formatLuandaTime,
+  getLuandaDayKey,
+  isWithinDateRange,
+  parseReportFilters,
+  translateExpiryStatusPt,
+  translateIncidentCategoryPt,
+  translateIncidentStatusPt,
+  translateInvoiceStatusPt,
+  translateJourneyPt,
+  translatePaymentMethodPt,
+  translatePinPolicyPt,
+  translateShiftPt,
+  translateTripStatePt,
+  type CsvCellValue,
+} from './src/server/csv-reports.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -98,11 +136,80 @@ const OWNER_ROLES: MoBussRole[] = [
   'fleet_manager',
 ];
 
+const FINANCE_ROLES: MoBussRole[] = [
+  'mobuss_super_admin',
+  'finance_officer',
+];
+
+function normalizePhoneDigits(phone: string | null | undefined): string {
+  return String(phone ?? '').replace(/\D+/g, '');
+}
+
+function guardianOwnsInvoice(
+  inv: typeof invoices.$inferSelect,
+  guardian: typeof guardians.$inferSelect | null,
+  linkedStudents: Array<typeof students.$inferSelect>,
+  userPhone?: string | null
+): boolean {
+  if (!guardian) return false;
+  if (inv.guardianId != null && inv.guardianId === guardian.id) return true;
+  const linkedStudentIds = new Set(linkedStudents.map((s) => s.id));
+  if (inv.studentId != null && linkedStudentIds.has(inv.studentId)) return true;
+
+  // Safe fallback for legacy seeded rows before guardianId/studentId columns existed
+  if (inv.guardianId == null && inv.studentId == null && inv.payerType === 'guardian') {
+    const linkedNames = new Set(linkedStudents.map((s) => s.fullName.trim().toLowerCase()));
+    if (!linkedNames.has(inv.studentName.trim().toLowerCase())) return false;
+    const gNameMatches =
+      inv.guardianName.trim().toLowerCase() === guardian.fullName.trim().toLowerCase();
+    const invDigits = normalizePhoneDigits(inv.phone);
+    const gDigits = normalizePhoneDigits(guardian.phone || userPhone);
+    const phoneMatches = Boolean(invDigits && gDigits && invDigits === gDigits);
+    return gNameMatches || phoneMatches;
+  }
+  return false;
+}
+
+const PT_MONTH_NAMES = [
+  'janeiro',
+  'fevereiro',
+  'março',
+  'abril',
+  'maio',
+  'junho',
+  'julho',
+  'agosto',
+  'setembro',
+  'outubro',
+  'novembro',
+  'dezembro',
+];
+
+function formatInvoiceDescriptionPt(date: Date): string {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Africa/Luanda',
+    year: 'numeric',
+    month: '2-digit',
+  }).formatToParts(date);
+  const monthIdx = Math.max(0, Math.min(11, Number(parts.find((p) => p.type === 'month')?.value ?? '1') - 1));
+  const year = parts.find((p) => p.type === 'year')?.value ?? String(date.getUTCFullYear());
+  return `Transporte escolar – mês de ${PT_MONTH_NAMES[monthIdx] ?? 'mês corrente'} de ${year}`;
+}
+
+const VALID_APP_TARGETS = new Set(['hub', 'client', 'driver', 'admin', 'school']);
+
+function resolveServerAppTarget(): 'hub' | 'client' | 'driver' | 'admin' | 'school' {
+  const rawTarget = (process.env.MOBUSS_WEB_TARGET || process.env.VITE_APP_TARGET || 'hub').toLowerCase().trim();
+  return (VALID_APP_TARGETS.has(rawTarget) ? rawTarget : 'hub') as 'hub' | 'client' | 'driver' | 'admin' | 'school';
+}
+
 async function createApp() {
   const app = express();
   const httpServer = http.createServer(app);
+  const activeTarget = resolveServerAppTarget();
+  const isHubTarget = activeTarget === 'hub';
   const telemetryHub = new TelemetryHub(httpServer);
-  const simulationRunner = new TripSimulationRunner(telemetryHub);
+  const simulationRunner = isHubTarget ? new TripSimulationRunner(telemetryHub) : null;
   app.use(express.json({ limit: '1mb' }));
 
   // Allow Capacitor iOS (capacitor://localhost) and Android (https://localhost) WebView origins
@@ -169,6 +276,7 @@ async function createApp() {
           ivaPercent: 14,
           companyName: 'MôBuss Angola Transporte Escolar Lda.',
           companyNif: '5417209418',
+          companyAddress: 'Av. Comandante Valódia, Luanda, Angola',
           fiscalIntegrationStatus: 'sandbox_pending_agt_certification',
         },
         calculationFormula: '3 000 Kz por aluno + 33 000 Kz por motorista',
@@ -462,6 +570,94 @@ async function createApp() {
     }
   });
 
+  app.get('/api/v1/notifications', requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const dbUser = req.dbUser!;
+      const rawLimit = Number(req.query.limit ?? 50);
+      const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 100) : 50;
+
+      const userRows = await db
+        .select()
+        .from(notifications)
+        .where(eq(notifications.userId, dbUser.id))
+        .orderBy(desc(notifications.createdAt), desc(notifications.id))
+        .limit(limit);
+
+      let scopedRows = userRows;
+      if (dbUser.primaryRole === 'parent_guardian') {
+        const guardianRows = await db
+          .select({ id: guardians.id })
+          .from(guardians)
+          .where(eq(guardians.userId, dbUser.id))
+          .limit(1);
+        const guardianId = guardianRows[0]?.id;
+        if (guardianId) {
+          const links = await db
+            .select({ studentId: guardianStudentLinks.studentId })
+            .from(guardianStudentLinks)
+            .where(and(eq(guardianStudentLinks.guardianId, guardianId), eq(guardianStudentLinks.active, true)));
+          const allowedStudentIds = new Set(links.map((l) => l.studentId));
+          scopedRows = userRows.filter(
+            (n) => n.studentId == null || allowedStudentIds.has(n.studentId)
+          );
+        } else {
+          scopedRows = userRows.filter((n) => n.studentId == null);
+        }
+      }
+
+      const unreadCount = scopedRows.filter((n) => n.readAt == null).length;
+      res.json({ notifications: scopedRows, unreadCount });
+    } catch (error) {
+      console.error('Fetch notifications failed:', error);
+      res.status(500).json({ error: 'Erro ao carregar notificações.' });
+    }
+  });
+
+  app.patch('/api/v1/notifications/:id/read', requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      const dbUser = req.dbUser!;
+      const notifId = Number(req.params.id);
+      if (!Number.isInteger(notifId) || notifId <= 0) {
+        return res.status(400).json({ error: 'Identificador de notificação inválido.' });
+      }
+
+      const existingRows = await db
+        .select()
+        .from(notifications)
+        .where(eq(notifications.id, notifId))
+        .limit(1);
+      const existing = existingRows[0];
+      if (!existing) {
+        return res.status(404).json({ error: 'Notificação não encontrada.' });
+      }
+      if (existing.userId !== dbUser.id) {
+        return res.status(403).json({ error: 'Não está autorizado a alterar esta notificação.' });
+      }
+
+      let updated = existing;
+      if (existing.readAt == null) {
+        const saved = await db
+          .update(notifications)
+          .set({ readAt: new Date() })
+          .where(and(eq(notifications.id, notifId), eq(notifications.userId, dbUser.id)))
+          .returning();
+        if (saved[0]) updated = saved[0];
+      }
+
+      const remainingRows = await db
+        .select({ id: notifications.id, readAt: notifications.readAt, studentId: notifications.studentId })
+        .from(notifications)
+        .where(eq(notifications.userId, dbUser.id));
+      const unreadCount = remainingRows.filter((n) => n.readAt == null).length;
+
+      res.json({ notification: updated, unreadCount });
+    } catch (error) {
+      console.error('Mark notification read failed:', error);
+      res.status(500).json({ error: 'Erro ao marcar notificação como lida.' });
+    }
+  });
+
   // ==========================================================================
   // 3. GUARDIAN / CLIENT APP ENDPOINTS
   // ==========================================================================
@@ -473,6 +669,7 @@ async function createApp() {
       const isSuperAdminPreview = dbUser.primaryRole === 'mobuss_super_admin';
 
       let linkedStudentsList = [] as typeof students.$inferSelect[];
+      let currentGuardianRow: typeof guardians.$inferSelect | null = null;
       if (isSuperAdminPreview) {
         linkedStudentsList = await db.select().from(students).orderBy(students.id);
       } else {
@@ -500,6 +697,7 @@ async function createApp() {
         }
 
         if (guardianRows[0]) {
+          currentGuardianRow = guardianRows[0];
           const links = await db
             .select()
             .from(guardianStudentLinks)
@@ -516,8 +714,10 @@ async function createApp() {
       const activeTrips = await db.select().from(trips).orderBy(desc(trips.id));
       const allVehicles = await db.select().from(vehicles);
       const allDrivers = await db.select().from(drivers);
+      const allRoutes = await loadRoutesWithStops();
       const vehicleById = new Map(allVehicles.map((v) => [v.id, v]));
       const driverById = new Map(allDrivers.map((d) => [d.id, d]));
+      const routeByCode = new Map(allRoutes.map((r) => [r.code.trim().toUpperCase(), r]));
 
       const allCreds = await db
         .select()
@@ -535,6 +735,7 @@ async function createApp() {
         const trip = activeTrips.find((t) => t.routeCode === st.routeCode) ?? null;
         const vehicle = trip?.vehicleId ? vehicleById.get(trip.vehicleId) ?? null : null;
         const driver = trip?.driverId ? driverById.get(trip.driverId) ?? null : null;
+        const studentRoute = routeByCode.get(st.routeCode.trim().toUpperCase()) ?? null;
         return {
           id: st.id,
           fullName: st.fullName,
@@ -544,6 +745,7 @@ async function createApp() {
           stopIndex: st.stopIndex,
           currentJourneyState: st.currentJourneyState,
           pinPolicy: st.pinPolicy,
+          route: studentRoute,
           handoverCredential: cred
             ? {
                 maskedDisplay: cred.maskedDisplay,
@@ -564,20 +766,37 @@ async function createApp() {
                 lastLat: trip.lastLat,
                 lastLng: trip.lastLng,
                 lastLocationAt: trip.lastLocationAt,
+                delayReason: trip.delayReason ?? null,
+                delayNote: trip.delayNote ?? null,
+                delayReportedAt: trip.delayReportedAt ?? null,
                 vehiclePlate: vehicle?.plate ?? null,
                 fleetNumber: vehicle?.fleetNumber ?? null,
                 driverName: driver?.fullName ?? null,
+                driverPhone: driver?.phone ?? null,
               }
             : null,
         };
       });
 
       const pricingRows = await db.select().from(pricingConfigs).orderBy(desc(pricingConfigs.id)).limit(1);
-      const invoiceRows = await db.select().from(invoices).orderBy(desc(invoices.id)).limit(15);
+      const allRecentInvoices = await db.select().from(invoices).orderBy(desc(invoices.id)).limit(50);
+      const invoiceRows = isSuperAdminPreview
+        ? allRecentInvoices.slice(0, 15)
+        : allRecentInvoices
+            .filter((inv) => guardianOwnsInvoice(inv, currentGuardianRow, linkedStudentsList, dbUser.phone))
+            .slice(0, 15);
       const incidentRows = await db.select().from(incidents).orderBy(desc(incidents.id)).limit(10);
+
+      const guardianRouteCodes = new Set(
+        enrichedStudents.map((s) => s.routeCode.trim().toUpperCase()).filter(Boolean)
+      );
+      const guardianRoutes = isSuperAdminPreview
+        ? allRoutes
+        : allRoutes.filter((r) => guardianRouteCodes.has(r.code.trim().toUpperCase()));
 
       res.json({
         students: enrichedStudents,
+        routes: guardianRoutes,
         pricing: pricingRows[0] ?? null,
         invoices: invoiceRows,
         incidents: incidentRows.filter((i) => i.status !== 'closed'),
@@ -716,35 +935,125 @@ async function createApp() {
   app.post('/api/v1/guardian/payment-intents', requireAuth, async (req: AuthRequest, res: Response) => {
     try {
       const dbUser = req.dbUser!;
-      const studentName = String(req.body?.studentName ?? 'Maria Domingos').trim();
-      const guardianName = String(req.body?.guardianName ?? dbUser.fullName).trim();
-      const phone = String(req.body?.phone ?? dbUser.phone ?? '+244 923 456 789').trim();
+
+      let guardianRows = await db
+        .select()
+        .from(guardians)
+        .where(eq(guardians.userId, dbUser.id))
+        .limit(1);
+
+      if (guardianRows.length === 0 && dbUser.email) {
+        const emailMatch = await db
+          .select()
+          .from(guardians)
+          .where(eq(guardians.email, dbUser.email))
+          .limit(1);
+        if (emailMatch[0] && emailMatch[0].userId == null) {
+          guardianRows = await db
+            .update(guardians)
+            .set({ userId: dbUser.id, verificationStatus: 'verified' })
+            .where(eq(guardians.id, emailMatch[0].id))
+            .returning();
+        } else if (emailMatch[0] && emailMatch[0].userId === dbUser.id) {
+          guardianRows = emailMatch;
+        }
+      }
+
+      const guardianRow = guardianRows[0];
+      if (!guardianRow) {
+        return res.status(400).json({
+          error: 'Não existem educandos vinculados à sua conta de encarregado.',
+        });
+      }
+
+      const linkedRows = await db
+        .select({ student: students })
+        .from(guardianStudentLinks)
+        .innerJoin(students, eq(guardianStudentLinks.studentId, students.id))
+        .where(and(eq(guardianStudentLinks.guardianId, guardianRow.id), eq(guardianStudentLinks.active, true)))
+        .orderBy(desc(guardianStudentLinks.isPrimary), students.id);
+
+      if (linkedRows.length === 0) {
+        return res.status(400).json({
+          error: 'Não existem educandos vinculados à sua conta de encarregado. Contacte a escola ou administração.',
+        });
+      }
+
+      const requestedStudentId =
+        req.body?.studentId !== undefined && req.body?.studentId !== null && String(req.body.studentId).trim() !== ''
+          ? Number(req.body.studentId)
+          : null;
+      const requestedStudentName =
+        typeof req.body?.studentName === 'string' && req.body.studentName.trim() !== ''
+          ? req.body.studentName.trim()
+          : null;
+
+      let selectedStudent = linkedRows[0]!.student;
+      if (requestedStudentId !== null) {
+        const matchById = linkedRows.find((r) => r.student.id === requestedStudentId);
+        if (!matchById) {
+          return res.status(403).json({
+            error: 'Não está autorizado a gerar referência de pagamento para este educando.',
+          });
+        }
+        selectedStudent = matchById.student;
+      } else if (requestedStudentName !== null) {
+        const matchByName = linkedRows.find(
+          (r) => r.student.fullName.trim().toLowerCase() === requestedStudentName.toLowerCase()
+        );
+        if (!matchByName) {
+          return res.status(403).json({
+            error: 'O educando indicado não está vinculado à sua conta de encarregado.',
+          });
+        }
+        selectedStudent = matchByName.student;
+      }
+
+      const studentName = selectedStudent.fullName.trim();
+      const guardianName = (guardianRow.fullName || dbUser.fullName || '').trim();
+      const phone = (dbUser.phone || guardianRow.phone || '').trim();
+
+      if (!phone) {
+        return res.status(400).json({
+          error: 'O seu perfil não possui um número de telefone registado. Atualize o contacto antes de gerar o pagamento.',
+        });
+      }
 
       const pricingRows = await db.select().from(pricingConfigs).orderBy(desc(pricingConfigs.id)).limit(1);
       const amountAoa = pricingRows[0]?.studentMonthlyFeeAoa ?? 3000;
+      const ivaPercent = pricingRows[0]?.ivaPercent ?? 14;
       const paymentEntity = (pricingRows[0]?.multicaixaEntityCode || '00845').trim();
       const p1 = String(crypto.randomInt(100, 999));
       const p2 = String(crypto.randomInt(100, 999));
       const p3 = String(crypto.randomInt(100, 999));
       const paymentReferencePin = `${p1} ${p2} ${p3}`;
-      const invoiceNumber = `PRO-MOB-2026/${crypto.randomInt(1000, 9999)}`;
-      const providerReference = `ENT-${paymentEntity}-PIN-${p1}${p2}${p3}`;
+      const now = new Date();
+      const dueDate = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+      const year = now.getUTCFullYear();
+      const invoiceNumber = `PRO-MOB-${year}/${crypto.randomInt(1000, 9999)}`;
+      const description = formatInvoiceDescriptionPt(now);
 
       const inserted = await db
         .insert(invoices)
         .values({
           invoiceNumber,
+          schoolId: selectedStudent.schoolId ?? null,
+          guardianId: guardianRow.id,
+          studentId: selectedStudent.id,
           studentName,
           guardianName,
           payerType: 'guardian',
           phone,
+          description,
           amountAoa,
+          ivaPercent,
           paymentMethod: 'multicaixa_express_entity',
           paymentEntity,
           paymentReferencePin,
           status: 'pending_provider',
-          providerReference,
+          providerReference: null,
           fiscalStatus: 'proforma_unverified',
+          dueDate,
         })
         .returning();
 
@@ -768,6 +1077,114 @@ async function createApp() {
     } catch (error) {
       console.error('Payment intent failed:', error);
       res.status(500).json({ error: 'Falha ao gerar PIN de pagamento.' });
+    }
+  });
+
+  app.get('/api/v1/invoices/:id/pdf', requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const dbUser = req.dbUser!;
+      const invoiceId = Number(req.params.id);
+      if (!Number.isInteger(invoiceId) || invoiceId <= 0) {
+        return res.status(400).json({ error: 'Identificador de fatura inválido.' });
+      }
+
+      const invoiceRows = await db
+        .select()
+        .from(invoices)
+        .where(eq(invoices.id, invoiceId))
+        .limit(1);
+      const invoice = invoiceRows[0];
+      if (!invoice) {
+        return res.status(404).json({ error: 'Fatura não encontrada.' });
+      }
+
+      const isAdminFinance = FINANCE_ROLES.includes(dbUser.primaryRole as MoBussRole);
+      if (!isAdminFinance) {
+        if (dbUser.primaryRole !== 'parent_guardian') {
+          return res.status(403).json({ error: 'Não está autorizado a descarregar faturas.' });
+        }
+
+        let guardianRows = await db
+          .select()
+          .from(guardians)
+          .where(eq(guardians.userId, dbUser.id))
+          .limit(1);
+        if (guardianRows.length === 0 && dbUser.email) {
+          const emailMatch = await db
+            .select()
+            .from(guardians)
+            .where(eq(guardians.email, dbUser.email))
+            .limit(1);
+          if (emailMatch[0] && emailMatch[0].userId === dbUser.id) {
+            guardianRows = emailMatch;
+          }
+        }
+
+        const guardian = guardianRows[0] ?? null;
+        if (!guardian) {
+          return res.status(403).json({ error: 'Perfil de encarregado não vinculado.' });
+        }
+
+        const links = await db
+          .select({ student: students })
+          .from(guardianStudentLinks)
+          .innerJoin(students, eq(guardianStudentLinks.studentId, students.id))
+          .where(and(eq(guardianStudentLinks.guardianId, guardian.id), eq(guardianStudentLinks.active, true)));
+        const linkedStudents = links.map((l) => l.student);
+
+        if (!guardianOwnsInvoice(invoice, guardian, linkedStudents, dbUser.phone)) {
+          return res.status(403).json({ error: 'Não está autorizado a descarregar esta fatura.' });
+        }
+      }
+
+      const pricingRows = await db.select().from(pricingConfigs).orderBy(desc(pricingConfigs.id)).limit(1);
+      const pricing = pricingRows[0] ?? {
+        companyName: 'MôBuss Angola Transporte Escolar Lda.',
+        companyNif: '5417209418',
+        companyAddress: 'Av. Comandante Valódia, Luanda, Angola',
+        ivaPercent: 14,
+        multicaixaEntityCode: '00845',
+        fiscalIntegrationStatus: 'sandbox_pending_agt_certification',
+      };
+
+      let resolvedSchoolId = invoice.schoolId;
+      if (!resolvedSchoolId && invoice.studentId) {
+        const studentRows = await db
+          .select({ schoolId: students.schoolId })
+          .from(students)
+          .where(eq(students.id, invoice.studentId))
+          .limit(1);
+        resolvedSchoolId = studentRows[0]?.schoolId ?? null;
+      }
+
+      const school = resolvedSchoolId
+        ? (await db.select({ id: schools.id, name: schools.name }).from(schools).where(eq(schools.id, resolvedSchoolId)).limit(1))[0] ?? null
+        : null;
+
+      const pdfBuffer = await generateInvoicePdfBuffer({
+        invoice,
+        pricing: {
+          companyName: pricing.companyName,
+          companyNif: pricing.companyNif,
+          companyAddress: pricing.companyAddress || 'Av. Comandante Valódia, Luanda, Angola',
+          ivaPercent: pricing.ivaPercent,
+          multicaixaEntityCode: pricing.multicaixaEntityCode,
+          fiscalIntegrationStatus: pricing.fiscalIntegrationStatus,
+        },
+        school,
+      });
+
+      const safeNumber = invoice.invoiceNumber.replace(/[^a-zA-Z0-9._-]+/g, '_');
+      const prefix = invoice.status === 'confirmed' ? 'Recibo_MoBuss' : 'Fatura_Proforma_MoBuss';
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${prefix}_${safeNumber}.pdf"`);
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Length', String(pdfBuffer.length));
+      res.send(pdfBuffer);
+    } catch (error) {
+      console.error('Invoice PDF generation failed:', error);
+      res.status(500).json({ error: 'Falha ao gerar PDF da fatura.' });
     }
   });
 
@@ -877,21 +1294,180 @@ async function createApp() {
     }
   });
 
+  // Shared route listing for authenticated non-driver portals (or assigned-only for driver)
+  app.get('/api/v1/routes', requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const dbUser = req.dbUser!;
+      const allRoutes = await loadRoutesWithStops();
+
+      if (dbUser.primaryRole === 'driver') {
+        if (!dbUser.driverId) {
+          return res.json({ routes: [] });
+        }
+        const allTrips = await db.select().from(trips).orderBy(trips.id);
+        const allVehicles = await db.select().from(vehicles);
+        const assignedVehicleIds = new Set(
+          allVehicles.filter((v) => v.assignedDriverId === dbUser.driverId).map((v) => v.id)
+        );
+        const driverTrips = allTrips.filter(
+          (t) =>
+            t.driverId === dbUser.driverId ||
+            (t.driverId == null && t.vehicleId != null && assignedVehicleIds.has(t.vehicleId))
+        );
+        const allowedCodes = new Set(driverTrips.map((t) => t.routeCode.trim().toUpperCase()));
+        return res.json({
+          routes: allRoutes.filter((r) => allowedCodes.has(r.code.trim().toUpperCase())),
+        });
+      }
+
+      if (dbUser.primaryRole === 'school_admin' && dbUser.schoolId) {
+        const schoolTrips = await db.select().from(trips).where(eq(trips.schoolId, dbUser.schoolId));
+        const schoolStudents = await db.select().from(students).where(eq(students.schoolId, dbUser.schoolId));
+        const schoolCodes = new Set([
+          ...schoolTrips.map((t) => t.routeCode.trim().toUpperCase()),
+          ...schoolStudents.map((s) => s.routeCode.trim().toUpperCase()),
+        ]);
+        return res.json({
+          routes: allRoutes.filter(
+            (r) => r.schoolId === dbUser.schoolId || schoolCodes.has(r.code.trim().toUpperCase())
+          ),
+        });
+      }
+
+      res.json({ routes: allRoutes });
+    } catch (error) {
+      console.error('List routes failed:', error);
+      res.status(500).json({ error: 'Erro ao carregar rotas na base de dados.' });
+    }
+  });
+
   // ==========================================================================
   // 4. DRIVER APP ENDPOINTS (Trips State Machine, Real GPS, Server-Side PIN)
   // ==========================================================================
 
-  app.get('/api/v1/driver/dashboard', requireAuth, requireRoles(DRIVER_ROLES), async (_req: AuthRequest, res: Response) => {
+  async function resolveDriverTripAuthorization(
+    dbUser: NonNullable<AuthRequest['dbUser']>,
+    trip: typeof trips.$inferSelect
+  ): Promise<{ ok: true; driverId: number | null } | { ok: false; status: number; error: string }> {
+    if (dbUser.primaryRole !== 'driver') {
+      return { ok: true, driverId: trip.driverId ?? dbUser.driverId ?? null };
+    }
+    if (!dbUser.driverId) {
+      return { ok: false, status: 403, error: 'Conta de motorista sem ficha de motorista vinculada.' };
+    }
+    const driverRows = await db.select().from(drivers).where(eq(drivers.id, dbUser.driverId)).limit(1);
+    const driver = driverRows[0];
+    if (!driver) {
+      return { ok: false, status: 403, error: 'Ficha de motorista não encontrada.' };
+    }
+    if (driver.verificationStatus === 'suspended') {
+      return { ok: false, status: 403, error: 'Motorista suspenso. Contacte a escola ou a central MôBuss.' };
+    }
+
+    if (trip.driverId === dbUser.driverId) {
+      return { ok: true, driverId: dbUser.driverId };
+    }
+
+    if (trip.driverId == null && trip.vehicleId != null) {
+      const assignedVehicle = await db
+        .select()
+        .from(vehicles)
+        .where(and(eq(vehicles.id, trip.vehicleId), eq(vehicles.assignedDriverId, dbUser.driverId)))
+        .limit(1);
+      if (assignedVehicle[0]) {
+        return { ok: true, driverId: dbUser.driverId };
+      }
+    }
+
+    return { ok: false, status: 403, error: 'Não está autorizado a aceder ou atualizar esta viagem.' };
+  }
+
+  app.get('/api/v1/driver/dashboard', requireAuth, requireRoles(DRIVER_ROLES), async (req: AuthRequest, res: Response) => {
     try {
       await ensureDatabaseSeeded();
+      const dbUser = req.dbUser!;
       const allTrips = await db.select().from(trips).orderBy(trips.id);
       const allVehicles = await db.select().from(vehicles);
       const allDrivers = await db.select().from(drivers);
       const allStudents = await db.select().from(students).orderBy(students.id);
-      const activeEvents = await db.select().from(attendanceEvents).orderBy(desc(attendanceEvents.id)).limit(50);
+
+      let driverTrips = allTrips;
+      if (dbUser.primaryRole === 'driver') {
+        if (!dbUser.driverId) {
+          return res.status(403).json({ error: 'Conta de motorista sem ficha de motorista vinculada.' });
+        }
+        const driverRecord = allDrivers.find((d) => d.id === dbUser.driverId) ?? null;
+        if (!driverRecord) {
+          return res.status(403).json({ error: 'Ficha de motorista não encontrada.' });
+        }
+        if (driverRecord.verificationStatus === 'suspended') {
+          return res.status(403).json({ error: 'Motorista suspenso. Contacte a escola ou a central MôBuss.' });
+        }
+        const driverVehicles = allVehicles.filter((v) => v.assignedDriverId === dbUser.driverId);
+        const driverVehicleIds = new Set(driverVehicles.map((v) => v.id));
+        driverTrips = allTrips.filter(
+          (t) =>
+            t.driverId === dbUser.driverId ||
+            (t.driverId == null && t.vehicleId != null && driverVehicleIds.has(t.vehicleId))
+        );
+      }
+
+      const activeAssignedTrip =
+        driverTrips.find((t) => t.state !== 'completed' && t.state !== 'cancelled') ??
+        driverTrips[0] ??
+        null;
+
+      const assignedRoute: RouteDto | null = activeAssignedTrip
+        ? await getRouteWithStopsByCode(activeAssignedTrip.routeCode, { includeInactive: true })
+        : null;
+
+      const assignedVehicle = activeAssignedTrip?.vehicleId
+        ? allVehicles.find((v) => v.id === activeAssignedTrip.vehicleId) ?? null
+        : dbUser.driverId
+        ? allVehicles.find((v) => v.assignedDriverId === dbUser.driverId) ?? null
+        : null;
+
+      const assignedDriver = activeAssignedTrip?.driverId
+        ? allDrivers.find((d) => d.id === activeAssignedTrip.driverId) ?? null
+        : dbUser.driverId
+        ? allDrivers.find((d) => d.id === dbUser.driverId) ?? null
+        : null;
+
+      const driverRouteSchoolPairs = driverTrips.map((t) => ({
+        routeCode: t.routeCode.trim().toUpperCase(),
+        schoolId: t.schoolId,
+      }));
+      const assignedRouteCode = assignedRoute?.code ?? activeAssignedTrip?.routeCode ?? null;
+      const scopedStudents =
+        dbUser.primaryRole === 'driver'
+          ? allStudents.filter((st) =>
+              driverRouteSchoolPairs.some(
+                (pair) =>
+                  pair.routeCode === st.routeCode.trim().toUpperCase() &&
+                  (pair.schoolId == null || st.schoolId === pair.schoolId)
+              )
+            )
+          : assignedRouteCode
+          ? allStudents.filter(
+              (st) => st.routeCode.trim().toUpperCase() === assignedRouteCode.trim().toUpperCase()
+            )
+          : [];
+
+      const driverTripIds = new Set(driverTrips.map((t) => t.id));
+      const scopedStudentIds = new Set(scopedStudents.map((s) => s.id));
+      const rawRecentEvents = await db.select().from(attendanceEvents).orderBy(desc(attendanceEvents.id)).limit(80);
+      const activeEvents =
+        dbUser.primaryRole === 'driver'
+          ? rawRecentEvents.filter(
+              (ev) =>
+                (ev.tripId != null && driverTripIds.has(ev.tripId)) ||
+                (ev.tripId == null && scopedStudentIds.has(ev.studentId))
+            )
+          : rawRecentEvents.slice(0, 50);
 
       // NEVER return pickupPin plaintext in manifest!
-      const safeManifest = allStudents.map((st) => ({
+      const safeManifest = scopedStudents.map((st) => ({
         id: st.id,
         fullName: st.fullName,
         routeCode: st.routeCode,
@@ -902,9 +1478,27 @@ async function createApp() {
       }));
 
       res.json({
-        trips: allTrips,
-        vehicles: allVehicles,
-        drivers: allDrivers,
+        trips: driverTrips,
+        assignedRoute,
+        assignedVehicle: assignedVehicle
+          ? {
+              id: assignedVehicle.id,
+              fleetNumber: assignedVehicle.fleetNumber,
+              plate: assignedVehicle.plate,
+              routeCode: assignedVehicle.routeCode,
+            }
+          : null,
+        assignedDriver: assignedDriver
+          ? {
+              id: assignedDriver.id,
+              fullName: assignedDriver.fullName,
+              phone: assignedDriver.phone,
+              employerType: assignedDriver.employerType,
+              employerSchoolId: assignedDriver.employerSchoolId,
+            }
+          : null,
+        vehicles: assignedVehicle ? [assignedVehicle] : [],
+        drivers: assignedDriver ? [assignedDriver] : [],
         manifest: safeManifest,
         recentEvents: activeEvents,
       });
@@ -918,11 +1512,19 @@ async function createApp() {
     try {
       const dbUser = req.dbUser!;
       const tripId = Number(req.params.id);
+      if (!Number.isInteger(tripId) || tripId <= 0) {
+        return res.status(400).json({ error: 'ID de viagem inválido.' });
+      }
       const nextState = String(req.body?.nextState ?? '');
       const existingRows = await db.select().from(trips).where(eq(trips.id, tripId)).limit(1);
       const trip = existingRows[0];
       if (!trip) {
         return res.status(404).json({ error: 'Viagem não encontrada.' });
+      }
+
+      const authCheck = await resolveDriverTripAuthorization(dbUser, trip);
+      if (!authCheck.ok) {
+        return res.status(authCheck.status).json({ error: authCheck.error });
       }
 
       const allowed = ALLOWED_TRIP_TRANSITIONS[trip.state] ?? [];
@@ -939,9 +1541,14 @@ async function createApp() {
         });
       }
 
+      const shouldClearDelay = nextState === 'completed' || nextState === 'cancelled';
       const updated = await db
         .update(trips)
-        .set({ state: nextState, updatedAt: new Date() })
+        .set({
+          state: nextState,
+          ...(shouldClearDelay ? { delayReason: null, delayNote: null, delayReportedAt: null } : {}),
+          updatedAt: new Date(),
+        })
         .where(eq(trips.id, tripId))
         .returning();
 
@@ -964,7 +1571,11 @@ async function createApp() {
         {
           tripId,
           tripCode: trip.tripCode,
+          routeCode: trip.routeCode,
           state: nextState,
+          delayReason: updated[0]?.delayReason ?? null,
+          delayNote: updated[0]?.delayNote ?? null,
+          delayReportedAt: updated[0]?.delayReportedAt ?? null,
           emptyBusSweepVerified: updated[0]?.emptyBusSweepVerified ?? false,
         },
         { schoolId: trip.schoolId }
@@ -975,21 +1586,291 @@ async function createApp() {
     }
   });
 
+  app.post('/api/v1/driver/trips/:id/delay-report', requireAuth, requireRoles(DRIVER_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      const dbUser = req.dbUser!;
+      const tripId = Number(req.params.id);
+      if (!Number.isInteger(tripId) || tripId <= 0) {
+        return res.status(400).json({ error: 'tripId inválido.' });
+      }
+
+      const existingRows = await db.select().from(trips).where(eq(trips.id, tripId)).limit(1);
+      const trip = existingRows[0];
+      if (!trip) {
+        return res.status(404).json({ error: 'Viagem não encontrada.' });
+      }
+
+      const authCheck = await resolveDriverTripAuthorization(dbUser, trip);
+      if (!authCheck.ok) {
+        return res.status(authCheck.status).json({ error: authCheck.error });
+      }
+
+      const inProgressStates = new Set([
+        'driver_checked_in',
+        'in_progress',
+        'at_stop',
+        'boarding',
+        'at_school',
+        'return_in_progress',
+        'handover_pending',
+        'delayed',
+      ]);
+      if (!inProgressStates.has(trip.state)) {
+        return res.status(400).json({
+          error: 'Só é possível reportar desvio ou trânsito enquanto a viagem está em curso.',
+        });
+      }
+
+      const rawReason = String(req.body?.reason ?? '').trim().toLowerCase();
+      const matchedReason = DELAY_REASONS.find((r) => r === rawReason) as DelayReason | undefined;
+      if (!matchedReason) {
+        return res.status(400).json({
+          error: 'Motivo inválido. Escolha: trânsito intenso, estrada cortada, acidente na via, avaria ou outro.',
+        });
+      }
+
+      const note = String(req.body?.note ?? req.body?.notes ?? '')
+        .trim()
+        .slice(0, 240);
+
+      const rawLat = req.body?.latitude;
+      const rawLng = req.body?.longitude;
+      const parsedLat = rawLat === '' || rawLat == null ? NaN : Number(rawLat);
+      const parsedLng = rawLng === '' || rawLng == null ? NaN : Number(rawLng);
+      const hasFreshGps =
+        Number.isFinite(parsedLat) &&
+        Number.isFinite(parsedLng) &&
+        Math.abs(parsedLat) <= 90 &&
+        Math.abs(parsedLng) <= 180;
+
+      const tripLastLat = trip.lastLat != null ? Number(trip.lastLat) : NaN;
+      const tripLastLng = trip.lastLng != null ? Number(trip.lastLng) : NaN;
+      const eventLat = hasFreshGps
+        ? parsedLat
+        : Number.isFinite(tripLastLat)
+        ? tripLastLat
+        : null;
+      const eventLng = hasFreshGps
+        ? parsedLng
+        : Number.isFinite(tripLastLng)
+        ? tripLastLng
+        : null;
+
+      const [vehicleRow, driverRow] = await Promise.all([
+        trip.vehicleId ? db.select().from(vehicles).where(eq(vehicles.id, trip.vehicleId)).limit(1) : Promise.resolve([]),
+        trip.driverId
+          ? db.select().from(drivers).where(eq(drivers.id, trip.driverId)).limit(1)
+          : dbUser.driverId
+          ? db.select().from(drivers).where(eq(drivers.id, dbUser.driverId)).limit(1)
+          : Promise.resolve([]),
+      ]);
+
+      const driverName = driverRow[0]?.fullName ?? dbUser.fullName;
+      const busNumber = vehicleRow[0]?.fleetNumber ?? null;
+      const category =
+        matchedReason === 'avaria'
+          ? 'breakdown'
+          : matchedReason === 'acidente na via'
+          ? 'hazard'
+          : 'traffic_delay';
+      const severity =
+        matchedReason === 'avaria' || matchedReason === 'acidente na via' || matchedReason === 'estrada cortada'
+          ? 'high'
+          : 'medium';
+      const description = note
+        ? `Desvio / Trânsito (${matchedReason}): ${note}`
+        : `Desvio / Trânsito reportado: ${matchedReason}`;
+      const now = new Date();
+
+      const insertedIncident = await db
+        .insert(incidents)
+        .values({
+          tripId: trip.id,
+          schoolId: trip.schoolId ?? null,
+          busNumber,
+          routeCode: trip.routeCode,
+          category,
+          severity,
+          description,
+          reporterName: driverName,
+          reporterRole: dbUser.primaryRole,
+          driverId: driverRow[0]?.id ?? trip.driverId ?? dbUser.driverId ?? null,
+          driverName,
+          reason: matchedReason,
+          notes: note || null,
+          latitude: eventLat,
+          longitude: eventLng,
+          status: 'new',
+        })
+        .returning();
+
+      const updatedTripRows = await db
+        .update(trips)
+        .set({
+          state: 'delayed',
+          delayReason: matchedReason,
+          delayNote: note || null,
+          delayReportedAt: now,
+          ...(hasFreshGps
+            ? {
+                lastLat: String(parsedLat),
+                lastLng: String(parsedLng),
+                lastLocationAt: now,
+                gpsStatus: 'live',
+              }
+            : {}),
+          updatedAt: now,
+        })
+        .where(eq(trips.id, trip.id))
+        .returning();
+
+      const updatedTrip = updatedTripRows[0] ?? trip;
+      const createdIncident = insertedIncident[0];
+      const enrichedIncident = createdIncident
+        ? {
+            ...createdIncident,
+            tripCode: trip.tripCode,
+            routeName: trip.routeName,
+            driverName,
+          }
+        : null;
+
+      await writeAuditLog({
+        actorUid: dbUser.uid,
+        actorEmail: dbUser.email,
+        actorRole: dbUser.primaryRole,
+        action: 'trip.delay_reported',
+        targetEntity: 'trips',
+        targetId: trip.id,
+        summary: `Desvio / Trânsito reportado na viagem ${trip.tripCode} (${trip.routeCode}) por ${driverName}: ${matchedReason}${note ? ` — ${note}` : ''}.`,
+        before: { state: trip.state, delayReason: trip.delayReason ?? null },
+        after: {
+          state: 'delayed',
+          delayReason: matchedReason,
+          delayNote: note || null,
+          incidentId: createdIncident?.id ?? null,
+          latitude: eventLat,
+          longitude: eventLng,
+        },
+      });
+
+      telemetryHub.broadcast(
+        'trip:state',
+        {
+          tripId: trip.id,
+          tripCode: trip.tripCode,
+          routeCode: trip.routeCode,
+          state: 'delayed',
+          delayReason: matchedReason,
+          delayNote: note || null,
+          delayReportedAt: now.toISOString(),
+          emptyBusSweepVerified: updatedTrip.emptyBusSweepVerified,
+        },
+        { schoolId: trip.schoolId }
+      );
+
+      if (hasFreshGps) {
+        const dbRoute = await getRouteWithStopsByCode(trip.routeCode, { includeInactive: true });
+        const progress = dbRoute ? estimateRouteProgressFromPath(dbRoute.pathCoordinates, parsedLat, parsedLng) : 0;
+        const geofence = dbRoute
+          ? checkRouteStopGeofences(dbRoute.stops, parsedLat, parsedLng)
+          : { nearestStop: null, approaching500m: [] };
+        telemetryHub.broadcast(
+          'trip:location',
+          {
+            tripId: trip.id,
+            routeCode: trip.routeCode,
+            lat: parsedLat,
+            lng: parsedLng,
+            timestamp: now.toISOString(),
+            progress,
+            nearestStopName: geofence.nearestStop?.stopName ?? trip.routeName,
+            distanceToNextStopM: geofence.nearestStop?.distanceMeters ?? null,
+            etaMinutes: geofence.nearestStop?.etaMinutes ?? null,
+            gpsStatus: 'live',
+          },
+          { schoolId: trip.schoolId }
+        );
+      }
+
+      if (enrichedIncident) {
+        telemetryHub.broadcast(
+          'incident:created',
+          { incident: enrichedIncident },
+          { schoolId: trip.schoolId }
+        );
+      }
+
+      void dispatchGuardianPushByRoute(
+        trip.routeCode,
+        `Atraso na rota ${trip.routeCode} · MôBuss`,
+        `Atraso reportado (${matchedReason})${note ? `: ${note}` : '.'}`,
+        { type: 'trip_delay', routeCode: trip.routeCode, reason: matchedReason }
+      );
+
+      res.status(201).json({
+        incident: enrichedIncident,
+        trip: updatedTrip,
+        message: `Desvio reportado (${matchedReason}) e registado na Central.`,
+      });
+    } catch (error) {
+      console.error('Delay report failed:', error);
+      res.status(500).json({ error: 'Erro ao registar desvio ou trânsito.' });
+    }
+  });
+
   app.post('/api/v1/driver/location-batches', requireAuth, requireRoles(DRIVER_ROLES), async (req: AuthRequest, res: Response) => {
     try {
+      const dbUser = req.dbUser!;
       const tripId = Number(req.body?.tripId);
-      const lat = String(req.body?.latitude ?? '');
-      const lng = String(req.body?.longitude ?? '');
-      if (!tripId || !lat || !lng) {
-        return res.status(400).json({ error: 'tripId, latitude e longitude são obrigatórios.' });
+      const rawLat = req.body?.latitude;
+      const rawLng = req.body?.longitude;
+      const latNum = rawLat === '' || rawLat == null ? NaN : Number(rawLat);
+      const lngNum = rawLng === '' || rawLng == null ? NaN : Number(rawLng);
+
+      if (
+        !Number.isInteger(tripId) ||
+        tripId <= 0 ||
+        !Number.isFinite(latNum) ||
+        !Number.isFinite(lngNum) ||
+        Math.abs(latNum) > 90 ||
+        Math.abs(lngNum) > 180
+      ) {
+        return res.status(400).json({ error: 'tripId, latitude e longitude válidos são obrigatórios.' });
       }
+
+      const tripRows = await db.select().from(trips).where(eq(trips.id, tripId)).limit(1);
+      const existingTrip = tripRows[0];
+      if (!existingTrip) {
+        return res.status(404).json({ error: 'Viagem não encontrada.' });
+      }
+      const authCheck = await resolveDriverTripAuthorization(dbUser, existingTrip);
+      if (!authCheck.ok) {
+        return res.status(authCheck.status).json({ error: authCheck.error });
+      }
+
+      const accuracy =
+        req.body?.accuracy != null && Number.isFinite(Number(req.body.accuracy))
+          ? Number(req.body.accuracy)
+          : null;
+      const speed =
+        req.body?.speed != null && Number.isFinite(Number(req.body.speed))
+          ? Number(req.body.speed)
+          : null;
+      const heading =
+        req.body?.heading != null && Number.isFinite(Number(req.body.heading))
+          ? Number(req.body.heading)
+          : null;
+      const parsedTsMs =
+        req.body?.timestamp != null ? Date.parse(String(req.body.timestamp)) : NaN;
+      const recordedAt = Number.isFinite(parsedTsMs) ? new Date(parsedTsMs) : new Date();
 
       const updated = await db
         .update(trips)
         .set({
-          lastLat: lat,
-          lastLng: lng,
-          lastLocationAt: new Date(),
+          lastLat: String(latNum),
+          lastLng: String(lngNum),
+          lastLocationAt: recordedAt,
           gpsStatus: 'live',
           updatedAt: new Date(),
         })
@@ -997,48 +1878,55 @@ async function createApp() {
         .returning();
 
       const updatedTrip = updated[0];
-      const latNum = Number(lat);
-      const lngNum = Number(lng);
-      if (updatedTrip && Number.isFinite(latNum) && Number.isFinite(lngNum)) {
-        const progress = estimateRouteProgressFromCoords(updatedTrip.routeCode, latNum, lngNum);
-        const geofence = checkStopGeofences(updatedTrip.routeCode, latNum, lngNum);
+      if (!updatedTrip) {
+        return res.status(404).json({ error: 'Viagem não encontrada.' });
+      }
 
+      const dbRoute = await getRouteWithStopsByCode(updatedTrip.routeCode, { includeInactive: true });
+      const progress = dbRoute ? estimateRouteProgressFromPath(dbRoute.pathCoordinates, latNum, lngNum) : 0;
+      const geofence = dbRoute
+        ? checkRouteStopGeofences(dbRoute.stops, latNum, lngNum)
+        : { nearestStop: null, approaching500m: [] };
+
+      telemetryHub.broadcast(
+        'trip:location',
+        {
+          tripId: updatedTrip.id,
+          routeCode: updatedTrip.routeCode,
+          lat: latNum,
+          lng: lngNum,
+          accuracy,
+          speed,
+          heading,
+          timestamp: recordedAt.toISOString(),
+          progress,
+          nearestStopName: geofence.nearestStop?.stopName ?? updatedTrip.routeName,
+          distanceToNextStopM: geofence.nearestStop?.distanceMeters ?? null,
+          etaMinutes: geofence.nearestStop?.etaMinutes ?? null,
+          gpsStatus: 'live',
+        },
+        { schoolId: updatedTrip.schoolId }
+      );
+
+      if (geofence.approaching500m.length > 0) {
+        const stopHit = geofence.approaching500m[0]!;
         telemetryHub.broadcast(
-          'trip:location',
+          'geofence:approach_500m',
           {
             tripId: updatedTrip.id,
             routeCode: updatedTrip.routeCode,
-            lat: latNum,
-            lng: lngNum,
-            progress,
-            nearestStopName: geofence.nearestStop.stopName,
-            distanceToNextStopM: geofence.nearestStop.distanceMeters,
-            etaMinutes: geofence.nearestStop.etaMinutes,
-            gpsStatus: 'live',
+            stopName: stopHit.stopName,
+            distanceMeters: stopHit.distanceMeters,
+            etaMinutes: stopHit.etaMinutes,
           },
           { schoolId: updatedTrip.schoolId }
         );
-
-        if (geofence.approaching500m.length > 0) {
-          const stopHit = geofence.approaching500m[0]!;
-          telemetryHub.broadcast(
-            'geofence:approach_500m',
-            {
-              tripId: updatedTrip.id,
-              routeCode: updatedTrip.routeCode,
-              stopName: stopHit.stopName,
-              distanceMeters: stopHit.distanceMeters,
-              etaMinutes: stopHit.etaMinutes,
-            },
-            { schoolId: updatedTrip.schoolId }
-          );
-          void dispatchGuardianPushByRoute(
-            updatedTrip.routeCode,
-            `MôBuss ${updatedTrip.routeCode} a aproximar-se`,
-            `Autocarro a ${stopHit.distanceMeters}m de ${stopHit.stopName} (~${stopHit.etaMinutes} min).`,
-            { type: 'geofence_500m', routeCode: updatedTrip.routeCode, stopName: stopHit.stopName }
-          );
-        }
+        void dispatchGuardianPushByRoute(
+          updatedTrip.routeCode,
+          `MôBuss ${updatedTrip.routeCode} a aproximar-se`,
+          `Autocarro a ${stopHit.distanceMeters}m de ${stopHit.stopName} (~${stopHit.etaMinutes} min).`,
+          { type: 'geofence_500m', routeCode: updatedTrip.routeCode, stopName: stopHit.stopName }
+        );
       }
 
       res.json({ trip: updatedTrip });
@@ -1051,32 +1939,67 @@ async function createApp() {
   app.post('/api/v1/driver/trips/:id/attendance-events', requireAuth, requireRoles(DRIVER_ROLES), async (req: AuthRequest, res: Response) => {
     try {
       const dbUser = req.dbUser!;
-      const tripId = Number(req.params.id);
+      const rawTripId = Number(req.params.id);
       const studentId = Number(req.body?.studentId);
-      const eventType = String(req.body?.eventType ?? '');
+      const eventType = String(req.body?.eventType ?? '').trim();
       const eventId = String(req.body?.eventId || crypto.randomUUID());
       const offlineSequence = req.body?.offlineSequence != null ? Number(req.body.offlineSequence) : null;
 
-      if (!studentId || !eventType) {
+      if (!Number.isInteger(studentId) || studentId <= 0 || !eventType) {
         return res.status(400).json({ error: 'studentId e eventType obrigatórios.' });
       }
 
-      await db
+      if (!Number.isInteger(rawTripId) || rawTripId <= 0) {
+        return res.status(400).json({ error: 'ID de viagem inválido.' });
+      }
+      const tripRows = await db.select().from(trips).where(eq(trips.id, rawTripId)).limit(1);
+      const trip = tripRows[0];
+      if (!trip) {
+        return res.status(404).json({ error: 'Viagem não encontrada.' });
+      }
+      const authCheck = await resolveDriverTripAuthorization(dbUser, trip);
+      if (!authCheck.ok) {
+        return res.status(authCheck.status).json({ error: authCheck.error });
+      }
+
+      const studentRows = await db
+        .select()
+        .from(students)
+        .where(eq(students.id, studentId))
+        .limit(1);
+      const student = studentRows[0];
+      if (!student) {
+        return res.status(404).json({ error: 'Educando não encontrado.' });
+      }
+      if (
+        student.routeCode.trim().toUpperCase() !== trip.routeCode.trim().toUpperCase() ||
+        (trip.schoolId != null && student.schoolId !== trip.schoolId)
+      ) {
+        return res.status(403).json({ error: 'Este educando não pertence à rota ou escola desta viagem.' });
+      }
+
+      const resolvedTripId = trip.id;
+
+      const parsedOccurredAt = req.body?.occurredAt ? new Date(String(req.body.occurredAt)) : new Date();
+      const occurredAt = Number.isNaN(parsedOccurredAt.getTime()) ? new Date() : parsedOccurredAt;
+
+      const insertedEvents = await db
         .insert(attendanceEvents)
         .values({
           eventId,
-          tripId,
+          tripId: resolvedTripId,
           studentId,
           actorUid: dbUser.uid,
           eventType,
-          occurredAt: req.body?.occurredAt ? new Date(req.body.occurredAt) : new Date(),
+          occurredAt,
           offlineSequence,
           latitude: req.body?.latitude ? String(req.body.latitude) : null,
           longitude: req.body?.longitude ? String(req.body.longitude) : null,
           verificationResult: 'accepted',
           notes: req.body?.notes ? String(req.body.notes) : null,
         })
-        .onConflictDoNothing({ target: attendanceEvents.eventId });
+        .onConflictDoNothing({ target: attendanceEvents.eventId })
+        .returning();
 
       await db
         .update(students)
@@ -1084,11 +2007,26 @@ async function createApp() {
         .where(eq(students.id, studentId));
 
       telemetryHub.broadcast('attendance:updated', {
-        tripId,
+        tripId: resolvedTripId,
         studentId,
         eventType,
-        occurredAt: new Date().toISOString(),
+        occurredAt: occurredAt.toISOString(),
       });
+
+      if (insertedEvents.length > 0 && eventType === 'boarded') {
+        try {
+          await notifyStudentLinkedGuardians({
+            telemetryHub,
+            studentId,
+            studentName: student.fullName,
+            tripId: resolvedTripId,
+            type: 'boarded',
+            occurredAt,
+          });
+        } catch (notifErr) {
+          console.warn('Guardian notification dispatch failed after boarding:', notifErr);
+        }
+      }
 
       res.status(201).json({ status: 'accepted', eventId });
     } catch (error) {
@@ -1108,6 +2046,64 @@ async function createApp() {
 
       if (!studentId || !/^\d{4}$/.test(enteredPin)) {
         return res.status(400).json({ valid: false, error: 'Indique o aluno e um código PIN de 4 dígitos.' });
+      }
+
+      const studentRows = await db.select().from(students).where(eq(students.id, studentId)).limit(1);
+      const targetStudent = studentRows[0];
+      if (!targetStudent) {
+        return res.status(404).json({ valid: false, error: 'Educando não encontrado.' });
+      }
+
+      let validatedTrip: typeof trips.$inferSelect | null = null;
+      if (tripId != null) {
+        if (!Number.isInteger(tripId) || tripId <= 0) {
+          return res.status(400).json({ valid: false, error: 'tripId inválido.' });
+        }
+        const tRows = await db.select().from(trips).where(eq(trips.id, tripId)).limit(1);
+        validatedTrip = tRows[0] ?? null;
+        if (!validatedTrip) {
+          return res.status(404).json({ valid: false, error: 'Viagem não encontrada.' });
+        }
+        const authCheck = await resolveDriverTripAuthorization(dbUser, validatedTrip);
+        if (!authCheck.ok) {
+          return res.status(authCheck.status).json({ valid: false, error: authCheck.error });
+        }
+        if (
+          targetStudent.routeCode.trim().toUpperCase() !== validatedTrip.routeCode.trim().toUpperCase() ||
+          (validatedTrip.schoolId != null && targetStudent.schoolId !== validatedTrip.schoolId)
+        ) {
+          return res.status(403).json({
+            valid: false,
+            error: 'Este educando não pertence à rota ou escola desta viagem.',
+          });
+        }
+      } else if (dbUser.primaryRole === 'driver') {
+        if (!dbUser.driverId) {
+          return res.status(403).json({ valid: false, error: 'Conta de motorista sem ficha vinculada.' });
+        }
+        const [driverRow] = await db.select().from(drivers).where(eq(drivers.id, dbUser.driverId)).limit(1);
+        if (!driverRow || driverRow.verificationStatus === 'suspended') {
+          return res.status(403).json({ valid: false, error: 'Motorista indisponível ou suspenso.' });
+        }
+        const driverVehicles = await db.select().from(vehicles).where(eq(vehicles.assignedDriverId, dbUser.driverId));
+        const driverVehicleIds = new Set(driverVehicles.map((v) => v.id));
+        const allDriverTrips = await db.select().from(trips);
+        const ownedTrips = allDriverTrips.filter(
+          (t) =>
+            t.driverId === dbUser.driverId ||
+            (t.driverId == null && t.vehicleId != null && driverVehicleIds.has(t.vehicleId))
+        );
+        const studentMatchesTrip = ownedTrips.some(
+          (t) =>
+            t.routeCode.trim().toUpperCase() === targetStudent.routeCode.trim().toUpperCase() &&
+            (t.schoolId == null || targetStudent.schoolId === t.schoolId)
+        );
+        if (!studentMatchesTrip) {
+          return res.status(403).json({
+            valid: false,
+            error: 'Não está autorizado a validar PIN para educandos fora das suas viagens atribuídas.',
+          });
+        }
       }
 
       const creds = await db
@@ -1222,14 +2218,25 @@ async function createApp() {
       }
 
       const nextJourneyState = pinPhase === 'boarding' ? 'boarded' : 'handed_over';
+      const handoverOccurredAt = new Date();
+      let resolvedHandoverTripId: number | null = null;
+      if (tripId && Number.isInteger(tripId) && tripId > 0) {
+        const tripRows = await db
+          .select({ id: trips.id })
+          .from(trips)
+          .where(eq(trips.id, tripId))
+          .limit(1);
+        resolvedHandoverTripId = tripRows[0]?.id ?? null;
+      }
+
       await db.insert(attendanceEvents).values({
         eventId: crypto.randomUUID(),
-        tripId,
+        tripId: resolvedHandoverTripId,
         studentId,
         actorUid: dbUser.uid,
         eventType: nextJourneyState,
         pinPhase,
-        occurredAt: new Date(),
+        occurredAt: handoverOccurredAt,
         verificationResult: 'valid',
         notes:
           pinPhase === 'boarding'
@@ -1237,10 +2244,11 @@ async function createApp() {
             : 'Entrega segura confirmada com PIN de uso único.',
       });
 
-      await db
+      const updatedStudents = await db
         .update(students)
         .set({ currentJourneyState: nextJourneyState })
-        .where(eq(students.id, studentId));
+        .where(eq(students.id, studentId))
+        .returning();
 
       await writeAuditLog({
         actorUid: dbUser.uid,
@@ -1253,7 +2261,7 @@ async function createApp() {
       });
 
       telemetryHub.broadcast('pin:validated', {
-        tripId,
+        tripId: resolvedHandoverTripId ?? tripId,
         studentId,
         pinPhase,
         journeyState: nextJourneyState,
@@ -1261,21 +2269,25 @@ async function createApp() {
       });
 
       telemetryHub.broadcast('attendance:updated', {
-        tripId,
+        tripId: resolvedHandoverTripId ?? tripId,
         studentId,
         eventType: nextJourneyState,
         pinPhase,
-        occurredAt: new Date().toISOString(),
+        occurredAt: handoverOccurredAt.toISOString(),
       });
 
-      void dispatchGuardianPushByStudent(
-        studentId,
-        pinPhase === 'boarding' ? 'Embarque Confirmado · MôBuss' : 'Entrega Segura Confirmada · MôBuss',
-        pinPhase === 'boarding'
-          ? 'O seu educando embarcou com PIN validado. Novo código de entrega disponível na app.'
-          : 'Entrega do educando confirmada em segurança com PIN de uso único.',
-        { type: 'pin_validated', studentId: String(studentId), pinPhase }
-      );
+      try {
+        await notifyStudentLinkedGuardians({
+          telemetryHub,
+          studentId,
+          studentName: updatedStudents[0]?.fullName,
+          tripId: resolvedHandoverTripId,
+          type: pinPhase === 'boarding' ? 'boarded' : 'handover_completed',
+          occurredAt: handoverOccurredAt,
+        });
+      } catch (notifErr) {
+        console.warn('Guardian notification dispatch failed after handover:', notifErr);
+      }
 
       res.json({
         valid: true,
@@ -1297,6 +2309,20 @@ async function createApp() {
     try {
       const dbUser = req.dbUser!;
       const tripId = Number(req.params.id);
+      if (!Number.isInteger(tripId) || tripId <= 0) {
+        return res.status(400).json({ error: 'ID de viagem inválido.' });
+      }
+
+      const tripRows = await db.select().from(trips).where(eq(trips.id, tripId)).limit(1);
+      const existingTrip = tripRows[0];
+      if (!existingTrip) {
+        return res.status(404).json({ error: 'Viagem não encontrada.' });
+      }
+      const authCheck = await resolveDriverTripAuthorization(dbUser, existingTrip);
+      if (!authCheck.ok) {
+        return res.status(authCheck.status).json({ error: authCheck.error });
+      }
+
       const updated = await db
         .update(trips)
         .set({
@@ -1317,12 +2343,16 @@ async function createApp() {
         summary: `Inspeção anti-esquecimento confirmada pelo motorista na viagem #${tripId}.`,
       });
 
-      telemetryHub.broadcast('trip:state', {
-        tripId,
-        tripCode: updated[0]?.tripCode,
-        state: updated[0]?.state,
-        emptyBusSweepVerified: true,
-      });
+      telemetryHub.broadcast(
+        'trip:state',
+        {
+          tripId,
+          tripCode: updated[0]?.tripCode,
+          state: updated[0]?.state,
+          emptyBusSweepVerified: true,
+        },
+        { schoolId: existingTrip.schoolId }
+      );
 
       res.json({ trip: updated[0] });
     } catch (error) {
@@ -1393,37 +2423,265 @@ async function createApp() {
   // 6. SCHOOL PORTAL ENDPOINTS (Strictly School-Scoped, Zero Fleet Control!)
   // ==========================================================================
 
+  async function resolveSchoolPortalContext(
+    req: AuthRequest,
+    res: Response,
+    schoolIdSource?: unknown
+  ): Promise<{ schoolId: number; school: typeof schools.$inferSelect; allSchools: Array<typeof schools.$inferSelect> } | null> {
+    const dbUser = req.dbUser!;
+    const allSchools = await db.select().from(schools).orderBy(schools.id);
+    let requestedSchoolId: number | null = null;
+    if (schoolIdSource !== undefined && schoolIdSource !== null && String(schoolIdSource).trim() !== '') {
+      const parsed = Number(schoolIdSource);
+      if (!Number.isInteger(parsed) || parsed <= 0) {
+        res.status(400).json({ error: 'Parâmetro schoolId inválido.' });
+        return null;
+      }
+      requestedSchoolId = parsed;
+    }
+
+    if (dbUser.primaryRole === 'school_admin') {
+      if (!dbUser.schoolId) {
+        res.status(403).json({ error: 'Conta escolar sem instituição vinculada.' });
+        return null;
+      }
+      if (requestedSchoolId !== null && requestedSchoolId !== dbUser.schoolId) {
+        res.status(403).json({ error: 'Sem permissão para aceder ou gerir recursos de outra escola.' });
+        return null;
+      }
+      const ownSchool = allSchools.find((s) => s.id === dbUser.schoolId);
+      if (!ownSchool) {
+        res.status(404).json({ error: 'Instituição escolar vinculada não encontrada.' });
+        return null;
+      }
+      return { schoolId: ownSchool.id, school: ownSchool, allSchools: [ownSchool] };
+    }
+
+    const targetSchoolId = requestedSchoolId || dbUser.schoolId || allSchools[0]?.id;
+    const school = allSchools.find((s) => s.id === targetSchoolId) ?? allSchools[0] ?? null;
+    if (!school) {
+      res.status(404).json({ error: 'Instituição escolar não encontrada.' });
+      return null;
+    }
+    return { schoolId: school.id, school, allSchools };
+  }
+
   app.get('/api/v1/school/portal', requireAuth, requireRoles(SCHOOL_PORTAL_ROLES), async (req: AuthRequest, res: Response) => {
     try {
+      const dbStartedAt = Date.now();
+      await db.execute(sql`SELECT 1`);
+      const dbLatencyMs = Date.now() - dbStartedAt;
       await ensureDatabaseSeeded();
       const dbUser = req.dbUser!;
       const allSchools = await db.select().from(schools).orderBy(schools.id);
-      const requestedSchoolId = Number(req.query.schoolId);
+      const rawQuerySchoolId = String(req.query.schoolId ?? '').trim();
+      let requestedSchoolId: number | null = null;
+      if (rawQuerySchoolId) {
+        const parsed = Number(rawQuerySchoolId);
+        if (!Number.isInteger(parsed) || parsed <= 0) {
+          return res.status(400).json({ error: 'Parâmetro schoolId inválido.' });
+        }
+        requestedSchoolId = parsed;
+      }
+
+      if (dbUser.primaryRole === 'school_admin') {
+        if (!dbUser.schoolId) {
+          return res.status(403).json({ error: 'Conta escolar sem instituição vinculada.' });
+        }
+        if (requestedSchoolId !== null && requestedSchoolId !== dbUser.schoolId) {
+          return res.status(403).json({ error: 'Sem permissão para aceder aos dados de outra escola.' });
+        }
+      }
 
       // Strict isolation: school_admin ALWAYS gets ONLY their assigned schoolId
       const targetSchoolId =
         dbUser.primaryRole === 'school_admin'
-          ? dbUser.schoolId ?? allSchools[0]?.id
+          ? dbUser.schoolId
           : requestedSchoolId || dbUser.schoolId || allSchools[0]?.id;
 
-      const school = allSchools.find((s) => s.id === targetSchoolId) ?? allSchools[0] ?? null;
+      const school = allSchools.find((s) => s.id === targetSchoolId) ?? (dbUser.primaryRole === 'school_admin' ? null : allSchools[0] ?? null);
+      const schoolVisibility = getAdminOverviewVisibility('school_admin');
       if (!school) {
-        return res.json({ school: null, contracts: [], students: [], trips: [], attendance: [], changeRequests: [], incidents: [], availableSchools: [] });
+        const emptySummary = computeOverviewSummary({
+          scope: 'school',
+          schoolId: null,
+          visibility: schoolVisibility,
+          dbReachable: true,
+          dbLatencyMs,
+          contracts: [],
+          pendingContractRequestsCount: 0,
+          students: [],
+          vehicles: [],
+          drivers: [],
+          trips: [],
+          incidents: [],
+          invoices: [],
+        });
+        return res.json({
+          school: null,
+          contracts: [],
+          students: [],
+          trips: [],
+          attendance: [],
+          changeRequests: [],
+          incidents: [],
+          drivers: [],
+          vehicles: [],
+          routes: [],
+          routeSchedules: [],
+          availableSchools: [],
+          overviewSummary: emptySummary,
+        });
       }
 
-      const schoolContracts = await db.select().from(contracts).where(eq(contracts.schoolId, school.id));
-      const schoolStudents = await db.select().from(students).where(eq(students.schoolId, school.id)).orderBy(students.id);
-      const schoolTrips = await db.select().from(trips).where(eq(trips.schoolId, school.id)).orderBy(trips.id);
-      const schoolChangeReqs = await db
-        .select()
-        .from(transportChangeRequests)
-        .where(eq(transportChangeRequests.schoolId, school.id))
-        .orderBy(desc(transportChangeRequests.id));
-      const schoolIncidents = await db
-        .select()
-        .from(incidents)
-        .where(eq(incidents.schoolId, school.id))
-        .orderBy(desc(incidents.id));
+      const [
+        schoolContracts,
+        schoolStudents,
+        schoolTrips,
+        schoolChangeReqs,
+        schoolIncidents,
+        allVehicles,
+        allDrivers,
+        driverUserAccounts,
+        allRoutesWithStops,
+        schoolSchedules,
+      ] = await Promise.all([
+        db.select().from(contracts).where(eq(contracts.schoolId, school.id)),
+        db.select().from(students).where(eq(students.schoolId, school.id)).orderBy(students.id),
+        db.select().from(trips).where(eq(trips.schoolId, school.id)).orderBy(trips.id),
+        db
+          .select()
+          .from(transportChangeRequests)
+          .where(eq(transportChangeRequests.schoolId, school.id))
+          .orderBy(desc(transportChangeRequests.id)),
+        db
+          .select()
+          .from(incidents)
+          .where(eq(incidents.schoolId, school.id))
+          .orderBy(desc(incidents.id)),
+        db.select().from(vehicles).orderBy(vehicles.fleetNumber),
+        db.select().from(drivers).orderBy(drivers.id),
+        db
+          .select({
+            id: users.id,
+            driverId: users.driverId,
+            username: users.username,
+            email: users.email,
+            active: users.active,
+          })
+          .from(users)
+          .where(sql`${users.driverId} is not null`),
+        loadRoutesWithStops({ includeInactive: true }),
+        db
+          .select()
+          .from(recurringRouteSchedules)
+          .where(eq(recurringRouteSchedules.schoolId, school.id))
+          .orderBy(recurringRouteSchedules.departureTime),
+      ]);
+
+      const driverById = new Map(allDrivers.map((d) => [d.id, d]));
+      const userByDriverId = new Map(
+        driverUserAccounts
+          .filter((u) => u.driverId != null)
+          .map((u) => [u.driverId!, u])
+      );
+
+      const schoolVehiclesRaw = allVehicles.filter((v) => v.assignedSchoolId === school.id);
+      const schoolRoutes = allRoutesWithStops.filter((r) => r.schoolId === school.id);
+
+      const linkedMobussDriverIds = new Set<number>();
+      for (const v of schoolVehiclesRaw) {
+        if (v.assignedDriverId != null) linkedMobussDriverIds.add(v.assignedDriverId);
+      }
+      for (const t of schoolTrips) {
+        if (t.driverId != null) linkedMobussDriverIds.add(t.driverId);
+      }
+      for (const sch of schoolSchedules) {
+        if (sch.driverId != null) linkedMobussDriverIds.add(sch.driverId);
+      }
+
+      const schoolDriversRaw = allDrivers.filter(
+        (d) =>
+          (d.employerType === 'school' && d.employerSchoolId === school.id) ||
+          (d.employerType === 'mobuss' && linkedMobussDriverIds.has(d.id))
+      );
+
+      const safeSchoolDrivers = schoolDriversRaw.map((d) => {
+        const isSchoolOwned = d.employerType === 'school' && d.employerSchoolId === school.id;
+        const linkedLogin = userByDriverId.get(d.id) ?? null;
+        const assignedVehicle =
+          schoolVehiclesRaw.find((v) => v.assignedDriverId === d.id) ??
+          allVehicles.find((v) => v.assignedDriverId === d.id) ??
+          null;
+        return {
+          id: d.id,
+          fullName: d.fullName,
+          phone: d.phone,
+          licenceCategory: d.licenceCategory,
+          licenceNumber: d.licenceNumber,
+          licenceExpiry: d.licenceExpiry,
+          employerType: d.employerType,
+          employerSchoolId: d.employerSchoolId,
+          verificationStatus: d.verificationStatus,
+          availabilityStatus: d.availabilityStatus,
+          ratingAvg: d.ratingAvg,
+          tripsCompleted: d.tripsCompleted,
+          canManage: isSchoolOwned,
+          isReadOnly: !isSchoolOwned,
+          hasLogin: Boolean(linkedLogin),
+          loginUserId: linkedLogin?.id ?? null,
+          loginUsername: linkedLogin?.username ?? null,
+          loginEmail: linkedLogin?.email ?? null,
+          loginActive: linkedLogin?.active ?? null,
+          assignedVehicleId: assignedVehicle?.id ?? null,
+          assignedVehiclePlate: assignedVehicle?.plate ?? null,
+          assignedVehicleFleetNumber: assignedVehicle?.fleetNumber ?? null,
+          assignedRouteCode: assignedVehicle?.routeCode ?? null,
+        };
+      });
+
+      const safeSchoolVehicles = schoolVehiclesRaw.map((v) => {
+        const canManage = v.ownershipType === 'school_owned' && v.assignedSchoolId === school.id;
+        const assignedDriver = v.assignedDriverId ? driverById.get(v.assignedDriverId) ?? null : null;
+        return {
+          id: v.id,
+          fleetNumber: v.fleetNumber,
+          plate: v.plate,
+          ownershipType: v.ownershipType,
+          assignedSchoolId: v.assignedSchoolId,
+          assignedDriverId: v.assignedDriverId,
+          driverName: assignedDriver?.fullName ?? 'Sem motorista',
+          driverEmployerType: assignedDriver?.employerType ?? null,
+          routeCode: v.routeCode,
+          routeName: v.routeName,
+          capacity: v.capacity,
+          status: v.status,
+          dnvtExpiry: v.dnvtExpiry,
+          dnvtStatus: v.dnvtStatus,
+          insuranceProvider: v.insuranceProvider,
+          insuranceStatus: v.insuranceStatus,
+          verificationStatus: v.verificationStatus,
+          canManage,
+          isReadOnly: !canManage,
+        };
+      });
+
+      const vehicleById = new Map(allVehicles.map((v) => [v.id, v]));
+      const enrichedSchoolSchedules = schoolSchedules.map((sch) => {
+        const veh = sch.vehicleId ? vehicleById.get(sch.vehicleId) : undefined;
+        const drv = sch.driverId
+          ? driverById.get(sch.driverId)
+          : veh?.assignedDriverId
+          ? driverById.get(veh.assignedDriverId)
+          : undefined;
+        return {
+          ...sch,
+          schoolName: school.name,
+          vehicleFleetNumber: veh?.fleetNumber ?? null,
+          vehiclePlate: veh?.plate ?? null,
+          driverName: drv?.fullName ?? 'Sem motorista',
+        };
+      });
 
       const studentIds = new Set(schoolStudents.map((s) => s.id));
       const allEvents = await db.select().from(attendanceEvents).orderBy(desc(attendanceEvents.id)).limit(100);
@@ -1452,6 +2710,22 @@ async function createApp() {
         };
       });
 
+      const overviewSummary = computeOverviewSummary({
+        scope: 'school',
+        schoolId: school.id,
+        visibility: schoolVisibility,
+        dbReachable: true,
+        dbLatencyMs,
+        contracts: schoolContracts,
+        pendingContractRequestsCount: schoolChangeReqs.filter((r) => r.status === 'pending').length,
+        students: schoolStudents,
+        vehicles: schoolVehiclesRaw,
+        drivers: schoolDriversRaw,
+        trips: schoolTrips,
+        incidents: schoolIncidents,
+        invoices: [],
+      });
+
       res.json({
         school,
         availableSchools: dbUser.primaryRole === 'school_admin' ? [school] : allSchools,
@@ -1461,6 +2735,11 @@ async function createApp() {
         attendance: schoolAttendance,
         changeRequests: schoolChangeReqs,
         incidents: schoolIncidents,
+        drivers: safeSchoolDrivers,
+        vehicles: safeSchoolVehicles,
+        routes: schoolRoutes,
+        routeSchedules: enrichedSchoolSchedules,
+        overviewSummary,
       });
     } catch (error) {
       console.error('School portal GET failed:', error);
@@ -1703,13 +2982,1425 @@ async function createApp() {
     }
   });
 
+  // --- School-Scoped Drivers CRUD, Login Provisioning & Password Reset ---
+
+  app.post('/api/v1/school/drivers', requireAuth, requireRoles(SCHOOL_PORTAL_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const ctx = await resolveSchoolPortalContext(req, res, req.body?.schoolId);
+      if (!ctx) return;
+      const actor = req.dbUser!;
+
+      const fullName = String(req.body?.fullName ?? '').trim();
+      const phone = String(req.body?.phone ?? '').trim();
+      const licenceCategory = String(req.body?.licenceCategory ?? 'Pesados Profissional D').trim() || 'Pesados Profissional D';
+      const licenceNumber = String(req.body?.licenceNumber ?? '').trim();
+      const licenceExpiry = String(req.body?.licenceExpiry ?? '2028-12-31').trim() || '2028-12-31';
+
+      if (fullName.length < 2 || phone.length < 6) {
+        return res.status(400).json({ error: 'Nome completo e telefone válidos do motorista são obrigatórios.' });
+      }
+      if (licenceNumber.length < 3) {
+        return res.status(400).json({ error: 'Número da carta de condução obrigatório.' });
+      }
+
+      const inserted = await db
+        .insert(drivers)
+        .values({
+          fullName,
+          phone,
+          licenceCategory,
+          licenceNumber,
+          licenceExpiry,
+          employerType: 'school',
+          employerSchoolId: ctx.schoolId,
+          engagementType: 'employed',
+          verificationStatus: 'verified',
+          availabilityStatus: 'available',
+        })
+        .returning();
+
+      const created = inserted[0]!;
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'school.driver_created',
+        targetEntity: 'drivers',
+        targetId: created.id,
+        summary: `Escola "${ctx.school.name}" registou o motorista ${fullName} (#${created.id}).`,
+        after: {
+          employerType: 'school',
+          employerSchoolId: ctx.schoolId,
+          licenceNumber,
+        },
+      });
+
+      res.status(201).json({
+        driver: created,
+        message: `Motorista ${fullName} registado na frota escolar.`,
+      });
+    } catch (error) {
+      console.error('School create driver failed:', error);
+      res.status(500).json({ error: 'Erro ao registar motorista da escola.' });
+    }
+  });
+
+  app.patch('/api/v1/school/drivers/:id', requireAuth, requireRoles(SCHOOL_PORTAL_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const ctx = await resolveSchoolPortalContext(req, res, req.body?.schoolId);
+      if (!ctx) return;
+      const actor = req.dbUser!;
+
+      const driverId = Number(req.params.id);
+      if (!Number.isInteger(driverId) || driverId <= 0) {
+        return res.status(400).json({ error: 'ID de motorista inválido.' });
+      }
+
+      const existingRows = await db.select().from(drivers).where(eq(drivers.id, driverId)).limit(1);
+      const existing = existingRows[0];
+      if (!existing) {
+        return res.status(404).json({ error: 'Motorista não encontrado.' });
+      }
+      if (existing.employerType !== 'school' || existing.employerSchoolId !== ctx.schoolId) {
+        return res.status(403).json({
+          error: 'Sem permissão: só pode editar motoristas contratados pela sua própria escola.',
+        });
+      }
+
+      const fullName = String(req.body?.fullName ?? existing.fullName).trim();
+      const phone = String(req.body?.phone ?? existing.phone).trim();
+      const licenceCategory = String(req.body?.licenceCategory ?? existing.licenceCategory).trim() || existing.licenceCategory;
+      const licenceNumber = String(req.body?.licenceNumber ?? existing.licenceNumber).trim();
+      const licenceExpiry = String(req.body?.licenceExpiry ?? existing.licenceExpiry).trim() || existing.licenceExpiry;
+      const availabilityStatus = ['in_service', 'available', 'off_duty'].includes(req.body?.availabilityStatus)
+        ? String(req.body.availabilityStatus)
+        : existing.availabilityStatus;
+
+      if (fullName.length < 2 || phone.length < 6 || licenceNumber.length < 3) {
+        return res.status(400).json({ error: 'Nome, telefone e número de carta são obrigatórios.' });
+      }
+
+      const updatedRows = await db
+        .update(drivers)
+        .set({
+          fullName,
+          phone,
+          licenceCategory,
+          licenceNumber,
+          licenceExpiry,
+          availabilityStatus,
+        })
+        .where(eq(drivers.id, driverId))
+        .returning();
+
+      await db
+        .update(users)
+        .set({ fullName, phone, updatedAt: new Date() })
+        .where(eq(users.driverId, driverId));
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'school.driver_updated',
+        targetEntity: 'drivers',
+        targetId: driverId,
+        summary: `Escola "${ctx.school.name}" atualizou os dados do motorista ${fullName} (#${driverId}).`,
+      });
+
+      res.json({
+        driver: updatedRows[0],
+        message: `Dados do motorista ${fullName} atualizados.`,
+      });
+    } catch (error) {
+      console.error('School update driver failed:', error);
+      res.status(500).json({ error: 'Erro ao atualizar motorista da escola.' });
+    }
+  });
+
+  app.patch('/api/v1/school/drivers/:id/status', requireAuth, requireRoles(SCHOOL_PORTAL_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const ctx = await resolveSchoolPortalContext(req, res, req.body?.schoolId);
+      if (!ctx) return;
+      const actor = req.dbUser!;
+
+      const driverId = Number(req.params.id);
+      if (!Number.isInteger(driverId) || driverId <= 0) {
+        return res.status(400).json({ error: 'ID de motorista inválido.' });
+      }
+
+      const existingRows = await db.select().from(drivers).where(eq(drivers.id, driverId)).limit(1);
+      const existing = existingRows[0];
+      if (!existing) {
+        return res.status(404).json({ error: 'Motorista não encontrado.' });
+      }
+      if (existing.employerType !== 'school' || existing.employerSchoolId !== ctx.schoolId) {
+        return res.status(403).json({
+          error: 'Sem permissão: só pode suspender ou reativar motoristas da sua própria escola.',
+        });
+      }
+
+      const wantSuspended =
+        req.body?.status === 'suspended' || req.body?.active === false;
+      const nextVerification = wantSuspended ? 'suspended' : 'verified';
+      const nextAvailability = wantSuspended
+        ? 'off_duty'
+        : existing.availabilityStatus === 'off_duty'
+        ? 'available'
+        : existing.availabilityStatus;
+
+      const updatedRows = await db
+        .update(drivers)
+        .set({
+          verificationStatus: nextVerification,
+          availabilityStatus: nextAvailability,
+        })
+        .where(eq(drivers.id, driverId))
+        .returning();
+
+      const linkedUsers = await db
+        .update(users)
+        .set({ active: !wantSuspended, updatedAt: new Date() })
+        .where(eq(users.driverId, driverId))
+        .returning();
+
+      for (const linked of linkedUsers) {
+        if (!linked.uid.startsWith('pending:') && !linked.uid.startsWith('cred:')) {
+          await adminAuth.updateUser(linked.uid, { disabled: wantSuspended }).catch(() => null);
+        }
+      }
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: wantSuspended ? 'school.driver_suspended' : 'school.driver_reactivated',
+        targetEntity: 'drivers',
+        targetId: driverId,
+        summary: `Escola "${ctx.school.name}" ${wantSuspended ? 'suspendeu' : 'reativou'} o motorista ${existing.fullName} (#${driverId}).`,
+      });
+
+      res.json({
+        driver: updatedRows[0],
+        message: wantSuspended
+          ? `Motorista ${existing.fullName} suspenso.`
+          : `Motorista ${existing.fullName} reativado.`,
+      });
+    } catch (error) {
+      console.error('School driver status toggle failed:', error);
+      res.status(500).json({ error: 'Erro ao alterar estado do motorista.' });
+    }
+  });
+
+  app.post('/api/v1/school/drivers/:id/login', requireAuth, requireRoles(SCHOOL_PORTAL_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const ctx = await resolveSchoolPortalContext(req, res, req.body?.schoolId);
+      if (!ctx) return;
+      const actor = req.dbUser!;
+
+      const driverId = Number(req.params.id);
+      if (!Number.isInteger(driverId) || driverId <= 0) {
+        return res.status(400).json({ error: 'ID de motorista inválido.' });
+      }
+
+      const existingRows = await db.select().from(drivers).where(eq(drivers.id, driverId)).limit(1);
+      const driver = existingRows[0];
+      if (!driver) {
+        return res.status(404).json({ error: 'Motorista não encontrado.' });
+      }
+      if (driver.employerType !== 'school' || driver.employerSchoolId !== ctx.schoolId) {
+        return res.status(403).json({
+          error: 'Sem permissão: só pode criar acessos para motoristas da sua própria escola.',
+        });
+      }
+
+      const rawUsername = String(req.body?.username ?? '').trim().toLowerCase();
+      const password = String(req.body?.password ?? '');
+      if (!/^[a-z0-9._-]{3,40}$/.test(rawUsername)) {
+        return res.status(400).json({
+          error: 'Nome de utilizador inválido (mínimo 3 caracteres: letras minúsculas, números, ponto, hífen ou underscore).',
+        });
+      }
+      if (password.length < 6) {
+        return res.status(400).json({ error: 'A palavra-passe temporária deve ter pelo menos 6 caracteres.' });
+      }
+
+      const existingDriverLogin = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.driverId, driverId))
+        .limit(1);
+      if (existingDriverLogin[0]) {
+        return res.status(409).json({
+          error: 'Este motorista já possui uma conta de acesso. Utilize a reposição de palavra-passe se necessário.',
+        });
+      }
+
+      const rawEmail = String(req.body?.email ?? '').trim().toLowerCase();
+      const email = rawEmail || `${rawUsername}@mobuss.ao`;
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ error: 'E-mail inválido.' });
+      }
+
+      const dupUser = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(or(sql`lower(${users.email}) = ${email}`, sql`lower(${users.username}) = ${rawUsername}`))
+        .limit(1);
+      if (dupUser[0]) {
+        return res.status(409).json({ error: 'Já existe uma conta com este utilizador ou e-mail.' });
+      }
+
+      const { hash, salt } = hashPassword(password);
+      let resolvedUid = `cred:${crypto.randomUUID()}`;
+      try {
+        const fbUser = await adminAuth.createUser({
+          email,
+          password,
+          displayName: driver.fullName,
+          emailVerified: true,
+        });
+        resolvedUid = fbUser.uid;
+      } catch {
+        // Local scrypt credential login works independently
+      }
+
+      const insertedUsers = await db
+        .insert(users)
+        .values({
+          uid: resolvedUid,
+          username: rawUsername,
+          email,
+          fullName: driver.fullName,
+          phone: driver.phone,
+          passwordHash: hash,
+          passwordSalt: salt,
+          primaryRole: 'driver',
+          schoolId: ctx.schoolId,
+          driverId: driver.id,
+          active: driver.verificationStatus !== 'suspended',
+        })
+        .returning();
+
+      const createdUser = toSafeDbUser(insertedUsers[0]!);
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'school.driver_login_created',
+        targetEntity: 'users',
+        targetId: createdUser.id,
+        summary: `Escola "${ctx.school.name}" criou credenciais de motorista (${rawUsername}) para ${driver.fullName}.`,
+      });
+
+      res.status(201).json({
+        user: createdUser,
+        message: `Acesso criado para ${driver.fullName} (utilizador: ${rawUsername}).`,
+      });
+    } catch (error) {
+      console.error('School create driver login failed:', error);
+      res.status(500).json({ error: 'Erro ao criar login de motorista.' });
+    }
+  });
+
+  app.post('/api/v1/school/drivers/:id/reset-password', requireAuth, requireRoles(SCHOOL_PORTAL_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const ctx = await resolveSchoolPortalContext(req, res, req.body?.schoolId);
+      if (!ctx) return;
+      const actor = req.dbUser!;
+
+      const driverId = Number(req.params.id);
+      if (!Number.isInteger(driverId) || driverId <= 0) {
+        return res.status(400).json({ error: 'ID de motorista inválido.' });
+      }
+
+      const existingRows = await db.select().from(drivers).where(eq(drivers.id, driverId)).limit(1);
+      const driver = existingRows[0];
+      if (!driver) {
+        return res.status(404).json({ error: 'Motorista não encontrado.' });
+      }
+      if (driver.employerType !== 'school' || driver.employerSchoolId !== ctx.schoolId) {
+        return res.status(403).json({
+          error: 'Sem permissão: só pode redefinir a palavra-passe de motoristas da sua própria escola.',
+        });
+      }
+
+      const newPassword = String(req.body?.password ?? '');
+      if (newPassword.length < 6) {
+        return res.status(400).json({ error: 'A nova palavra-passe deve ter pelo menos 6 caracteres.' });
+      }
+
+      const userRows = await db.select().from(users).where(eq(users.driverId, driverId)).limit(1);
+      const targetUser = userRows[0];
+      if (!targetUser) {
+        return res.status(404).json({ error: 'Este motorista ainda não tem conta de acesso criada.' });
+      }
+
+      const { hash, salt } = hashPassword(newPassword);
+      const updatedUsers = await db
+        .update(users)
+        .set({ passwordHash: hash, passwordSalt: salt, updatedAt: new Date() })
+        .where(eq(users.id, targetUser.id))
+        .returning();
+
+      if (!targetUser.uid.startsWith('pending:') && !targetUser.uid.startsWith('cred:')) {
+        await adminAuth.updateUser(targetUser.uid, { password: newPassword }).catch(() => null);
+      }
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'school.driver_password_reset',
+        targetEntity: 'users',
+        targetId: targetUser.id,
+        summary: `Escola "${ctx.school.name}" redefiniu a palavra-passe do motorista ${driver.fullName} (${targetUser.username || targetUser.email}).`,
+      });
+
+      res.json({
+        user: toSafeDbUser(updatedUsers[0]!),
+        message: `Palavra-passe redefinida para ${driver.fullName} (${targetUser.username || targetUser.email}).`,
+      });
+    } catch (error) {
+      console.error('School driver password reset failed:', error);
+      res.status(500).json({ error: 'Erro ao redefinir palavra-passe do motorista.' });
+    }
+  });
+
+  // --- School-Scoped Vehicles CRUD, Route Assignment & Route Schedules ---
+
+  app.post('/api/v1/school/vehicles', requireAuth, requireRoles(SCHOOL_PORTAL_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const ctx = await resolveSchoolPortalContext(req, res, req.body?.schoolId);
+      if (!ctx) return;
+      const actor = req.dbUser!;
+
+      const plate = String(req.body?.plate ?? '').trim().toUpperCase();
+      if (plate.length < 4) {
+        return res.status(400).json({ error: 'Matrícula da viatura obrigatória.' });
+      }
+
+      let fleetNumber = req.body?.fleetNumber ? Number(req.body.fleetNumber) : NaN;
+      if (!Number.isInteger(fleetNumber) || fleetNumber <= 0) {
+        const existingVehicles = await db.select({ fleetNumber: vehicles.fleetNumber }).from(vehicles);
+        const maxFleet = existingVehicles.reduce((max, item) => Math.max(max, item.fleetNumber), 0);
+        fleetNumber = maxFleet + 1;
+      }
+
+      const capacity = Math.max(8, Number(req.body?.capacity) || 22);
+      const dnvtExpiry = String(req.body?.dnvtExpiry ?? '2027-12-31').trim() || '2027-12-31';
+      const dnvtStatus = ['valid', 'expiring_soon', 'expired'].includes(req.body?.dnvtStatus)
+        ? String(req.body.dnvtStatus)
+        : 'valid';
+      const insuranceProvider = String(req.body?.insuranceProvider ?? 'ENSA Seguros de Angola').trim() || 'ENSA Seguros de Angola';
+      const insuranceStatus = ['valid', 'expired', 'pending'].includes(req.body?.insuranceStatus)
+        ? String(req.body.insuranceStatus)
+        : 'valid';
+
+      const assignedDriverId =
+        req.body?.assignedDriverId !== undefined && req.body?.assignedDriverId !== null && req.body?.assignedDriverId !== ''
+          ? Number(req.body.assignedDriverId)
+          : null;
+
+      if (assignedDriverId !== null) {
+        if (!Number.isInteger(assignedDriverId) || assignedDriverId <= 0) {
+          return res.status(400).json({ error: 'Motorista selecionado inválido.' });
+        }
+        const dRows = await db.select().from(drivers).where(eq(drivers.id, assignedDriverId)).limit(1);
+        const drv = dRows[0];
+        if (!drv) {
+          return res.status(404).json({ error: 'Motorista não encontrado.' });
+        }
+        if (drv.employerType !== 'school' || drv.employerSchoolId !== ctx.schoolId) {
+          return res.status(403).json({
+            error: 'Sem permissão: só pode alocar motoristas contratados pela sua escola.',
+          });
+        }
+        if (drv.verificationStatus === 'suspended') {
+          return res.status(400).json({ error: 'Não é possível alocar um motorista suspenso.' });
+        }
+      }
+
+      const rawRouteCode = req.body?.routeCode ? String(req.body.routeCode).trim().toUpperCase() : '';
+      let routeCode: string | null = null;
+      let routeName: string | null = null;
+      if (rawRouteCode && rawRouteCode !== 'RESERVA') {
+        const matchedRoute = await getRouteWithStopsByCode(rawRouteCode, { includeInactive: true });
+        if (!matchedRoute) {
+          return res.status(404).json({ error: `Rota "${rawRouteCode}" não encontrada.` });
+        }
+        if (matchedRoute.schoolId !== ctx.schoolId) {
+          return res.status(403).json({
+            error: 'Sem permissão: a escola só pode atribuir viaturas às suas próprias rotas.',
+          });
+        }
+        routeCode = matchedRoute.code;
+        routeName = matchedRoute.name;
+      } else if (rawRouteCode === 'RESERVA') {
+        routeCode = 'RESERVA';
+        routeName = 'Viatura de Reserva Escolar';
+      }
+
+      const dup = await db
+        .select({ id: vehicles.id })
+        .from(vehicles)
+        .where(or(eq(vehicles.fleetNumber, fleetNumber), eq(vehicles.plate, plate)))
+        .limit(1);
+      if (dup[0]) {
+        return res.status(409).json({ error: 'Já existe uma viatura com este número de frota ou matrícula.' });
+      }
+
+      const inserted = await db
+        .insert(vehicles)
+        .values({
+          fleetNumber,
+          plate,
+          ownershipType: 'school_owned',
+          ownerId: null,
+          assignedSchoolId: ctx.schoolId,
+          assignedDriverId,
+          routeCode,
+          routeName,
+          capacity,
+          status: assignedDriverId ? 'assigned' : 'available',
+          fuelPercent: 90,
+          dnvtExpiry,
+          dnvtStatus,
+          insuranceProvider,
+          insuranceStatus,
+          verificationStatus: 'verified',
+        })
+        .returning();
+
+      const created = inserted[0]!;
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'school.vehicle_created',
+        targetEntity: 'vehicles',
+        targetId: created.id,
+        summary: `Escola "${ctx.school.name}" registou viatura própria Autocarro ${fleetNumber} (${plate}).`,
+      });
+
+      res.status(201).json({
+        vehicle: created,
+        message: `Viatura Autocarro ${fleetNumber} (${plate}) registada na frota escolar.`,
+      });
+    } catch (error) {
+      console.error('School create vehicle failed:', error);
+      res.status(500).json({ error: 'Erro ao registar viatura da escola.' });
+    }
+  });
+
+  app.patch('/api/v1/school/vehicles/:id', requireAuth, requireRoles(SCHOOL_PORTAL_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const ctx = await resolveSchoolPortalContext(req, res, req.body?.schoolId);
+      if (!ctx) return;
+      const actor = req.dbUser!;
+
+      const vehicleId = Number(req.params.id);
+      if (!Number.isInteger(vehicleId) || vehicleId <= 0) {
+        return res.status(400).json({ error: 'ID de viatura inválido.' });
+      }
+
+      const existingRows = await db.select().from(vehicles).where(eq(vehicles.id, vehicleId)).limit(1);
+      const existing = existingRows[0];
+      if (!existing) {
+        return res.status(404).json({ error: 'Viatura não encontrada.' });
+      }
+      if (existing.ownershipType !== 'school_owned' || existing.assignedSchoolId !== ctx.schoolId) {
+        return res.status(403).json({
+          error: 'Sem permissão: só pode editar viaturas de propriedade da sua própria escola.',
+        });
+      }
+
+      const plate = String(req.body?.plate ?? existing.plate).trim().toUpperCase();
+      if (plate.length < 4) {
+        return res.status(400).json({ error: 'Matrícula inválida.' });
+      }
+      if (plate !== existing.plate) {
+        const dup = await db
+          .select({ id: vehicles.id })
+          .from(vehicles)
+          .where(and(eq(vehicles.plate, plate), sql`${vehicles.id} <> ${vehicleId}`))
+          .limit(1);
+        if (dup[0]) {
+          return res.status(409).json({ error: 'Já existe outra viatura com esta matrícula.' });
+        }
+      }
+
+      const capacity = Math.max(8, Number(req.body?.capacity ?? existing.capacity) || existing.capacity);
+      const dnvtExpiry = String(req.body?.dnvtExpiry ?? existing.dnvtExpiry).trim() || existing.dnvtExpiry;
+      const dnvtStatus = ['valid', 'expiring_soon', 'expired'].includes(req.body?.dnvtStatus)
+        ? String(req.body.dnvtStatus)
+        : existing.dnvtStatus;
+      const insuranceProvider = String(req.body?.insuranceProvider ?? existing.insuranceProvider).trim() || existing.insuranceProvider;
+      const insuranceStatus = ['valid', 'expired', 'pending'].includes(req.body?.insuranceStatus)
+        ? String(req.body.insuranceStatus)
+        : existing.insuranceStatus;
+
+      const assignedDriverId =
+        req.body?.assignedDriverId === undefined
+          ? existing.assignedDriverId
+          : req.body.assignedDriverId === null || req.body.assignedDriverId === ''
+          ? null
+          : Number(req.body.assignedDriverId);
+
+      if (assignedDriverId !== null) {
+        const dRows = await db.select().from(drivers).where(eq(drivers.id, assignedDriverId)).limit(1);
+        const drv = dRows[0];
+        if (!drv) {
+          return res.status(404).json({ error: 'Motorista selecionado não encontrado.' });
+        }
+        if (drv.employerType !== 'school' || drv.employerSchoolId !== ctx.schoolId) {
+          return res.status(403).json({
+            error: 'Sem permissão: só pode alocar motoristas da sua própria escola.',
+          });
+        }
+        if (drv.verificationStatus === 'suspended') {
+          return res.status(400).json({ error: 'Não é possível alocar um motorista suspenso.' });
+        }
+      }
+
+      let routeCode = existing.routeCode;
+      let routeName = existing.routeName;
+      if (req.body?.routeCode !== undefined) {
+        const rawRouteCode = req.body.routeCode ? String(req.body.routeCode).trim().toUpperCase() : '';
+        if (!rawRouteCode) {
+          routeCode = null;
+          routeName = null;
+        } else if (rawRouteCode === 'RESERVA') {
+          routeCode = 'RESERVA';
+          routeName = 'Viatura de Reserva Escolar';
+        } else {
+          const matchedRoute = await getRouteWithStopsByCode(rawRouteCode, { includeInactive: true });
+          if (!matchedRoute) {
+            return res.status(404).json({ error: `Rota "${rawRouteCode}" não encontrada.` });
+          }
+          if (matchedRoute.schoolId !== ctx.schoolId) {
+            return res.status(403).json({
+              error: 'Sem permissão: a escola só pode atribuir viaturas às suas próprias rotas.',
+            });
+          }
+          routeCode = matchedRoute.code;
+          routeName = matchedRoute.name;
+        }
+      }
+
+      const updatedRows = await db
+        .update(vehicles)
+        .set({
+          plate,
+          capacity,
+          dnvtExpiry,
+          dnvtStatus,
+          insuranceProvider,
+          insuranceStatus,
+          assignedDriverId,
+          routeCode,
+          routeName,
+          status:
+            existing.status === 'suspended'
+              ? 'suspended'
+              : assignedDriverId && existing.status === 'available'
+              ? 'assigned'
+              : !assignedDriverId && existing.status === 'assigned'
+              ? 'available'
+              : existing.status,
+        })
+        .where(eq(vehicles.id, vehicleId))
+        .returning();
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'school.vehicle_updated',
+        targetEntity: 'vehicles',
+        targetId: vehicleId,
+        summary: `Escola "${ctx.school.name}" atualizou a viatura Autocarro ${existing.fleetNumber} (${plate}).`,
+      });
+
+      res.json({
+        vehicle: updatedRows[0],
+        message: `Viatura ${plate} atualizada.`,
+      });
+    } catch (error) {
+      console.error('School update vehicle failed:', error);
+      res.status(500).json({ error: 'Erro ao atualizar viatura da escola.' });
+    }
+  });
+
+  app.patch('/api/v1/school/vehicles/:id/status', requireAuth, requireRoles(SCHOOL_PORTAL_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const ctx = await resolveSchoolPortalContext(req, res, req.body?.schoolId);
+      if (!ctx) return;
+      const actor = req.dbUser!;
+
+      const vehicleId = Number(req.params.id);
+      if (!Number.isInteger(vehicleId) || vehicleId <= 0) {
+        return res.status(400).json({ error: 'ID de viatura inválido.' });
+      }
+
+      const existingRows = await db.select().from(vehicles).where(eq(vehicles.id, vehicleId)).limit(1);
+      const existing = existingRows[0];
+      if (!existing) {
+        return res.status(404).json({ error: 'Viatura não encontrada.' });
+      }
+      if (existing.ownershipType !== 'school_owned' || existing.assignedSchoolId !== ctx.schoolId) {
+        return res.status(403).json({
+          error: 'Sem permissão: só pode suspender ou reativar viaturas da sua própria escola.',
+        });
+      }
+
+      const wantSuspended = req.body?.status === 'suspended' || req.body?.active === false;
+      const nextStatus = wantSuspended
+        ? 'suspended'
+        : existing.assignedDriverId
+        ? 'assigned'
+        : 'available';
+
+      const updatedRows = await db
+        .update(vehicles)
+        .set({ status: nextStatus })
+        .where(eq(vehicles.id, vehicleId))
+        .returning();
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: wantSuspended ? 'school.vehicle_suspended' : 'school.vehicle_reactivated',
+        targetEntity: 'vehicles',
+        targetId: vehicleId,
+        summary: `Escola "${ctx.school.name}" ${wantSuspended ? 'suspendeu' : 'reativou'} a viatura Autocarro ${existing.fleetNumber} (${existing.plate}).`,
+      });
+
+      res.json({
+        vehicle: updatedRows[0],
+        message: wantSuspended
+          ? `Viatura ${existing.plate} suspensa.`
+          : `Viatura ${existing.plate} reativada.`,
+      });
+    } catch (error) {
+      console.error('School vehicle status toggle failed:', error);
+      res.status(500).json({ error: 'Erro ao alterar estado da viatura.' });
+    }
+  });
+
+  app.post('/api/v1/school/routes/:id/assign', requireAuth, requireRoles(SCHOOL_PORTAL_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const ctx = await resolveSchoolPortalContext(req, res, req.body?.schoolId);
+      if (!ctx) return;
+      const actor = req.dbUser!;
+
+      const routeId = Number(req.params.id);
+      if (!Number.isInteger(routeId) || routeId <= 0) {
+        return res.status(400).json({ error: 'ID de rota inválido.' });
+      }
+
+      const route = await getRouteWithStopsById(routeId);
+      if (!route) {
+        return res.status(404).json({ error: 'Rota não encontrada.' });
+      }
+      if (route.schoolId !== ctx.schoolId) {
+        return res.status(403).json({
+          error: 'Sem permissão: só pode atribuir motoristas e viaturas às rotas da sua própria escola.',
+        });
+      }
+
+      const vehicleId = Number(req.body?.vehicleId);
+      if (!Number.isInteger(vehicleId) || vehicleId <= 0) {
+        return res.status(400).json({ error: 'Selecione uma viatura da escola válida.' });
+      }
+      const vRows = await db.select().from(vehicles).where(eq(vehicles.id, vehicleId)).limit(1);
+      const vehicle = vRows[0];
+      if (!vehicle) {
+        return res.status(404).json({ error: 'Viatura não encontrada.' });
+      }
+      if (vehicle.ownershipType !== 'school_owned' || vehicle.assignedSchoolId !== ctx.schoolId) {
+        return res.status(403).json({
+          error: 'Sem permissão: só pode alocar viaturas próprias da sua escola.',
+        });
+      }
+      if (vehicle.status === 'suspended' || vehicle.verificationStatus !== 'verified' || vehicle.dnvtStatus === 'expired') {
+        return res.status(400).json({
+          error: 'Viatura inelegível: suspensa ou com DNVT expirada.',
+        });
+      }
+
+      let resolvedDriverId = vehicle.assignedDriverId;
+      let driverName = 'Sem motorista';
+      if (req.body?.driverId !== undefined) {
+        if (req.body.driverId === null || req.body.driverId === '') {
+          resolvedDriverId = null;
+        } else {
+          const parsedDriverId = Number(req.body.driverId);
+          const dRows = await db.select().from(drivers).where(eq(drivers.id, parsedDriverId)).limit(1);
+          const drv = dRows[0];
+          if (!drv) {
+            return res.status(404).json({ error: 'Motorista não encontrado.' });
+          }
+          if (drv.employerType !== 'school' || drv.employerSchoolId !== ctx.schoolId) {
+            return res.status(403).json({
+              error: 'Sem permissão: só pode alocar motoristas da sua própria escola.',
+            });
+          }
+          if (drv.verificationStatus === 'suspended') {
+            return res.status(400).json({ error: 'Motorista suspenso não pode ser alocado.' });
+          }
+          resolvedDriverId = drv.id;
+          driverName = drv.fullName;
+        }
+      } else if (resolvedDriverId) {
+        const dRows = await db.select().from(drivers).where(eq(drivers.id, resolvedDriverId)).limit(1);
+        driverName = dRows[0]?.fullName ?? 'Sem motorista';
+      }
+
+      const updatedRows = await db
+        .update(vehicles)
+        .set({
+          routeCode: route.code,
+          routeName: route.name,
+          assignedDriverId: resolvedDriverId,
+          status: resolvedDriverId ? 'assigned' : 'available',
+        })
+        .where(eq(vehicles.id, vehicle.id))
+        .returning();
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'school.route_assigned',
+        targetEntity: 'routes',
+        targetId: route.id,
+        summary: `Escola "${ctx.school.name}" atribuiu Autocarro ${vehicle.fleetNumber} (${vehicle.plate}) e motorista (${driverName}) à rota ${route.code}.`,
+      });
+
+      res.json({
+        vehicle: updatedRows[0],
+        route,
+        message: `Autocarro ${vehicle.fleetNumber} atribuído à rota ${route.code}.`,
+      });
+    } catch (error) {
+      console.error('School route assign failed:', error);
+      res.status(500).json({ error: 'Erro ao atribuir viatura e motorista à rota da escola.' });
+    }
+  });
+
+  app.post('/api/v1/school/route-schedules', requireAuth, requireRoles(SCHOOL_PORTAL_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const ctx = await resolveSchoolPortalContext(req, res, req.body?.schoolId);
+      if (!ctx) return;
+      const actor = req.dbUser!;
+
+      const vehicleId =
+        req.body?.vehicleId !== undefined && req.body?.vehicleId !== null && req.body?.vehicleId !== ''
+          ? Number(req.body.vehicleId)
+          : null;
+      let driverId =
+        req.body?.driverId !== undefined && req.body?.driverId !== null && req.body?.driverId !== ''
+          ? Number(req.body.driverId)
+          : null;
+      const routeCode = String(req.body?.routeCode ?? '').trim().toUpperCase();
+      const shiftType = req.body?.shiftType === 'afternoon' ? 'afternoon' : 'morning';
+      const departureTime = String(req.body?.departureTime ?? '').trim();
+      const arrivalTime = String(req.body?.arrivalTime ?? '').trim();
+      const days = normalizeDaysList(req.body?.daysOfWeek ?? 'mon,tue,wed,thu,fri');
+      const active = req.body?.active !== undefined ? Boolean(req.body.active) : true;
+      const notes = req.body?.notes ? String(req.body.notes).trim() : null;
+
+      if (!routeCode) {
+        return res.status(400).json({ error: 'Código da rota é obrigatório.' });
+      }
+      if (!TIME_HHMM_RE.test(departureTime) || !TIME_HHMM_RE.test(arrivalTime) || arrivalTime <= departureTime) {
+        return res.status(400).json({ error: 'Horário inválido (HH:MM, chegada posterior à partida).' });
+      }
+      if (days.length === 0) {
+        return res.status(400).json({ error: 'Selecione pelo menos um dia da semana.' });
+      }
+
+      const route = await getRouteWithStopsByCode(routeCode, { includeInactive: true });
+      if (!route) {
+        return res.status(404).json({ error: `Rota "${routeCode}" não encontrada.` });
+      }
+      if (route.schoolId !== ctx.schoolId) {
+        return res.status(403).json({
+          error: 'Sem permissão: só pode criar escalas para rotas da sua própria escola.',
+        });
+      }
+
+      if (vehicleId !== null) {
+        const vRows = await db.select().from(vehicles).where(eq(vehicles.id, vehicleId)).limit(1);
+        const vehicle = vRows[0];
+        if (!vehicle) {
+          return res.status(404).json({ error: 'Viatura não encontrada.' });
+        }
+        if (vehicle.ownershipType !== 'school_owned' || vehicle.assignedSchoolId !== ctx.schoolId) {
+          return res.status(403).json({
+            error: 'Sem permissão: só pode escalar viaturas próprias da sua escola.',
+          });
+        }
+        if (vehicle.status === 'suspended' || vehicle.verificationStatus !== 'verified' || vehicle.dnvtStatus === 'expired') {
+          return res.status(400).json({ error: 'Viatura inelegível (suspensa ou DNVT expirada).' });
+        }
+        if (!driverId && vehicle.assignedDriverId) {
+          driverId = vehicle.assignedDriverId;
+        }
+        if (active) {
+          const conflict = await findVehicleScheduleOverlap({
+            vehicleId,
+            days,
+            departureTime,
+            arrivalTime,
+          });
+          if (conflict) {
+            return res.status(409).json({
+              error: `Conflito de horário: o Autocarro ${vehicle.fleetNumber} (${vehicle.plate}) já possui uma escala ativa (${conflict.routeCode} · ${conflict.departureTime}–${conflict.arrivalTime}).`,
+            });
+          }
+        }
+      }
+
+      if (driverId !== null) {
+        const dRows = await db.select().from(drivers).where(eq(drivers.id, driverId)).limit(1);
+        const drv = dRows[0];
+        if (!drv) {
+          return res.status(404).json({ error: 'Motorista não encontrado.' });
+        }
+        if (drv.employerType !== 'school' || drv.employerSchoolId !== ctx.schoolId) {
+          return res.status(403).json({
+            error: 'Sem permissão: só pode escalar motoristas da sua própria escola.',
+          });
+        }
+        if (drv.verificationStatus === 'suspended') {
+          return res.status(400).json({ error: 'Motorista suspenso não pode ser escalado.' });
+        }
+      }
+
+      const inserted = await db
+        .insert(recurringRouteSchedules)
+        .values({
+          schoolId: ctx.schoolId,
+          vehicleId,
+          driverId,
+          routeCode: route.code,
+          routeName: route.name,
+          daysOfWeek: days.join(','),
+          shiftType,
+          departureTime,
+          arrivalTime,
+          active,
+          notes,
+          createdByUid: actor.uid,
+        })
+        .returning();
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'school.route_schedule_created',
+        targetEntity: 'recurring_route_schedules',
+        targetId: inserted[0]!.id,
+        summary: `Escola "${ctx.school.name}" criou escala recorrente ${route.code} (${departureTime}–${arrivalTime}).`,
+      });
+
+      res.status(201).json({
+        schedule: inserted[0],
+        message: `Escala ${route.code} (${departureTime}–${arrivalTime}) criada com sucesso.`,
+      });
+    } catch (error) {
+      console.error('School create route schedule failed:', error);
+      res.status(500).json({ error: 'Erro ao criar escala da escola.' });
+    }
+  });
+
+  app.patch('/api/v1/school/route-schedules/:id', requireAuth, requireRoles(SCHOOL_PORTAL_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const ctx = await resolveSchoolPortalContext(req, res, req.body?.schoolId);
+      if (!ctx) return;
+      const actor = req.dbUser!;
+
+      const scheduleId = Number(req.params.id);
+      if (!Number.isInteger(scheduleId) || scheduleId <= 0) {
+        return res.status(400).json({ error: 'ID de escala inválido.' });
+      }
+
+      const existingRows = await db
+        .select()
+        .from(recurringRouteSchedules)
+        .where(eq(recurringRouteSchedules.id, scheduleId))
+        .limit(1);
+      const existing = existingRows[0];
+      if (!existing) {
+        return res.status(404).json({ error: 'Escala não encontrada.' });
+      }
+      if (existing.schoolId !== ctx.schoolId) {
+        return res.status(403).json({
+          error: 'Sem permissão: esta escala pertence a outra escola.',
+        });
+      }
+
+      const vehicleId =
+        req.body?.vehicleId === undefined
+          ? existing.vehicleId
+          : req.body.vehicleId === null || req.body.vehicleId === ''
+          ? null
+          : Number(req.body.vehicleId);
+      let driverId =
+        req.body?.driverId === undefined
+          ? existing.driverId
+          : req.body.driverId === null || req.body.driverId === ''
+          ? null
+          : Number(req.body.driverId);
+      const routeCode = String(req.body?.routeCode ?? existing.routeCode).trim().toUpperCase();
+      const shiftType = req.body?.shiftType
+        ? req.body.shiftType === 'afternoon'
+          ? 'afternoon'
+          : 'morning'
+        : existing.shiftType;
+      const departureTime = String(req.body?.departureTime ?? existing.departureTime).trim();
+      const arrivalTime = String(req.body?.arrivalTime ?? existing.arrivalTime).trim();
+      const days =
+        req.body?.daysOfWeek !== undefined
+          ? normalizeDaysList(req.body.daysOfWeek)
+          : normalizeDaysList(existing.daysOfWeek);
+      const active = req.body?.active !== undefined ? Boolean(req.body.active) : existing.active;
+      const notes =
+        req.body?.notes !== undefined ? (req.body.notes ? String(req.body.notes).trim() : null) : existing.notes;
+
+      if (!TIME_HHMM_RE.test(departureTime) || !TIME_HHMM_RE.test(arrivalTime) || arrivalTime <= departureTime) {
+        return res.status(400).json({ error: 'Horário inválido (HH:MM, chegada posterior à partida).' });
+      }
+      if (days.length === 0) {
+        return res.status(400).json({ error: 'Selecione pelo menos um dia da semana.' });
+      }
+
+      const route = await getRouteWithStopsByCode(routeCode, { includeInactive: true });
+      if (!route) {
+        return res.status(404).json({ error: `Rota "${routeCode}" não encontrada.` });
+      }
+      if (route.schoolId !== ctx.schoolId) {
+        return res.status(403).json({
+          error: 'Sem permissão: só pode associar rotas da sua própria escola.',
+        });
+      }
+
+      if (vehicleId !== null) {
+        const vRows = await db.select().from(vehicles).where(eq(vehicles.id, vehicleId)).limit(1);
+        const vehicle = vRows[0];
+        if (!vehicle) {
+          return res.status(404).json({ error: 'Viatura não encontrada.' });
+        }
+        if (vehicle.ownershipType !== 'school_owned' || vehicle.assignedSchoolId !== ctx.schoolId) {
+          return res.status(403).json({
+            error: 'Sem permissão: só pode escalar viaturas próprias da sua escola.',
+          });
+        }
+        if (vehicle.status === 'suspended' || vehicle.verificationStatus !== 'verified' || vehicle.dnvtStatus === 'expired') {
+          return res.status(400).json({ error: 'Viatura inelegível (suspensa ou DNVT expirada).' });
+        }
+        if (driverId === null && vehicle.assignedDriverId && req.body?.driverId === undefined) {
+          driverId = vehicle.assignedDriverId;
+        }
+        if (active) {
+          const conflict = await findVehicleScheduleOverlap({
+            vehicleId,
+            days,
+            departureTime,
+            arrivalTime,
+            excludeScheduleId: scheduleId,
+          });
+          if (conflict) {
+            return res.status(409).json({
+              error: `Conflito de horário: o Autocarro ${vehicle.fleetNumber} (${vehicle.plate}) já possui escala ativa (${conflict.routeCode} · ${conflict.departureTime}–${conflict.arrivalTime}).`,
+            });
+          }
+        }
+      }
+
+      if (driverId !== null) {
+        const dRows = await db.select().from(drivers).where(eq(drivers.id, driverId)).limit(1);
+        const drv = dRows[0];
+        if (!drv) {
+          return res.status(404).json({ error: 'Motorista não encontrado.' });
+        }
+        if (drv.employerType !== 'school' || drv.employerSchoolId !== ctx.schoolId) {
+          return res.status(403).json({
+            error: 'Sem permissão: só pode escalar motoristas da sua própria escola.',
+          });
+        }
+        if (drv.verificationStatus === 'suspended') {
+          return res.status(400).json({ error: 'Motorista suspenso não pode ser escalado.' });
+        }
+      }
+
+      const updated = await db
+        .update(recurringRouteSchedules)
+        .set({
+          vehicleId,
+          driverId,
+          routeCode: route.code,
+          routeName: route.name,
+          daysOfWeek: days.join(','),
+          shiftType,
+          departureTime,
+          arrivalTime,
+          active,
+          notes,
+          updatedAt: new Date(),
+        })
+        .where(eq(recurringRouteSchedules.id, scheduleId))
+        .returning();
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'school.route_schedule_updated',
+        targetEntity: 'recurring_route_schedules',
+        targetId: scheduleId,
+        summary: `Escola "${ctx.school.name}" atualizou escala #${scheduleId} (${route.code} · ${departureTime}–${arrivalTime}).`,
+      });
+
+      res.json({
+        schedule: updated[0],
+        message: `Escala ${route.code} (${departureTime}–${arrivalTime}) atualizada.`,
+      });
+    } catch (error) {
+      console.error('School update route schedule failed:', error);
+      res.status(500).json({ error: 'Erro ao atualizar escala da escola.' });
+    }
+  });
+
+  function sendCsvResponse(res: Response, filename: string, csvContent: string) {
+    const buffer = Buffer.from(csvContent, 'utf-8');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Length', String(buffer.length));
+    res.send(buffer);
+  }
+
+  async function resolveSchoolReportTarget(
+    req: AuthRequest,
+    res: Response
+  ): Promise<{ schoolId: number; schoolName: string } | null> {
+    const dbUser = req.dbUser!;
+    const allSchools = await db.select().from(schools).orderBy(schools.id);
+    const rawSchoolId = String(req.query.schoolId ?? '').trim();
+    let requestedSchoolId: number | null = null;
+    if (rawSchoolId) {
+      const parsed = Number(rawSchoolId);
+      if (!Number.isInteger(parsed) || parsed <= 0) {
+        res.status(400).json({ error: 'Parâmetro "schoolId" inválido.' });
+        return null;
+      }
+      requestedSchoolId = parsed;
+    }
+
+    if (dbUser.primaryRole === 'school_admin') {
+      if (!dbUser.schoolId) {
+        res.status(403).json({ error: 'Conta escolar sem instituição vinculada.' });
+        return null;
+      }
+      if (requestedSchoolId && requestedSchoolId !== dbUser.schoolId) {
+        res.status(403).json({ error: 'Não está autorizado a exportar relatórios de outra escola.' });
+        return null;
+      }
+      const ownSchool = allSchools.find((s) => s.id === dbUser.schoolId);
+      if (!ownSchool) {
+        res.status(404).json({ error: 'Escola vinculada não encontrada.' });
+        return null;
+      }
+      return { schoolId: ownSchool.id, schoolName: ownSchool.name };
+    }
+
+    const targetId = requestedSchoolId || dbUser.schoolId || allSchools[0]?.id;
+    const school = allSchools.find((s) => s.id === targetId);
+    if (!school) {
+      res.status(404).json({ error: 'Escola não encontrada.' });
+      return null;
+    }
+    return { schoolId: school.id, schoolName: school.name };
+  }
+
+  async function buildTripsReportCsv(params: {
+    schoolId: number | null;
+    fromStr: string | null;
+    toStr: string | null;
+  }): Promise<{ csv: string; rowCount: number }> {
+    const [allTrips, allSchools, allDrivers, allVehicles] = await Promise.all([
+      db.select().from(trips).orderBy(desc(trips.serviceDate), desc(trips.id)),
+      db.select().from(schools),
+      db.select().from(drivers),
+      db.select().from(vehicles),
+    ]);
+
+    const schoolById = new Map(allSchools.map((s) => [s.id, s]));
+    const driverById = new Map(allDrivers.map((d) => [d.id, d]));
+    const vehicleById = new Map(allVehicles.map((v) => [v.id, v]));
+
+    const filtered = allTrips.filter((t) => {
+      if (params.schoolId && t.schoolId !== params.schoolId) return false;
+      if (params.fromStr && t.serviceDate < params.fromStr) return false;
+      if (params.toStr && t.serviceDate > params.toStr) return false;
+      return true;
+    });
+
+    const headers = [
+      'Código da Viagem',
+      'Data do Serviço',
+      'Escola',
+      'Código da Rota',
+      'Nome da Rota',
+      'Turno',
+      'Motorista',
+      'Viatura (Matrícula)',
+      'Nº Frota',
+      'Estado',
+      'Estado GPS',
+      'Motivo do Atraso',
+      'Nota do Atraso',
+      'Atraso Reportado em',
+      'Inspeção Anti-Esquecimento',
+    ];
+
+    const rows: CsvCellValue[][] = filtered.map((t) => {
+      const sc = t.schoolId ? schoolById.get(t.schoolId) : null;
+      const dr = t.driverId ? driverById.get(t.driverId) : null;
+      const vh = t.vehicleId ? vehicleById.get(t.vehicleId) : null;
+      return [
+        t.tripCode,
+        t.serviceDate,
+        sc?.name ?? '—',
+        t.routeCode,
+        t.routeName,
+        translateShiftPt(t.legType),
+        dr?.fullName ?? 'Não atribuído',
+        vh?.plate ?? '—',
+        vh ? String(vh.fleetNumber) : '—',
+        translateTripStatePt(t.state),
+        t.gpsStatus === 'live' ? 'Ao vivo' : t.gpsStatus === 'stale' ? 'Desatualizado' : 'Indisponível',
+        t.delayReason ?? '—',
+        t.delayNote ?? '—',
+        t.delayReportedAt ? formatLuandaDateTime(t.delayReportedAt) : '—',
+        t.emptyBusSweepVerified ? 'Confirmada' : 'Pendente',
+      ];
+    });
+
+    return { csv: buildCsvWithBom(headers, rows), rowCount: rows.length };
+  }
+
+  async function buildAttendanceReportCsv(params: {
+    schoolId: number | null;
+    fromDate: Date | null;
+    toDate: Date | null;
+  }): Promise<{ csv: string; rowCount: number }> {
+    const [allEvents, allStudents, allSchools, allTrips] = await Promise.all([
+      db.select().from(attendanceEvents).orderBy(desc(attendanceEvents.occurredAt), desc(attendanceEvents.id)),
+      db.select().from(students),
+      db.select().from(schools),
+      db.select().from(trips),
+    ]);
+
+    const studentById = new Map(allStudents.map((s) => [s.id, s]));
+    const schoolById = new Map(allSchools.map((s) => [s.id, s]));
+    const tripById = new Map(allTrips.map((t) => [t.id, t]));
+
+    type DayBucket = {
+      dayKey: string;
+      student: typeof students.$inferSelect;
+      schoolName: string;
+      tripCodes: Set<string>;
+      boardingLogs: string[];
+      dropoffLogs: string[];
+      otherLogs: string[];
+      notes: Set<string>;
+      totalEvents: number;
+    };
+
+    const buckets = new Map<string, DayBucket>();
+
+    for (const ev of allEvents) {
+      const st = studentById.get(ev.studentId);
+      if (!st) continue;
+      if (params.schoolId && st.schoolId !== params.schoolId) continue;
+      if (!isWithinDateRange(ev.occurredAt, params.fromDate, params.toDate)) continue;
+
+      const dayKey = getLuandaDayKey(ev.occurredAt);
+      const key = `${st.id}::${dayKey}`;
+      let bucket = buckets.get(key);
+      if (!bucket) {
+        bucket = {
+          dayKey,
+          student: st,
+          schoolName: schoolById.get(st.schoolId)?.name ?? '—',
+          tripCodes: new Set<string>(),
+          boardingLogs: [],
+          dropoffLogs: [],
+          otherLogs: [],
+          notes: new Set<string>(),
+          totalEvents: 0,
+        };
+        buckets.set(key, bucket);
+      }
+
+      bucket.totalEvents += 1;
+      const trip = ev.tripId ? tripById.get(ev.tripId) : null;
+      if (trip?.tripCode) bucket.tripCodes.add(trip.tripCode);
+      if (ev.notes && ev.notes.trim()) bucket.notes.add(ev.notes.trim());
+
+      const timeStr = formatLuandaTime(ev.occurredAt);
+      if (ev.eventType === 'boarded' || (ev.pinPhase === 'boarding' && ev.eventType !== 'pin_failed')) {
+        bucket.boardingLogs.push(`${timeStr} (${translateJourneyPt(ev.eventType)})`);
+      } else if (ev.eventType === 'handed_over' || (ev.pinPhase === 'dropoff' && ev.eventType !== 'pin_failed')) {
+        bucket.dropoffLogs.push(`${timeStr} (${translateJourneyPt(ev.eventType)})`);
+      } else {
+        bucket.otherLogs.push(`${timeStr} (${translateJourneyPt(ev.eventType)})`);
+      }
+    }
+
+    const sortedBuckets = Array.from(buckets.values()).sort((a, b) => {
+      if (a.dayKey !== b.dayKey) return b.dayKey.localeCompare(a.dayKey);
+      const schoolCmp = a.schoolName.localeCompare(b.schoolName, 'pt');
+      if (schoolCmp !== 0) return schoolCmp;
+      return a.student.fullName.localeCompare(b.student.fullName, 'pt');
+    });
+
+    const headers = [
+      'Data',
+      'Escola',
+      'ID Aluno',
+      'Nome do Aluno',
+      'Rota',
+      'Paragem',
+      'Viagem(ns)',
+      'Embarque',
+      'Desembarque',
+      'Outros Registos',
+      'Total Eventos',
+      'Observações',
+    ];
+
+    const rows: CsvCellValue[][] = sortedBuckets.map((b) => [
+      b.dayKey,
+      b.schoolName,
+      b.student.id,
+      b.student.fullName,
+      b.student.routeCode,
+      b.student.stopName,
+      b.tripCodes.size > 0 ? Array.from(b.tripCodes).join(', ') : '—',
+      b.boardingLogs.length > 0 ? b.boardingLogs.join(' | ') : 'Não registado',
+      b.dropoffLogs.length > 0 ? b.dropoffLogs.join(' | ') : 'Não registado',
+      b.otherLogs.length > 0 ? b.otherLogs.join(' | ') : '—',
+      b.totalEvents,
+      b.notes.size > 0 ? Array.from(b.notes).join(' | ') : '—',
+    ]);
+
+    return { csv: buildCsvWithBom(headers, rows), rowCount: rows.length };
+  }
+
+  app.get('/api/v1/school/reports/attendance', requireAuth, requireRoles(SCHOOL_PORTAL_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const targetSchool = await resolveSchoolReportTarget(req, res);
+      if (!targetSchool) return;
+
+      const parsed = parseReportFilters(req.query as Record<string, unknown>);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error });
+      }
+
+      const { csv, rowCount } = await buildAttendanceReportCsv({
+        schoolId: targetSchool.schoolId,
+        fromDate: parsed.filters.fromDate,
+        toDate: parsed.filters.toDate,
+      });
+
+      const dbUser = req.dbUser!;
+      await writeAuditLog({
+        actorUid: dbUser.uid,
+        actorEmail: dbUser.email,
+        actorRole: dbUser.primaryRole,
+        action: 'report.school_exported',
+        targetEntity: 'attendance_events',
+        targetId: targetSchool.schoolId,
+        summary: `Portal Escolar exportou relatório de presenças (${targetSchool.schoolName}; ${rowCount} linhas; período ${parsed.filters.fromStr ?? 'início'} a ${parsed.filters.toStr ?? 'hoje'}).`,
+      });
+
+      const safeSchool = targetSchool.schoolName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      sendCsvResponse(res, `mobuss-escola-${safeSchool || targetSchool.schoolId}-presencas.csv`, csv);
+    } catch (error) {
+      console.error('School attendance report export failed:', error);
+      res.status(500).json({ error: 'Erro ao exportar relatório de presenças da escola.' });
+    }
+  });
+
+  app.get('/api/v1/school/reports/trips', requireAuth, requireRoles(SCHOOL_PORTAL_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const targetSchool = await resolveSchoolReportTarget(req, res);
+      if (!targetSchool) return;
+
+      const parsed = parseReportFilters(req.query as Record<string, unknown>);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error });
+      }
+
+      const { csv, rowCount } = await buildTripsReportCsv({
+        schoolId: targetSchool.schoolId,
+        fromStr: parsed.filters.fromStr,
+        toStr: parsed.filters.toStr,
+      });
+
+      const dbUser = req.dbUser!;
+      await writeAuditLog({
+        actorUid: dbUser.uid,
+        actorEmail: dbUser.email,
+        actorRole: dbUser.primaryRole,
+        action: 'report.school_exported',
+        targetEntity: 'trips',
+        targetId: targetSchool.schoolId,
+        summary: `Portal Escolar exportou relatório de viagens (${targetSchool.schoolName}; ${rowCount} linhas; período ${parsed.filters.fromStr ?? 'início'} a ${parsed.filters.toStr ?? 'hoje'}).`,
+      });
+
+      const safeSchool = targetSchool.schoolName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      sendCsvResponse(res, `mobuss-escola-${safeSchool || targetSchool.schoolId}-viagens.csv`, csv);
+    } catch (error) {
+      console.error('School trips report export failed:', error);
+      res.status(500).json({ error: 'Erro ao exportar relatório de viagens da escola.' });
+    }
+  });
+
   // ==========================================================================
   // 7. MÔBUSS ADMIN PANEL ENDPOINTS (RBAC + Owner Fleet + Audit + Pricing)
   // ==========================================================================
 
-  app.get('/api/v1/admin/overview', requireAuth, requireRoles(ADMIN_STAFF_ROLES), async (_req: AuthRequest, res: Response) => {
+  app.get('/api/v1/admin/overview', requireAuth, requireRoles(ADMIN_STAFF_ROLES), async (req: AuthRequest, res: Response) => {
     try {
+      const dbStartedAt = Date.now();
+      await db.execute(sql`SELECT 1`);
+      const dbLatencyMs = Date.now() - dbStartedAt;
       await ensureDatabaseSeeded();
+      const dbUser = req.dbUser!;
+      const visibility = getAdminOverviewVisibility(dbUser.primaryRole);
+
       const [
         allSchools,
         allContracts,
@@ -1727,8 +4418,10 @@ async function createApp() {
         allChangeReqs,
         allAuditLogs,
         allUsers,
+        driverLogins,
         allAttendance,
         allRouteSchedules,
+        allRoutesWithStops,
       ] = await Promise.all([
         db.select().from(schools).orderBy(schools.id),
         db.select().from(contracts).orderBy(desc(contracts.id)),
@@ -1740,14 +4433,23 @@ async function createApp() {
         db.select().from(guardians),
         db.select().from(guardianStudentLinks),
         db.select().from(trips).orderBy(trips.id),
-        db.select().from(incidents).orderBy(desc(incidents.id)),
-        db.select().from(invoices).orderBy(desc(invoices.id)),
+        visibility.canViewIncidentsKpi
+          ? db.select().from(incidents).orderBy(desc(incidents.id))
+          : db.select({ id: incidents.id, status: incidents.status, severity: incidents.severity, category: incidents.category }).from(incidents),
+        visibility.canViewFinanceKpi
+          ? db.select().from(invoices).orderBy(desc(invoices.id))
+          : Promise.resolve([]),
         db.select().from(pricingConfigs).orderBy(desc(pricingConfigs.id)).limit(1),
         db.select().from(transportChangeRequests).orderBy(desc(transportChangeRequests.id)),
-        db.select().from(auditLogs).orderBy(desc(auditLogs.id)).limit(40),
-        db.select().from(users).orderBy(users.id),
+        visibility.canViewAuditLogs ? db.select().from(auditLogs).orderBy(desc(auditLogs.id)).limit(40) : Promise.resolve([]),
+        visibility.canViewStaffUsers ? db.select().from(users).orderBy(users.id) : Promise.resolve([]),
+        db
+          .select({ id: users.id, driverId: users.driverId, username: users.username, active: users.active })
+          .from(users)
+          .where(sql`${users.driverId} is not null`),
         db.select().from(attendanceEvents).orderBy(desc(attendanceEvents.id)).limit(30),
         db.select().from(recurringRouteSchedules).orderBy(recurringRouteSchedules.schoolId, recurringRouteSchedules.departureTime),
+        loadRoutesWithStops({ includeInactive: true }),
       ]);
 
       const schoolMap = new Map(allSchools.map((s) => [s.id, s]));
@@ -1755,6 +4457,9 @@ async function createApp() {
       const ownerMap = new Map(allOwners.map((o) => [o.id, o]));
       const driverMap = new Map(allDrivers.map((d) => [d.id, d]));
       const vehicleMap = new Map(allVehicles.map((v) => [v.id, v]));
+      const driverLoginMap = new Map(
+        driverLogins.filter((u) => u.driverId != null).map((u) => [u.driverId!, u])
+      );
 
       // Strictly mask PIN values in general Admin directory!
       const safeStudents = allStudents.map((st) => {
@@ -1779,15 +4484,38 @@ async function createApp() {
 
       const enrichedContracts = allContracts.map((c) => ({
         ...c,
+        monthlyValueAoa: visibility.canViewContractFinancials ? c.monthlyValueAoa : null,
         schoolName: schoolMap.get(c.schoolId)?.name ?? 'Instituição',
         municipality: schoolMap.get(c.schoolId)?.municipality ?? 'Luanda',
         contactName: schoolMap.get(c.schoolId)?.contactName ?? 'Direcção',
         contactPhone: schoolMap.get(c.schoolId)?.contactPhone ?? '—',
       }));
 
+      const safeOwners = allOwners.map((o) => ({
+        ...o,
+        monthlySettlementAoa: visibility.canViewFinanceKpi ? o.monthlySettlementAoa : null,
+      }));
+
+      const safeDrivers = allDrivers.map((d) => {
+        const login = driverLoginMap.get(d.id);
+        return {
+          ...d,
+          monthlyCompensationAoa: visibility.canViewFinanceKpi ? d.monthlyCompensationAoa : null,
+          employerSchoolName: d.employerSchoolId ? schoolMap.get(d.employerSchoolId)?.name ?? null : null,
+          hasLogin: Boolean(login),
+          loginUsername: login?.username ?? null,
+          loginActive: login?.active ?? null,
+        };
+      });
+
       const enrichedVehicles = allVehicles.map((v) => ({
         ...v,
-        ownerName: ownerMap.get(v.ownerId)?.fullName ?? 'Proprietário',
+        ownerName:
+          v.ownershipType === 'school_owned'
+            ? schoolMap.get(v.assignedSchoolId ?? 0)?.name ?? 'Frota da Escola'
+            : v.ownerId != null
+            ? ownerMap.get(v.ownerId)?.fullName ?? 'Proprietário'
+            : 'Frota MôBuss',
         driverName: v.assignedDriverId ? driverMap.get(v.assignedDriverId)?.fullName ?? '—' : 'Sem motorista',
         schoolName: v.assignedSchoolId ? schoolMap.get(v.assignedSchoolId)?.name ?? null : null,
       }));
@@ -1809,27 +4537,613 @@ async function createApp() {
         };
       });
 
+      const tripMap = new Map(allTrips.map((t) => [t.id, t]));
+      const routeByCodeMap = new Map(allRoutesWithStops.map((r) => [r.code.trim().toUpperCase(), r]));
+      const fullIncidents = visibility.canViewIncidentsKpi
+        ? (allIncidents as Array<typeof incidents.$inferSelect>).map((inc) => {
+            const incTrip = inc.tripId ? tripMap.get(inc.tripId) ?? null : null;
+            const incRoute = inc.routeCode
+              ? routeByCodeMap.get(inc.routeCode.trim().toUpperCase()) ?? null
+              : incTrip
+              ? routeByCodeMap.get(incTrip.routeCode.trim().toUpperCase()) ?? null
+              : null;
+            const incDriver =
+              inc.driverName ??
+              (inc.driverId ? driverMap.get(inc.driverId)?.fullName : null) ??
+              (incTrip?.driverId ? driverMap.get(incTrip.driverId)?.fullName : null) ??
+              inc.reporterName;
+            return {
+              ...inc,
+              tripCode: incTrip?.tripCode ?? (inc.tripId ? `Viagem #${inc.tripId}` : null),
+              routeName: incTrip?.routeName ?? incRoute?.name ?? null,
+              driverName: incDriver,
+            };
+          })
+        : [];
+
+      const pendingRequestsCount = allRequests.filter(
+        (r) => r.status === 'request_received' || r.status === 'under_review'
+      ).length;
+
+      const overviewSummary = computeOverviewSummary({
+        scope: 'global',
+        schoolId: null,
+        visibility,
+        dbReachable: true,
+        dbLatencyMs,
+        contracts: allContracts,
+        pendingContractRequestsCount: pendingRequestsCount,
+        students: allStudents,
+        vehicles: allVehicles,
+        drivers: allDrivers,
+        trips: allTrips,
+        incidents: allIncidents,
+        invoices: visibility.canViewFinanceKpi ? allInvoices : [],
+      });
+
       res.json({
         schools: allSchools,
         contracts: enrichedContracts,
-        contractRequests: allRequests,
-        vehicleOwners: allOwners,
+        contractRequests: visibility.canViewContractsKpi ? allRequests : [],
+        vehicleOwners: safeOwners,
         vehicles: enrichedVehicles,
-        drivers: allDrivers,
+        drivers: safeDrivers,
         students: safeStudents,
         trips: allTrips,
-        incidents: allIncidents,
-        invoices: allInvoices,
+        incidents: fullIncidents,
+        invoices: visibility.canViewFinanceKpi ? allInvoices : [],
         pricing: allPricing[0] ?? null,
         transportChangeRequests: enrichedChangeRequests,
         auditLogs: allAuditLogs,
         staffUsers: allUsers.map(toSafeDbUser),
         attendanceEvents: allAttendance,
         routeSchedules: enrichedSchedules,
+        routes: allRoutesWithStops,
+        overviewSummary,
       });
     } catch (error) {
       console.error('Admin overview failed:', error);
       res.status(500).json({ error: 'Erro ao carregar dados do painel administrativo.' });
+    }
+  });
+
+  app.get('/api/v1/admin/reports/students', requireAuth, requireRoles(['mobuss_super_admin', 'operations_manager', 'school_account_manager', 'safety_support_agent']), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const parsed = parseReportFilters(req.query as Record<string, unknown>);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error });
+      }
+      const { schoolId, fromDate, toDate, fromStr, toStr } = parsed.filters;
+
+      const [allStudents, allSchools, allRoutes, allLinks, allGuardians] = await Promise.all([
+        db.select().from(students).orderBy(students.schoolId, students.fullName),
+        db.select().from(schools),
+        db.select().from(routes),
+        db.select().from(guardianStudentLinks),
+        db.select().from(guardians),
+      ]);
+
+      const schoolById = new Map(allSchools.map((s) => [s.id, s]));
+      const routeByCode = new Map(allRoutes.map((r) => [r.code.trim().toUpperCase(), r]));
+      const guardianById = new Map(allGuardians.map((g) => [g.id, g]));
+
+      const filtered = allStudents.filter((st) => {
+        if (schoolId && st.schoolId !== schoolId) return false;
+        if (!isWithinDateRange(st.createdAt, fromDate, toDate)) return false;
+        return true;
+      });
+
+      const headers = [
+        'ID Aluno',
+        'Nome do Aluno',
+        'Escola',
+        'Código da Rota',
+        'Nome da Rota',
+        'Paragem',
+        'Turno',
+        'Estado da Matrícula',
+        'Estado Atual',
+        'Política de PIN',
+        'Encarregado',
+        'Telefone do Encarregado',
+        'Data de Registo',
+      ];
+
+      const rows: CsvCellValue[][] = filtered.map((st) => {
+        const sc = schoolById.get(st.schoolId);
+        const rt = routeByCode.get(st.routeCode.trim().toUpperCase());
+        const link = allLinks.find((l) => l.studentId === st.id && l.active);
+        const g = link ? guardianById.get(link.guardianId) : null;
+        return [
+          st.id,
+          st.fullName,
+          sc?.name ?? '—',
+          st.routeCode,
+          rt?.name ?? '—',
+          st.stopName,
+          translateShiftPt(st.shift),
+          st.enrollmentStatus === 'active'
+            ? 'Ativa'
+            : st.enrollmentStatus === 'pending_approval'
+            ? 'Pendente'
+            : 'Suspensa',
+          translateJourneyPt(st.currentJourneyState),
+          translatePinPolicyPt(st.pinPolicy),
+          g?.fullName ?? 'Por vincular',
+          g?.phone ?? '—',
+          formatLuandaDate(st.createdAt),
+        ];
+      });
+
+      const dbUser = req.dbUser!;
+      await writeAuditLog({
+        actorUid: dbUser.uid,
+        actorEmail: dbUser.email,
+        actorRole: dbUser.primaryRole,
+        action: 'report.exported',
+        targetEntity: 'students',
+        targetId: schoolId ?? 'all',
+        summary: `Exportação CSV de alunos (${rows.length} registos; escola=${schoolId ?? 'todas'}; período=${fromStr ?? 'início'} a ${toStr ?? 'hoje'}).`,
+      });
+
+      sendCsvResponse(res, 'mobuss-relatorio-alunos.csv', buildCsvWithBom(headers, rows));
+    } catch (error) {
+      console.error('Admin students report failed:', error);
+      res.status(500).json({ error: 'Erro ao exportar relatório de alunos.' });
+    }
+  });
+
+  app.get('/api/v1/admin/reports/trips', requireAuth, requireRoles(['mobuss_super_admin', 'operations_manager', 'fleet_manager', 'school_account_manager', 'safety_support_agent']), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const parsed = parseReportFilters(req.query as Record<string, unknown>);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error });
+      }
+      const { schoolId, fromStr, toStr } = parsed.filters;
+      const { csv, rowCount } = await buildTripsReportCsv({ schoolId, fromStr, toStr });
+
+      const dbUser = req.dbUser!;
+      await writeAuditLog({
+        actorUid: dbUser.uid,
+        actorEmail: dbUser.email,
+        actorRole: dbUser.primaryRole,
+        action: 'report.exported',
+        targetEntity: 'trips',
+        targetId: schoolId ?? 'all',
+        summary: `Exportação CSV de viagens (${rowCount} registos; escola=${schoolId ?? 'todas'}; período=${fromStr ?? 'início'} a ${toStr ?? 'hoje'}).`,
+      });
+
+      sendCsvResponse(res, 'mobuss-relatorio-viagens.csv', csv);
+    } catch (error) {
+      console.error('Admin trips report failed:', error);
+      res.status(500).json({ error: 'Erro ao exportar relatório de viagens.' });
+    }
+  });
+
+  app.get('/api/v1/admin/reports/attendance', requireAuth, requireRoles(['mobuss_super_admin', 'operations_manager', 'school_account_manager', 'safety_support_agent']), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const parsed = parseReportFilters(req.query as Record<string, unknown>);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error });
+      }
+      const { schoolId, fromDate, toDate, fromStr, toStr } = parsed.filters;
+      const { csv, rowCount } = await buildAttendanceReportCsv({ schoolId, fromDate, toDate });
+
+      const dbUser = req.dbUser!;
+      await writeAuditLog({
+        actorUid: dbUser.uid,
+        actorEmail: dbUser.email,
+        actorRole: dbUser.primaryRole,
+        action: 'report.exported',
+        targetEntity: 'attendance_events',
+        targetId: schoolId ?? 'all',
+        summary: `Exportação CSV de presenças por aluno/dia (${rowCount} registos; escola=${schoolId ?? 'todas'}; período=${fromStr ?? 'início'} a ${toStr ?? 'hoje'}).`,
+      });
+
+      sendCsvResponse(res, 'mobuss-relatorio-presencas.csv', csv);
+    } catch (error) {
+      console.error('Admin attendance report failed:', error);
+      res.status(500).json({ error: 'Erro ao exportar relatório de presenças.' });
+    }
+  });
+
+  app.get('/api/v1/admin/reports/invoices', requireAuth, requireRoles(FINANCE_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const parsed = parseReportFilters(req.query as Record<string, unknown>);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error });
+      }
+      const { schoolId, fromDate, toDate, fromStr, toStr } = parsed.filters;
+
+      const [allInvoices, allSchools, allStudents] = await Promise.all([
+        db.select().from(invoices).orderBy(desc(invoices.createdAt), desc(invoices.id)),
+        db.select().from(schools),
+        db.select({ id: students.id, schoolId: students.schoolId }).from(students),
+      ]);
+
+      const schoolById = new Map(allSchools.map((s) => [s.id, s]));
+      const studentSchoolById = new Map(allStudents.map((s) => [s.id, s.schoolId]));
+
+      const filtered = allInvoices.filter((inv) => {
+        const resolvedSchoolId = inv.schoolId ?? (inv.studentId ? studentSchoolById.get(inv.studentId) ?? null : null);
+        if (schoolId && resolvedSchoolId !== schoolId) return false;
+        if (!isWithinDateRange(inv.createdAt, fromDate, toDate)) return false;
+        return true;
+      });
+
+      const headers = [
+        'Nº Documento',
+        'Data de Emissão',
+        'Data de Vencimento',
+        'Escola',
+        'Tipo de Pagador',
+        'Pagador',
+        'Educando',
+        'Telefone',
+        'Descrição',
+        'Valor (Kz)',
+        'IVA %',
+        'Método de Pagamento',
+        'Entidade MCX',
+        'Referência MCX',
+        'Ref. do Provedor',
+        'Estado',
+        'Data de Pagamento',
+        'Estado Fiscal',
+      ];
+
+      const rows: CsvCellValue[][] = filtered.map((inv) => {
+        const resolvedSchoolId = inv.schoolId ?? (inv.studentId ? studentSchoolById.get(inv.studentId) ?? null : null);
+        const sc = resolvedSchoolId ? schoolById.get(resolvedSchoolId) : null;
+        return [
+          inv.invoiceNumber,
+          formatLuandaDateTime(inv.createdAt),
+          inv.dueDate ? formatLuandaDate(inv.dueDate) : '—',
+          sc?.name ?? '—',
+          inv.payerType === 'school' ? 'Escola' : 'Encarregado',
+          inv.guardianName,
+          inv.studentName,
+          inv.phone,
+          inv.description ?? 'Transporte escolar mensal',
+          inv.amountAoa,
+          inv.ivaPercent != null ? `${inv.ivaPercent}%` : '14%',
+          translatePaymentMethodPt(inv.paymentMethod),
+          inv.paymentEntity ?? '—',
+          inv.paymentReferencePin ?? '—',
+          inv.providerReference ?? '—',
+          translateInvoiceStatusPt(inv.status),
+          inv.confirmedAt ? formatLuandaDateTime(inv.confirmedAt) : '—',
+          inv.fiscalStatus === 'verified_fiscal' ? 'Validado AGT' : 'Proforma (Não certificado AGT)',
+        ];
+      });
+
+      const dbUser = req.dbUser!;
+      await writeAuditLog({
+        actorUid: dbUser.uid,
+        actorEmail: dbUser.email,
+        actorRole: dbUser.primaryRole,
+        action: 'report.exported',
+        targetEntity: 'invoices',
+        targetId: schoolId ?? 'all',
+        summary: `Exportação CSV de faturas e pagamentos (${rows.length} registos; escola=${schoolId ?? 'todas'}; período=${fromStr ?? 'início'} a ${toStr ?? 'hoje'}).`,
+      });
+
+      sendCsvResponse(res, 'mobuss-relatorio-faturas-pagamentos.csv', buildCsvWithBom(headers, rows));
+    } catch (error) {
+      console.error('Admin invoices report failed:', error);
+      res.status(500).json({ error: 'Erro ao exportar relatório de faturas e pagamentos.' });
+    }
+  });
+
+  app.get('/api/v1/admin/reports/incidents', requireAuth, requireRoles(['mobuss_super_admin', 'operations_manager', 'safety_support_agent']), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const parsed = parseReportFilters(req.query as Record<string, unknown>);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error });
+      }
+      const { schoolId, fromDate, toDate, fromStr, toStr } = parsed.filters;
+
+      const [allIncidents, allSchools, allTrips] = await Promise.all([
+        db.select().from(incidents).orderBy(desc(incidents.createdAt), desc(incidents.id)),
+        db.select().from(schools),
+        db.select().from(trips),
+      ]);
+
+      const schoolById = new Map(allSchools.map((s) => [s.id, s]));
+      const tripById = new Map(allTrips.map((t) => [t.id, t]));
+
+      const filtered = allIncidents.filter((inc) => {
+        const incTrip = inc.tripId ? tripById.get(inc.tripId) : null;
+        const resolvedSchoolId = inc.schoolId ?? incTrip?.schoolId ?? null;
+        if (schoolId && resolvedSchoolId !== schoolId) return false;
+        if (!isWithinDateRange(inc.createdAt, fromDate, toDate)) return false;
+        return true;
+      });
+
+      const headers = [
+        'ID Ocorrência',
+        'Data/Hora',
+        'Escola',
+        'Código da Viagem',
+        'Rota',
+        'Nº Autocarro',
+        'Categoria',
+        'Gravidade',
+        'Motivo',
+        'Descrição',
+        'Notas',
+        'Reportado por',
+        'Perfil',
+        'Motorista',
+        'Estado',
+        'Responsável',
+        'Reconhecido em',
+        'Notas de Resolução',
+      ];
+
+      const rows: CsvCellValue[][] = filtered.map((inc) => {
+        const incTrip = inc.tripId ? tripById.get(inc.tripId) : null;
+        const resolvedSchoolId = inc.schoolId ?? incTrip?.schoolId ?? null;
+        const sc = resolvedSchoolId ? schoolById.get(resolvedSchoolId) : null;
+        return [
+          inc.id,
+          formatLuandaDateTime(inc.createdAt),
+          sc?.name ?? '—',
+          incTrip?.tripCode ?? (inc.tripId ? `Viagem #${inc.tripId}` : '—'),
+          incTrip?.routeName ?? inc.routeCode ?? '—',
+          inc.busNumber != null ? String(inc.busNumber) : '—',
+          translateIncidentCategoryPt(inc.category),
+          inc.severity,
+          inc.reason ?? '—',
+          inc.description,
+          inc.notes ?? '—',
+          inc.reporterName,
+          inc.reporterRole,
+          inc.driverName ?? '—',
+          translateIncidentStatusPt(inc.status),
+          inc.assignedToName ?? '—',
+          inc.acknowledgedAt ? formatLuandaDateTime(inc.acknowledgedAt) : '—',
+          inc.resolutionNotes ?? '—',
+        ];
+      });
+
+      const dbUser = req.dbUser!;
+      await writeAuditLog({
+        actorUid: dbUser.uid,
+        actorEmail: dbUser.email,
+        actorRole: dbUser.primaryRole,
+        action: 'report.exported',
+        targetEntity: 'incidents',
+        targetId: schoolId ?? 'all',
+        summary: `Exportação CSV de ocorrências e emergências (${rows.length} registos; escola=${schoolId ?? 'todas'}; período=${fromStr ?? 'início'} a ${toStr ?? 'hoje'}).`,
+      });
+
+      sendCsvResponse(res, 'mobuss-relatorio-ocorrencias.csv', buildCsvWithBom(headers, rows));
+    } catch (error) {
+      console.error('Admin incidents report failed:', error);
+      res.status(500).json({ error: 'Erro ao exportar relatório de ocorrências.' });
+    }
+  });
+
+  app.get('/api/v1/admin/reports/vehicles-drivers', requireAuth, requireRoles(['mobuss_super_admin', 'fleet_manager', 'operations_manager']), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const parsed = parseReportFilters(req.query as Record<string, unknown>);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error });
+      }
+      const { schoolId, fromDate, toDate, fromStr, toStr } = parsed.filters;
+
+      const [allVehicles, allDrivers, allOwners, allSchools] = await Promise.all([
+        db.select().from(vehicles).orderBy(vehicles.fleetNumber),
+        db.select().from(drivers).orderBy(drivers.fullName),
+        db.select().from(vehicleOwners),
+        db.select().from(schools),
+      ]);
+
+      const ownerById = new Map(allOwners.map((o) => [o.id, o]));
+      const schoolById = new Map(allSchools.map((s) => [s.id, s]));
+      const driverById = new Map(allDrivers.map((d) => [d.id, d]));
+
+      const filteredVehicles = allVehicles.filter((v) => {
+        if (schoolId && v.assignedSchoolId !== schoolId) return false;
+        if (!isWithinDateRange(v.createdAt, fromDate, toDate)) return false;
+        return true;
+      });
+
+      const schoolAssignedDriverIds = new Set(
+        allVehicles
+          .filter((v) => !schoolId || v.assignedSchoolId === schoolId)
+          .map((v) => v.assignedDriverId)
+          .filter((id): id is number => id != null)
+      );
+
+      const filteredDrivers = allDrivers.filter((d) => {
+        if (schoolId && d.employerSchoolId !== schoolId && !schoolAssignedDriverIds.has(d.id)) return false;
+        if (!isWithinDateRange(d.createdAt, fromDate, toDate)) return false;
+        return true;
+      });
+
+      const headers = [
+        'Tipo de Registo',
+        'Identificador',
+        'Matrícula / Nome',
+        'Escola Atribuída',
+        'Rota',
+        'Proprietário / Empregador',
+        'Documento',
+        'Nº Documento',
+        'Validade do Documento',
+        'Estado Documental',
+        'Seguro / Estado Operacional',
+        'Verificação',
+        'Data de Registo',
+      ];
+
+      const vehicleRows: CsvCellValue[][] = filteredVehicles.map((v) => {
+        const owner = v.ownerId != null ? ownerById.get(v.ownerId) : null;
+        const sc = v.assignedSchoolId ? schoolById.get(v.assignedSchoolId) : null;
+        const dr = v.assignedDriverId ? driverById.get(v.assignedDriverId) : null;
+        const ownerLabel =
+          v.ownershipType === 'school_owned'
+            ? `Escola (${sc?.name ?? '—'})`
+            : owner?.fullName ?? 'Frota MôBuss';
+        return [
+          'Viatura',
+          `Autocarro #${v.fleetNumber}`,
+          v.plate,
+          sc?.name ?? 'Sem escola atribuída',
+          v.routeCode ? `${v.routeCode}${v.routeName ? ` (${v.routeName})` : ''}` : '—',
+          `${ownerLabel}${dr ? ` · Motorista: ${dr.fullName}` : ''}`,
+          'Inspeção DNVT',
+          v.plate,
+          v.dnvtExpiry,
+          translateExpiryStatusPt(v.dnvtExpiry),
+          `${v.insuranceProvider} (${v.insuranceStatus === 'valid' ? 'Válido' : v.insuranceStatus})`,
+          v.verificationStatus === 'verified' ? 'Verificado' : v.verificationStatus,
+          formatLuandaDate(v.createdAt),
+        ];
+      });
+
+      const driverRows: CsvCellValue[][] = filteredDrivers.map((d) => {
+        const assignedVehicle = allVehicles.find((v) => v.assignedDriverId === d.id);
+        const scId = d.employerSchoolId ?? assignedVehicle?.assignedSchoolId ?? null;
+        const sc = scId ? schoolById.get(scId) : null;
+        const employerLabel =
+          d.employerType === 'mobuss'
+            ? `MôBuss (${d.licenceCategory})`
+            : `Escola: ${sc?.name ?? '—'} (${d.licenceCategory})`;
+        return [
+          'Motorista',
+          `MOT-${d.id}`,
+          d.fullName,
+          sc?.name ?? '—',
+          assignedVehicle?.routeCode ?? '—',
+          employerLabel,
+          'Carta de Condução',
+          d.licenceNumber,
+          d.licenceExpiry,
+          translateExpiryStatusPt(d.licenceExpiry),
+          d.availabilityStatus === 'in_service'
+            ? 'Em serviço'
+            : d.availabilityStatus === 'available'
+            ? 'Disponível'
+            : 'De folga',
+          d.verificationStatus === 'verified' ? 'Verificado' : d.verificationStatus,
+          formatLuandaDate(d.createdAt),
+        ];
+      });
+
+      const rows = [...vehicleRows, ...driverRows];
+
+      const dbUser = req.dbUser!;
+      await writeAuditLog({
+        actorUid: dbUser.uid,
+        actorEmail: dbUser.email,
+        actorRole: dbUser.primaryRole,
+        action: 'report.exported',
+        targetEntity: 'vehicles_drivers',
+        targetId: schoolId ?? 'all',
+        summary: `Exportação CSV de viaturas e motoristas com validades (${rows.length} registos; escola=${schoolId ?? 'todas'}; período=${fromStr ?? 'início'} a ${toStr ?? 'hoje'}).`,
+      });
+
+      sendCsvResponse(res, 'mobuss-relatorio-viaturas-motoristas.csv', buildCsvWithBom(headers, rows));
+    } catch (error) {
+      console.error('Admin vehicles-drivers report failed:', error);
+      res.status(500).json({ error: 'Erro ao exportar relatório de viaturas e motoristas.' });
+    }
+  });
+
+  app.get('/api/v1/admin/reports/payroll', requireAuth, requireRoles(FINANCE_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const parsed = parseReportFilters(req.query as Record<string, unknown>);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error });
+      }
+      const { schoolId, fromStr, toStr } = parsed.filters;
+
+      const [allDrivers, allVehicles, allTrips, allSchools] = await Promise.all([
+        db.select().from(drivers).orderBy(drivers.fullName),
+        db.select().from(vehicles),
+        db.select().from(trips),
+        db.select().from(schools),
+      ]);
+
+      const schoolById = new Map(allSchools.map((s) => [s.id, s]));
+      const schoolDriverIds = new Set(
+        allVehicles
+          .filter((v) => !schoolId || v.assignedSchoolId === schoolId)
+          .map((v) => v.assignedDriverId)
+          .filter((id): id is number => id != null)
+      );
+
+      const filteredDrivers = allDrivers.filter((d) => !schoolId || schoolDriverIds.has(d.id));
+
+      const headers = [
+        'ID Motorista',
+        'Motorista',
+        'Contacto',
+        'Escola Atribuída',
+        'Categoria',
+        'Validade da Carta',
+        'Avaliação',
+        'Viagens no Período',
+        'Total Viagens Concluídas',
+        'Salário Base Mensal (Kz)',
+        'Estado Operacional',
+      ];
+
+      const rows: CsvCellValue[][] = filteredDrivers.map((d) => {
+        const assignedVehicle = allVehicles.find((v) => v.assignedDriverId === d.id);
+        const sc = assignedVehicle?.assignedSchoolId ? schoolById.get(assignedVehicle.assignedSchoolId) : null;
+        const tripsInRange = allTrips.filter((t) => {
+          if (t.driverId !== d.id) return false;
+          if (schoolId && t.schoolId !== schoolId) return false;
+          if (fromStr && t.serviceDate < fromStr) return false;
+          if (toStr && t.serviceDate > toStr) return false;
+          return true;
+        }).length;
+
+        return [
+          d.id,
+          d.fullName,
+          d.phone,
+          sc?.name ?? '—',
+          d.licenceCategory,
+          d.licenceExpiry,
+          d.ratingAvg,
+          tripsInRange,
+          d.tripsCompleted,
+          d.monthlyCompensationAoa,
+          d.availabilityStatus === 'in_service'
+            ? 'Em serviço'
+            : d.availabilityStatus === 'available'
+            ? 'Disponível'
+            : 'De folga',
+        ];
+      });
+
+      const dbUser = req.dbUser!;
+      await writeAuditLog({
+        actorUid: dbUser.uid,
+        actorEmail: dbUser.email,
+        actorRole: dbUser.primaryRole,
+        action: 'report.exported',
+        targetEntity: 'drivers_payroll',
+        targetId: schoolId ?? 'all',
+        summary: `Exportação CSV de folha salarial de motoristas (${rows.length} registos; escola=${schoolId ?? 'todas'}; período=${fromStr ?? 'início'} a ${toStr ?? 'hoje'}).`,
+      });
+
+      sendCsvResponse(res, 'mobuss-relatorio-folha-salarial.csv', buildCsvWithBom(headers, rows));
+    } catch (error) {
+      console.error('Admin payroll report failed:', error);
+      res.status(500).json({ error: 'Erro ao exportar folha salarial.' });
     }
   });
 
@@ -1843,9 +5157,12 @@ async function createApp() {
       const ivaPercent = Math.max(0, Math.min(30, Number(req.body?.ivaPercent ?? 14)));
       const companyNif = String(req.body?.companyNif ?? '5417209418').trim();
       const companyName = String(req.body?.companyName ?? 'MôBuss Angola Transporte Escolar Lda.').trim();
+      const existing = await db.select().from(pricingConfigs).orderBy(desc(pricingConfigs.id)).limit(1);
+      const companyAddress =
+        String(req.body?.companyAddress ?? existing[0]?.companyAddress ?? 'Av. Comandante Valódia, Luanda, Angola').trim() ||
+        'Av. Comandante Valódia, Luanda, Angola';
       const multicaixaEntityCode = String(req.body?.multicaixaEntityCode ?? '00845').trim() || '00845';
 
-      const existing = await db.select().from(pricingConfigs).orderBy(desc(pricingConfigs.id)).limit(1);
       let updated;
       if (existing[0]) {
         const resRows = await db
@@ -1858,6 +5175,7 @@ async function createApp() {
             ivaPercent,
             companyNif,
             companyName,
+            companyAddress,
             multicaixaEntityCode,
             updatedByUid: dbUser.uid,
             updatedAt: new Date(),
@@ -1876,6 +5194,7 @@ async function createApp() {
             ivaPercent,
             companyNif,
             companyName,
+            companyAddress,
             multicaixaEntityCode,
             updatedByUid: dbUser.uid,
           })
@@ -1910,6 +5229,7 @@ async function createApp() {
       const payerModel = ['school', 'parent', 'mixed'].includes(req.body?.payerModel)
         ? String(req.body.payerModel)
         : 'school';
+      const serviceModel = req.body?.serviceModel === 'full_service' ? 'full_service' : 'software';
 
       const reqRows = await db
         .select()
@@ -1946,6 +5266,7 @@ async function createApp() {
             studentsCovered: lead.studentsEstimate,
             monthlyValueAoa: lead.estimatedMonthlyAoa,
             shiftRegime: lead.shiftRegime,
+            serviceModel,
             status: 'active',
             notes: `Convertido a partir do pedido ${lead.referenceCode}.`,
           })
@@ -1967,7 +5288,7 @@ async function createApp() {
           action: 'contract_request.approved',
           targetEntity: 'contracts',
           targetId: createdContract[0]!.id,
-          summary: `Pedido ${lead.referenceCode} (${lead.schoolName}) aprovado como contrato ${contractNumber} (pagador: ${payerModel}).`,
+          summary: `Pedido ${lead.referenceCode} (${lead.schoolName}) aprovado como contrato ${contractNumber} (pagador: ${payerModel}; modelo: ${serviceModel}).`,
         });
 
         return res.json({ contract: createdContract[0], school: createdSchool[0] });
@@ -2006,6 +5327,7 @@ async function createApp() {
       const payerModel = ['school', 'parent', 'mixed'].includes(body.payerModel)
         ? String(body.payerModel)
         : 'school';
+      const serviceModel = body.serviceModel === 'full_service' ? 'full_service' : 'software';
       const busesAllocated = Math.max(1, Number(body.busesAllocated) || 2);
       const driversAllocated = Math.max(1, Number(body.driversAllocated) || busesAllocated);
       const studentsCovered = Math.max(1, Number(body.studentsCovered) || busesAllocated * 25);
@@ -2046,6 +5368,7 @@ async function createApp() {
           studentsCovered,
           monthlyValueAoa,
           shiftRegime: 'both',
+          serviceModel,
           status: 'active',
           notes: body.notes ? String(body.notes) : null,
         })
@@ -2058,7 +5381,7 @@ async function createApp() {
         action: 'contract.created',
         targetEntity: 'contracts',
         targetId: created[0]!.id,
-        summary: `Novo contrato ${contractNumber} criado para ${schoolName} (pagador: ${payerModel}, PIN: embarque + desembarque).`,
+        summary: `Novo contrato ${contractNumber} criado para ${schoolName} (pagador: ${payerModel}, modelo: ${serviceModel}, PIN: embarque + desembarque).`,
       });
 
       res.status(201).json({ contract: created[0], school: createdSchool[0] });
@@ -2116,19 +5439,40 @@ async function createApp() {
       const dbUser = req.dbUser!;
       const vehicleId = Number(req.params.id);
       const driverId = Number(req.body?.driverId);
-      const routeCode = req.body?.routeCode ? String(req.body.routeCode) : undefined;
+      const routeCode = req.body?.routeCode ? String(req.body.routeCode).trim().toUpperCase() : undefined;
 
       const vRows = await db.select().from(vehicles).where(eq(vehicles.id, vehicleId)).limit(1);
       const vehicle = vRows[0];
       if (!vehicle) return res.status(404).json({ error: 'Viatura não encontrada.' });
-      if (vehicle.verificationStatus !== 'verified' || vehicle.dnvtStatus === 'expired') {
-        return res.status(400).json({ error: 'Viatura inelegível: inspeção DNVT expirada ou não verificada.' });
+      if (vehicle.verificationStatus !== 'verified' || vehicle.dnvtStatus === 'expired' || vehicle.status === 'suspended') {
+        return res.status(400).json({ error: 'Viatura inelegível: inspeção DNVT expirada, suspensa ou não verificada.' });
       }
 
       const dRows = await db.select().from(drivers).where(eq(drivers.id, driverId)).limit(1);
       const driver = dRows[0];
       if (!driver || driver.verificationStatus !== 'verified') {
-        return res.status(400).json({ error: 'Motorista não verificado ou indisponível para atribuição.' });
+        return res.status(400).json({ error: 'Motorista não verificado, suspenso ou indisponível para atribuição.' });
+      }
+
+      if (
+        vehicle.ownershipType === 'school_owned' &&
+        vehicle.assignedSchoolId != null &&
+        driver.employerType === 'school' &&
+        driver.employerSchoolId != null &&
+        driver.employerSchoolId !== vehicle.assignedSchoolId
+      ) {
+        return res.status(403).json({
+          error: 'Motorista pertence a outra escola e não pode ser alocado a esta viatura escolar.',
+        });
+      }
+
+      if (routeCode && routeCode !== 'RESERVA' && vehicle.ownershipType === 'school_owned' && vehicle.assignedSchoolId != null) {
+        const matchedRoute = await getRouteWithStopsByCode(routeCode, { includeInactive: true });
+        if (matchedRoute && matchedRoute.schoolId != null && matchedRoute.schoolId !== vehicle.assignedSchoolId) {
+          return res.status(403).json({
+            error: 'Esta viatura pertence a uma escola diferente da rota selecionada.',
+          });
+        }
       }
 
       const updated = await db
@@ -2163,7 +5507,13 @@ async function createApp() {
       const actor = req.dbUser!;
       const fleetNumber = Number(req.body?.fleetNumber);
       const plate = String(req.body?.plate ?? '').trim().toUpperCase();
-      const ownerId = Number(req.body?.ownerId);
+      const requestedOwnership = ['school_owned', 'mobuss_owned', 'partner_owned'].includes(req.body?.ownershipType)
+        ? String(req.body.ownershipType)
+        : null;
+      const rawOwnerId =
+        req.body?.ownerId !== undefined && req.body?.ownerId !== null && req.body?.ownerId !== ''
+          ? Number(req.body.ownerId)
+          : null;
       const assignedSchoolId =
         req.body?.assignedSchoolId !== undefined && req.body?.assignedSchoolId !== null && req.body?.assignedSchoolId !== ''
           ? Number(req.body.assignedSchoolId)
@@ -2193,10 +5543,29 @@ async function createApp() {
         }
       }
 
-      const ownerRows = await db.select().from(vehicleOwners).where(eq(vehicleOwners.id, ownerId)).limit(1);
-      const owner = ownerRows[0];
-      if (!owner) {
-        return res.status(400).json({ error: 'Proprietário da viatura não encontrado.' });
+      let finalOwnershipType: string;
+      let finalOwnerId: number | null = null;
+      let ownerSummary = '';
+
+      if (requestedOwnership === 'school_owned') {
+        if (assignedSchoolId === null) {
+          return res.status(400).json({ error: 'Selecione a escola proprietária para viaturas da escola.' });
+        }
+        finalOwnershipType = 'school_owned';
+        finalOwnerId = null;
+        ownerSummary = `Escola #${assignedSchoolId}`;
+      } else {
+        if (!rawOwnerId) {
+          return res.status(400).json({ error: 'Proprietário da viatura não encontrado.' });
+        }
+        const ownerRows = await db.select().from(vehicleOwners).where(eq(vehicleOwners.id, rawOwnerId)).limit(1);
+        const owner = ownerRows[0];
+        if (!owner) {
+          return res.status(400).json({ error: 'Proprietário da viatura não encontrado.' });
+        }
+        finalOwnershipType = owner.ownerType === 'mobuss' ? 'mobuss_owned' : 'partner_owned';
+        finalOwnerId = owner.id;
+        ownerSummary = owner.fullName;
       }
 
       const dup = await db
@@ -2213,8 +5582,8 @@ async function createApp() {
         .values({
           fleetNumber,
           plate,
-          ownershipType: owner.ownerType === 'mobuss' ? 'mobuss_owned' : 'partner_owned',
-          ownerId: owner.id,
+          ownershipType: finalOwnershipType,
+          ownerId: finalOwnerId,
           assignedSchoolId,
           routeCode,
           routeName,
@@ -2236,7 +5605,7 @@ async function createApp() {
         action: 'vehicle.created',
         targetEntity: 'vehicles',
         targetId: inserted[0]!.id,
-        summary: `Nova viatura registada: Autocarro ${fleetNumber} (${plate}) · Proprietário ${owner.fullName}.`,
+        summary: `Nova viatura registada: Autocarro ${fleetNumber} (${plate}) · ${finalOwnershipType} (${ownerSummary}).`,
       });
 
       res.status(201).json({
@@ -2264,7 +5633,15 @@ async function createApp() {
       }
 
       const plate = String(req.body?.plate ?? existing.plate).trim().toUpperCase();
-      const ownerId = req.body?.ownerId != null ? Number(req.body.ownerId) : existing.ownerId;
+      const requestedOwnership = ['school_owned', 'mobuss_owned', 'partner_owned'].includes(req.body?.ownershipType)
+        ? String(req.body.ownershipType)
+        : existing.ownershipType;
+      const requestedOwnerId =
+        req.body?.ownerId === undefined
+          ? existing.ownerId
+          : req.body.ownerId === null || req.body.ownerId === ''
+          ? null
+          : Number(req.body.ownerId);
       const assignedSchoolId =
         req.body?.assignedSchoolId === undefined
           ? existing.assignedSchoolId
@@ -2292,18 +5669,32 @@ async function createApp() {
         }
       }
 
-      const ownerRows = await db.select().from(vehicleOwners).where(eq(vehicleOwners.id, ownerId)).limit(1);
-      if (!ownerRows[0]) {
-        return res.status(400).json({ error: 'Proprietário não encontrado.' });
+      let finalOwnershipType: string;
+      let finalOwnerId: number | null = requestedOwnerId;
+      if (requestedOwnership === 'school_owned') {
+        if (assignedSchoolId === null) {
+          return res.status(400).json({ error: 'Selecione a escola proprietária para viaturas da escola.' });
+        }
+        finalOwnershipType = 'school_owned';
+        finalOwnerId = null;
+      } else {
+        if (finalOwnerId == null) {
+          return res.status(400).json({ error: 'Proprietário não encontrado.' });
+        }
+        const ownerRows = await db.select().from(vehicleOwners).where(eq(vehicleOwners.id, finalOwnerId)).limit(1);
+        if (!ownerRows[0]) {
+          return res.status(400).json({ error: 'Proprietário não encontrado.' });
+        }
+        finalOwnershipType = ownerRows[0].ownerType === 'mobuss' ? 'mobuss_owned' : 'partner_owned';
       }
 
       const updated = await db
         .update(vehicles)
         .set({
           plate,
-          ownerId,
+          ownerId: finalOwnerId,
           assignedSchoolId,
-          ownershipType: ownerRows[0].ownerType === 'mobuss' ? 'mobuss_owned' : 'partner_owned',
+          ownershipType: finalOwnershipType,
           routeCode,
           capacity,
           dnvtExpiry,
@@ -2322,7 +5713,7 @@ async function createApp() {
         action: 'vehicle.updated',
         targetEntity: 'vehicles',
         targetId: vehicleId,
-        summary: `Viatura Autocarro ${existing.fleetNumber} (${plate}) atualizada (DNVT: ${dnvtStatus}).`,
+        summary: `Viatura Autocarro ${existing.fleetNumber} (${plate}) atualizada (${finalOwnershipType}, DNVT: ${dnvtStatus}).`,
       });
 
       res.json({
@@ -2412,6 +5803,13 @@ async function createApp() {
         return res.status(404).json({ error: 'Escola selecionada não encontrada.' });
       }
 
+      const matchedRoute = await getRouteWithStopsByCode(routeCode, { includeInactive: true });
+      if (matchedRoute && matchedRoute.schoolId != null && matchedRoute.schoolId !== schoolId) {
+        return res.status(403).json({
+          error: 'A rota selecionada pertence a outra instituição escolar.',
+        });
+      }
+
       let vehicleLabel = 'Sem viatura atribuída';
       if (vehicleId !== null) {
         const vRows = await db.select().from(vehicles).where(eq(vehicles.id, vehicleId)).limit(1);
@@ -2419,8 +5817,13 @@ async function createApp() {
         if (!vehicle) {
           return res.status(404).json({ error: 'Viatura selecionada não encontrada.' });
         }
-        if (vehicle.verificationStatus !== 'verified' || vehicle.dnvtStatus === 'expired') {
-          return res.status(400).json({ error: 'Viatura inelegível: inspeção DNVT expirada ou não verificada.' });
+        if (vehicle.ownershipType === 'school_owned' && vehicle.assignedSchoolId != null && vehicle.assignedSchoolId !== schoolId) {
+          return res.status(403).json({
+            error: 'Esta viatura é propriedade de outra escola e não pode ser escalada para esta instituição.',
+          });
+        }
+        if (vehicle.verificationStatus !== 'verified' || vehicle.dnvtStatus === 'expired' || vehicle.status === 'suspended') {
+          return res.status(400).json({ error: 'Viatura inelegível: inspeção DNVT expirada, suspensa ou não verificada.' });
         }
         if (!driverId && vehicle.assignedDriverId) {
           driverId = vehicle.assignedDriverId;
@@ -2443,8 +5846,14 @@ async function createApp() {
 
       if (driverId !== null) {
         const dRows = await db.select().from(drivers).where(eq(drivers.id, driverId)).limit(1);
-        if (!dRows[0]) {
+        const drv = dRows[0];
+        if (!drv) {
           return res.status(404).json({ error: 'Motorista selecionado não encontrado.' });
+        }
+        if (drv.employerType === 'school' && drv.employerSchoolId != null && drv.employerSchoolId !== schoolId) {
+          return res.status(403).json({
+            error: 'Este motorista pertence a outra escola e não pode ser escalado para esta instituição.',
+          });
         }
       }
 
@@ -2552,14 +5961,26 @@ async function createApp() {
         return res.status(404).json({ error: 'Escola selecionada não encontrada.' });
       }
 
+      const matchedRoute = await getRouteWithStopsByCode(routeCode, { includeInactive: true });
+      if (matchedRoute && matchedRoute.schoolId != null && matchedRoute.schoolId !== schoolId) {
+        return res.status(403).json({
+          error: 'A rota selecionada pertence a outra instituição escolar.',
+        });
+      }
+
       if (vehicleId !== null) {
         const vRows = await db.select().from(vehicles).where(eq(vehicles.id, vehicleId)).limit(1);
         const vehicle = vRows[0];
         if (!vehicle) {
           return res.status(404).json({ error: 'Viatura selecionada não encontrada.' });
         }
-        if (vehicle.verificationStatus !== 'verified' || vehicle.dnvtStatus === 'expired') {
-          return res.status(400).json({ error: 'Viatura inelegível: inspeção DNVT expirada ou não verificada.' });
+        if (vehicle.ownershipType === 'school_owned' && vehicle.assignedSchoolId != null && vehicle.assignedSchoolId !== schoolId) {
+          return res.status(403).json({
+            error: 'Esta viatura é propriedade de outra escola e não pode ser escalada para esta instituição.',
+          });
+        }
+        if (vehicle.verificationStatus !== 'verified' || vehicle.dnvtStatus === 'expired' || vehicle.status === 'suspended') {
+          return res.status(400).json({ error: 'Viatura inelegível: inspeção DNVT expirada, suspensa ou não verificada.' });
         }
         if (driverId === null && vehicle.assignedDriverId && req.body?.driverId === undefined) {
           driverId = vehicle.assignedDriverId;
@@ -2577,6 +5998,19 @@ async function createApp() {
               error: `Conflito de horário: o Autocarro ${vehicle.fleetNumber} (${vehicle.plate}) já possui escala ativa (${conflict.routeCode} · ${conflict.departureTime}–${conflict.arrivalTime}).`,
             });
           }
+        }
+      }
+
+      if (driverId !== null) {
+        const dRows = await db.select().from(drivers).where(eq(drivers.id, driverId)).limit(1);
+        const drv = dRows[0];
+        if (!drv) {
+          return res.status(404).json({ error: 'Motorista selecionado não encontrado.' });
+        }
+        if (drv.employerType === 'school' && drv.employerSchoolId != null && drv.employerSchoolId !== schoolId) {
+          return res.status(403).json({
+            error: 'Este motorista pertence a outra escola e não pode ser escalado para esta instituição.',
+          });
         }
       }
 
@@ -2659,6 +6093,580 @@ async function createApp() {
     }
   });
 
+  // ==========================================================================
+  // 7b. ADMIN ROUTE CORRIDORS & STOPS CRUD (Operations & Fleet Managers)
+  // ==========================================================================
+
+  const ROUTE_MANAGER_ROLES: MoBussRole[] = ['mobuss_super_admin', 'operations_manager', 'fleet_manager'];
+
+  function parseCoordinatePair(raw: unknown): [number, number] | null {
+    if (!Array.isArray(raw) || raw.length < 2) return null;
+    const lat = Number(raw[0]);
+    const lng = Number(raw[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+      return null;
+    }
+    return [Number(lat.toFixed(6)), Number(lng.toFixed(6))];
+  }
+
+  function parsePathCoordinatesInput(raw: unknown): [number, number][] | null {
+    if (raw === undefined) return null;
+    if (!Array.isArray(raw)) return [];
+    const parsed: [number, number][] = [];
+    for (const item of raw) {
+      const pair = parseCoordinatePair(item);
+      if (pair) parsed.push(pair);
+    }
+    return parsed;
+  }
+
+  app.get('/api/v1/admin/routes', requireAuth, requireRoles(ADMIN_STAFF_ROLES), async (_req: AuthRequest, res: Response) => {
+    try {
+      await ensureDatabaseSeeded();
+      const allRoutes = await loadRoutesWithStops({ includeInactive: true });
+      res.json({ routes: allRoutes });
+    } catch (error) {
+      console.error('Admin routes list failed:', error);
+      res.status(500).json({ error: 'Erro ao listar rotas configuradas.' });
+    }
+  });
+
+  app.post('/api/v1/admin/routes', requireAuth, requireRoles(ROUTE_MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      const actor = req.dbUser!;
+      const code = String(req.body?.code ?? '').trim().toUpperCase();
+      const name = String(req.body?.name ?? '').trim();
+      const corridor = req.body?.corridor ? String(req.body.corridor).trim() : null;
+      const schoolId =
+        req.body?.schoolId !== undefined && req.body?.schoolId !== null && req.body?.schoolId !== ''
+          ? Number(req.body.schoolId)
+          : null;
+      const active = req.body?.active !== undefined ? Boolean(req.body.active) : true;
+      const pathCoordinatesInput = parsePathCoordinatesInput(req.body?.pathCoordinates) ?? [];
+
+      if (!code || !/^[A-Z0-9_-]{2,24}$/.test(code)) {
+        return res.status(400).json({
+          error: 'Código de rota inválido. Use 2–24 caracteres alfanuméricos ou hífen (ex: ROTA-E).',
+        });
+      }
+      if (!name) {
+        return res.status(400).json({ error: 'Nome da rota é obrigatório.' });
+      }
+      if (schoolId !== null) {
+        if (!Number.isInteger(schoolId) || schoolId <= 0) {
+          return res.status(400).json({ error: 'ID de escola inválido.' });
+        }
+        const sRows = await db.select({ id: schools.id }).from(schools).where(eq(schools.id, schoolId)).limit(1);
+        if (!sRows[0]) {
+          return res.status(404).json({ error: 'Escola selecionada não encontrada.' });
+        }
+      }
+
+      const duplicate = await db
+        .select({ id: routes.id })
+        .from(routes)
+        .where(eq(routes.code, code))
+        .limit(1);
+      if (duplicate[0]) {
+        return res.status(409).json({ error: `Já existe uma rota com o código ${code}.` });
+      }
+
+      const rawStops = Array.isArray(req.body?.stops) ? req.body.stops : [];
+      const validatedStops: Array<{
+        name: string;
+        latitude: number;
+        longitude: number;
+        scheduledTime: string;
+        geofenceRadiusM: number;
+      }> = [];
+
+      for (const st of rawStops) {
+        const stName = String(st?.name ?? '').trim();
+        const lat = Number(st?.latitude);
+        const lng = Number(st?.longitude);
+        const scheduledTime = String(st?.scheduledTime ?? '07:00').trim() || '07:00';
+        const geofenceRadiusM =
+          st?.geofenceRadiusM != null && Number.isFinite(Number(st.geofenceRadiusM))
+            ? Math.max(50, Math.min(5000, Math.round(Number(st.geofenceRadiusM))))
+            : 500;
+        if (
+          !stName ||
+          !Number.isFinite(lat) ||
+          !Number.isFinite(lng) ||
+          Math.abs(lat) > 90 ||
+          Math.abs(lng) > 180
+        ) {
+          return res.status(400).json({ error: 'Cada paragem deve incluir nome, latitude e longitude válidos.' });
+        }
+        if (!TIME_HHMM_RE.test(scheduledTime)) {
+          return res.status(400).json({ error: `Hora prevista inválida na paragem "${stName}". Use HH:MM.` });
+        }
+        validatedStops.push({
+          name: stName,
+          latitude: Number(lat.toFixed(6)),
+          longitude: Number(lng.toFixed(6)),
+          scheduledTime,
+          geofenceRadiusM,
+        });
+      }
+
+      const effectivePath: [number, number][] =
+        pathCoordinatesInput.length > 0
+          ? pathCoordinatesInput
+          : validatedStops.map((st) => [st.latitude, st.longitude]);
+
+      const createdRouteId = await db.transaction(async (tx) => {
+        const inserted = await tx
+          .insert(routes)
+          .values({
+            code,
+            name,
+            corridor,
+            schoolId,
+            pathCoordinates: effectivePath,
+            active,
+          })
+          .returning();
+        const routeRow = inserted[0]!;
+        if (validatedStops.length > 0) {
+          await tx.insert(routeStops).values(
+            validatedStops.map((st, idx) => ({
+              routeId: routeRow.id,
+              position: idx,
+              name: st.name,
+              latitude: st.latitude,
+              longitude: st.longitude,
+              scheduledTime: st.scheduledTime,
+              geofenceRadiusM: st.geofenceRadiusM,
+            }))
+          );
+        }
+        return routeRow.id;
+      });
+
+      const createdRoute = await getRouteWithStopsById(createdRouteId);
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'route.created',
+        targetEntity: 'routes',
+        targetId: createdRouteId,
+        summary: `Rota ${code} ("${name}") criada com ${validatedStops.length} paragem(ns).`,
+        after: createdRoute,
+      });
+
+      res.status(201).json({
+        route: createdRoute,
+        message: `Rota ${code} (${name}) criada na base de dados.`,
+      });
+    } catch (error) {
+      console.error('Create route failed:', error);
+      res.status(500).json({ error: 'Erro ao criar rota.' });
+    }
+  });
+
+  app.patch('/api/v1/admin/routes/:id', requireAuth, requireRoles(ROUTE_MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      const actor = req.dbUser!;
+      const routeId = Number(req.params.id);
+      if (!Number.isInteger(routeId) || routeId <= 0) {
+        return res.status(400).json({ error: 'ID de rota inválido.' });
+      }
+
+      const existing = await getRouteWithStopsById(routeId);
+      if (!existing) {
+        return res.status(404).json({ error: 'Rota não encontrada.' });
+      }
+
+      const code =
+        req.body?.code !== undefined ? String(req.body.code).trim().toUpperCase() : existing.code;
+      const name =
+        req.body?.name !== undefined ? String(req.body.name).trim() : existing.name;
+      const corridor =
+        req.body?.corridor !== undefined
+          ? req.body.corridor
+            ? String(req.body.corridor).trim()
+            : null
+          : existing.corridor;
+      const schoolId =
+        req.body?.schoolId === undefined
+          ? existing.schoolId
+          : req.body.schoolId === null || req.body.schoolId === ''
+          ? null
+          : Number(req.body.schoolId);
+      const active = req.body?.active !== undefined ? Boolean(req.body.active) : existing.active;
+      const parsedPath = parsePathCoordinatesInput(req.body?.pathCoordinates);
+      const pathCoordinates = parsedPath !== null ? parsedPath : existing.pathCoordinates;
+
+      if (!code || !/^[A-Z0-9_-]{2,24}$/.test(code)) {
+        return res.status(400).json({ error: 'Código de rota inválido.' });
+      }
+      if (!name) {
+        return res.status(400).json({ error: 'Nome da rota é obrigatório.' });
+      }
+      if (schoolId !== null) {
+        if (!Number.isInteger(schoolId) || schoolId <= 0) {
+          return res.status(400).json({ error: 'ID de escola inválido.' });
+        }
+        const sRows = await db.select({ id: schools.id }).from(schools).where(eq(schools.id, schoolId)).limit(1);
+        if (!sRows[0]) {
+          return res.status(404).json({ error: 'Escola selecionada não encontrada.' });
+        }
+      }
+
+      if (code !== existing.code) {
+        const dup = await db
+          .select({ id: routes.id })
+          .from(routes)
+          .where(and(eq(routes.code, code), ne(routes.id, routeId)))
+          .limit(1);
+        if (dup[0]) {
+          return res.status(409).json({ error: `Código ${code} já está em uso noutra rota.` });
+        }
+      }
+
+      await db
+        .update(routes)
+        .set({
+          code,
+          name,
+          corridor,
+          schoolId,
+          active,
+          pathCoordinates,
+          updatedAt: new Date(),
+        })
+        .where(eq(routes.id, routeId));
+
+      const updatedRoute = await getRouteWithStopsById(routeId);
+
+      const actionName =
+        req.body?.active !== undefined && active !== existing.active
+          ? active
+            ? 'route.activated'
+            : 'route.deactivated'
+          : 'route.updated';
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: actionName,
+        targetEntity: 'routes',
+        targetId: routeId,
+        summary: `Rota ${code} (${name}) atualizada (${active ? 'Ativa' : 'Desativada'}).`,
+        before: { code: existing.code, name: existing.name, active: existing.active, schoolId: existing.schoolId },
+        after: { code, name, active, schoolId },
+      });
+
+      res.json({
+        route: updatedRoute,
+        message:
+          actionName === 'route.deactivated'
+            ? `Rota ${code} desativada.`
+            : actionName === 'route.activated'
+            ? `Rota ${code} reativada.`
+            : `Rota ${code} atualizada.`,
+      });
+    } catch (error) {
+      console.error('Update route failed:', error);
+      res.status(500).json({ error: 'Erro ao atualizar rota.' });
+    }
+  });
+
+  app.post('/api/v1/admin/routes/:id/stops', requireAuth, requireRoles(ROUTE_MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      const actor = req.dbUser!;
+      const routeId = Number(req.params.id);
+      if (!Number.isInteger(routeId) || routeId <= 0) {
+        return res.status(400).json({ error: 'ID de rota inválido.' });
+      }
+
+      const route = await getRouteWithStopsById(routeId);
+      if (!route) {
+        return res.status(404).json({ error: 'Rota não encontrada.' });
+      }
+
+      const name = String(req.body?.name ?? '').trim();
+      const latitude = Number(req.body?.latitude);
+      const longitude = Number(req.body?.longitude);
+      const scheduledTime = String(req.body?.scheduledTime ?? '07:00').trim() || '07:00';
+      const geofenceRadiusM =
+        req.body?.geofenceRadiusM != null && Number.isFinite(Number(req.body.geofenceRadiusM))
+          ? Math.max(50, Math.min(5000, Math.round(Number(req.body.geofenceRadiusM))))
+          : 500;
+      const appendToPath = Boolean(req.body?.appendToPath);
+
+      if (
+        !name ||
+        !Number.isFinite(latitude) ||
+        !Number.isFinite(longitude) ||
+        Math.abs(latitude) > 90 ||
+        Math.abs(longitude) > 180
+      ) {
+        return res.status(400).json({ error: 'Nome, latitude e longitude válidos são obrigatórios.' });
+      }
+      if (!TIME_HHMM_RE.test(scheduledTime)) {
+        return res.status(400).json({ error: 'Hora prevista inválida. Utilize o formato HH:MM.' });
+      }
+
+      const nextPos = route.stops.length;
+      const latFixed = Number(latitude.toFixed(6));
+      const lngFixed = Number(longitude.toFixed(6));
+
+      const inserted = await db
+        .insert(routeStops)
+        .values({
+          routeId,
+          position: nextPos,
+          name,
+          latitude: latFixed,
+          longitude: lngFixed,
+          scheduledTime,
+          geofenceRadiusM,
+        })
+        .returning();
+
+      if (appendToPath || route.pathCoordinates.length < 2) {
+        const nextPath: [number, number][] = [...route.pathCoordinates, [latFixed, lngFixed]];
+        await db
+          .update(routes)
+          .set({ pathCoordinates: nextPath, updatedAt: new Date() })
+          .where(eq(routes.id, routeId));
+      }
+
+      const updatedRoute = await getRouteWithStopsById(routeId);
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'route_stop.added',
+        targetEntity: 'route_stops',
+        targetId: inserted[0]!.id,
+        summary: `Paragem "${name}" adicionada à rota ${route.code} na posição ${nextPos + 1} (raio ${geofenceRadiusM}m).`,
+        after: inserted[0],
+      });
+
+      res.status(201).json({
+        stop: inserted[0],
+        route: updatedRoute,
+        message: `Paragem "${name}" adicionada à rota ${route.code}.`,
+      });
+    } catch (error) {
+      console.error('Add route stop failed:', error);
+      res.status(500).json({ error: 'Erro ao adicionar paragem à rota.' });
+    }
+  });
+
+  app.patch('/api/v1/admin/routes/:id/stops/:stopId', requireAuth, requireRoles(ROUTE_MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      const actor = req.dbUser!;
+      const routeId = Number(req.params.id);
+      const stopId = Number(req.params.stopId);
+      if (!Number.isInteger(routeId) || routeId <= 0 || !Number.isInteger(stopId) || stopId <= 0) {
+        return res.status(400).json({ error: 'IDs de rota/paragem inválidos.' });
+      }
+
+      const existingRows = await db
+        .select()
+        .from(routeStops)
+        .where(and(eq(routeStops.id, stopId), eq(routeStops.routeId, routeId)))
+        .limit(1);
+      const existing = existingRows[0];
+      if (!existing) {
+        return res.status(404).json({ error: 'Paragem não encontrada nesta rota.' });
+      }
+
+      const name = req.body?.name !== undefined ? String(req.body.name).trim() : existing.name;
+      const latitude = req.body?.latitude !== undefined ? Number(req.body.latitude) : existing.latitude;
+      const longitude = req.body?.longitude !== undefined ? Number(req.body.longitude) : existing.longitude;
+      const scheduledTime =
+        req.body?.scheduledTime !== undefined
+          ? String(req.body.scheduledTime).trim()
+          : existing.scheduledTime;
+      const geofenceRadiusM =
+        req.body?.geofenceRadiusM !== undefined
+          ? Math.max(50, Math.min(5000, Math.round(Number(req.body.geofenceRadiusM) || 500)))
+          : existing.geofenceRadiusM;
+
+      if (
+        !name ||
+        !Number.isFinite(latitude) ||
+        !Number.isFinite(longitude) ||
+        Math.abs(latitude) > 90 ||
+        Math.abs(longitude) > 180
+      ) {
+        return res.status(400).json({ error: 'Nome, latitude e longitude válidos são obrigatórios.' });
+      }
+      if (!TIME_HHMM_RE.test(scheduledTime)) {
+        return res.status(400).json({ error: 'Hora prevista inválida. Utilize HH:MM.' });
+      }
+
+      const updated = await db
+        .update(routeStops)
+        .set({
+          name,
+          latitude: Number(latitude.toFixed(6)),
+          longitude: Number(longitude.toFixed(6)),
+          scheduledTime,
+          geofenceRadiusM,
+          updatedAt: new Date(),
+        })
+        .where(eq(routeStops.id, stopId))
+        .returning();
+
+      const updatedRoute = await getRouteWithStopsById(routeId);
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'route_stop.updated',
+        targetEntity: 'route_stops',
+        targetId: stopId,
+        summary: `Paragem "${name}" (#${stopId}) atualizada na rota ${updatedRoute?.code ?? routeId}.`,
+        before: existing,
+        after: updated[0],
+      });
+
+      res.json({
+        stop: updated[0],
+        route: updatedRoute,
+        message: `Paragem "${name}" atualizada.`,
+      });
+    } catch (error) {
+      console.error('Update route stop failed:', error);
+      res.status(500).json({ error: 'Erro ao atualizar paragem.' });
+    }
+  });
+
+  app.delete('/api/v1/admin/routes/:id/stops/:stopId', requireAuth, requireRoles(ROUTE_MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      const actor = req.dbUser!;
+      const routeId = Number(req.params.id);
+      const stopId = Number(req.params.stopId);
+      if (!Number.isInteger(routeId) || routeId <= 0 || !Number.isInteger(stopId) || stopId <= 0) {
+        return res.status(400).json({ error: 'IDs de rota/paragem inválidos.' });
+      }
+
+      const route = await getRouteWithStopsById(routeId);
+      if (!route) {
+        return res.status(404).json({ error: 'Rota não encontrada.' });
+      }
+
+      const targetStop = route.stops.find((s) => s.id === stopId);
+      if (!targetStop) {
+        return res.status(404).json({ error: 'Paragem não encontrada nesta rota.' });
+      }
+
+      await db.transaction(async (tx) => {
+        await tx.delete(routeStops).where(and(eq(routeStops.id, stopId), eq(routeStops.routeId, routeId)));
+        const remaining = await tx
+          .select()
+          .from(routeStops)
+          .where(eq(routeStops.routeId, routeId))
+          .orderBy(asc(routeStops.position), asc(routeStops.id));
+        for (let idx = 0; idx < remaining.length; idx++) {
+          const item = remaining[idx]!;
+          if (item.position !== idx) {
+            await tx
+              .update(routeStops)
+              .set({ position: idx, updatedAt: new Date() })
+              .where(eq(routeStops.id, item.id));
+          }
+        }
+      });
+
+      const updatedRoute = await getRouteWithStopsById(routeId);
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'route_stop.removed',
+        targetEntity: 'route_stops',
+        targetId: stopId,
+        summary: `Paragem "${targetStop.name}" removida da rota ${route.code}.`,
+        before: targetStop,
+      });
+
+      res.json({
+        deletedStopId: stopId,
+        route: updatedRoute,
+        message: `Paragem "${targetStop.name}" removida da rota ${route.code}.`,
+      });
+    } catch (error) {
+      console.error('Delete route stop failed:', error);
+      res.status(500).json({ error: 'Erro ao remover paragem da rota.' });
+    }
+  });
+
+  app.put('/api/v1/admin/routes/:id/stops/reorder', requireAuth, requireRoles(ROUTE_MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+    try {
+      const actor = req.dbUser!;
+      const routeId = Number(req.params.id);
+      if (!Number.isInteger(routeId) || routeId <= 0) {
+        return res.status(400).json({ error: 'ID de rota inválido.' });
+      }
+
+      const rawStopIds = Array.isArray(req.body?.stopIds) ? req.body.stopIds : [];
+      const stopIds = rawStopIds.map((id: unknown) => Number(id));
+      if (stopIds.length === 0 || stopIds.some((id: number) => !Number.isInteger(id) || id <= 0)) {
+        return res.status(400).json({ error: 'Lista ordenada stopIds válida é obrigatória.' });
+      }
+
+      const route = await getRouteWithStopsById(routeId);
+      if (!route) {
+        return res.status(404).json({ error: 'Rota não encontrada.' });
+      }
+
+      const existingIds = new Set(route.stops.map((s) => s.id));
+      const uniqueInputIds = new Set(stopIds);
+      if (
+        uniqueInputIds.size !== existingIds.size ||
+        stopIds.length !== existingIds.size ||
+        stopIds.some((id: number) => !existingIds.has(id))
+      ) {
+        return res.status(400).json({
+          error: 'A lista de paragens para reordenação deve corresponder exatamente às paragens da rota.',
+        });
+      }
+
+      await db.transaction(async (tx) => {
+        for (let idx = 0; idx < stopIds.length; idx++) {
+          await tx
+            .update(routeStops)
+            .set({ position: idx, updatedAt: new Date() })
+            .where(and(eq(routeStops.id, stopIds[idx]!), eq(routeStops.routeId, routeId)));
+        }
+      });
+
+      const updatedRoute = await getRouteWithStopsById(routeId);
+
+      await writeAuditLog({
+        actorUid: actor.uid,
+        actorEmail: actor.email,
+        actorRole: actor.primaryRole,
+        action: 'route_stops.reordered',
+        targetEntity: 'routes',
+        targetId: routeId,
+        summary: `Ordem das paragens da rota ${route.code} reorganizada (${stopIds.length} paragens).`,
+        after: { stopIds },
+      });
+
+      res.json({
+        route: updatedRoute,
+        message: `Ordem das paragens da rota ${route.code} atualizada.`,
+      });
+    } catch (error) {
+      console.error('Reorder route stops failed:', error);
+      res.status(500).json({ error: 'Erro ao reordenar paragens da rota.' });
+    }
+  });
+
   app.patch('/api/v1/admin/drivers/:id', requireAuth, requireRoles(['mobuss_super_admin', 'fleet_manager', 'operations_manager']), async (req: AuthRequest, res: Response) => {
     try {
       const actor = req.dbUser!;
@@ -2681,10 +6689,32 @@ async function createApp() {
       const availabilityStatus = ['in_service', 'available', 'off_duty'].includes(req.body?.availabilityStatus)
         ? String(req.body.availabilityStatus)
         : existing.availabilityStatus;
+      const verificationStatus = ['verified', 'suspended', 'pending'].includes(req.body?.verificationStatus)
+        ? String(req.body.verificationStatus)
+        : existing.verificationStatus;
+      const employerType = ['school', 'mobuss'].includes(req.body?.employerType)
+        ? String(req.body.employerType)
+        : existing.employerType;
+      const rawEmployerSchoolId =
+        req.body?.employerSchoolId === undefined
+          ? existing.employerSchoolId
+          : req.body.employerSchoolId === null || req.body.employerSchoolId === ''
+          ? null
+          : Number(req.body.employerSchoolId);
+      const employerSchoolId = employerType === 'mobuss' ? null : rawEmployerSchoolId;
       const monthlyCompensationAoa = Math.max(0, Number(req.body?.monthlyCompensationAoa ?? existing.monthlyCompensationAoa) || 0);
 
       if (fullName.length < 2 || !phone) {
         return res.status(400).json({ error: 'Nome e telefone do motorista são obrigatórios.' });
+      }
+      if (employerType === 'school') {
+        if (!employerSchoolId) {
+          return res.status(400).json({ error: 'Selecione a escola empregadora do motorista.' });
+        }
+        const sRows = await db.select().from(schools).where(eq(schools.id, employerSchoolId)).limit(1);
+        if (!sRows[0]) {
+          return res.status(400).json({ error: 'Escola selecionada não encontrada.' });
+        }
       }
 
       const updated = await db
@@ -2695,11 +6725,25 @@ async function createApp() {
           licenceCategory,
           licenceNumber,
           licenceExpiry,
+          employerType,
+          employerSchoolId,
+          verificationStatus,
           availabilityStatus,
           monthlyCompensationAoa,
         })
         .where(eq(drivers.id, driverId))
         .returning();
+
+      await db
+        .update(users)
+        .set({
+          fullName,
+          phone,
+          schoolId: employerType === 'school' ? employerSchoolId : null,
+          active: verificationStatus !== 'suspended',
+          updatedAt: new Date(),
+        })
+        .where(eq(users.driverId, driverId));
 
       await writeAuditLog({
         actorUid: actor.uid,
@@ -2708,7 +6752,7 @@ async function createApp() {
         action: 'driver.updated',
         targetEntity: 'drivers',
         targetId: driverId,
-        summary: `Dados do motorista ${fullName} (#${driverId}) atualizados (${availabilityStatus}).`,
+        summary: `Dados do motorista ${fullName} (#${driverId}) atualizados (${employerType}, ${verificationStatus}, ${availabilityStatus}).`,
       });
 
       res.json({
@@ -3051,21 +7095,30 @@ async function createApp() {
     try {
       const dbUser = req.dbUser!;
       const incidentId = Number(req.params.id);
+      if (!Number.isInteger(incidentId) || incidentId <= 0) {
+        return res.status(400).json({ error: 'ID da ocorrência inválido.' });
+      }
       const status = ['acknowledged', 'assigned', 'in_progress', 'resolved', 'closed'].includes(req.body?.status)
         ? String(req.body.status)
         : 'resolved';
       const resolutionNotes = req.body?.resolutionNotes ? String(req.body.resolutionNotes) : undefined;
+      const now = new Date();
 
       const updated = await db
         .update(incidents)
         .set({
           status,
           assignedToName: dbUser.fullName,
+          ...(status === 'acknowledged' ? { acknowledgedAt: now } : {}),
           ...(resolutionNotes ? { resolutionNotes } : {}),
-          updatedAt: new Date(),
+          updatedAt: now,
         })
         .where(eq(incidents.id, incidentId))
         .returning();
+
+      if (!updated[0]) {
+        return res.status(404).json({ error: 'Ocorrência não encontrada.' });
+      }
 
       await writeAuditLog({
         actorUid: dbUser.uid,
@@ -3076,6 +7129,8 @@ async function createApp() {
         targetId: incidentId,
         summary: `Ocorrência #${incidentId} atualizada para ${status}${resolutionNotes ? ` (${resolutionNotes})` : ''}.`,
       });
+
+      telemetryHub.broadcast('incident:updated', { incident: updated[0] });
 
       res.json({ incident: updated[0] });
     } catch (error) {
@@ -3226,21 +7281,41 @@ async function createApp() {
       }
 
       let createdDriverId: number | null = null;
+      let resolvedUserSchoolId: number | null = primaryRole === 'school_admin' ? schoolId : null;
       if (primaryRole === 'driver') {
-        const dIns = await db
-          .insert(drivers)
-          .values({
-            fullName,
-            phone: phone || '+244 923 000 000',
-            licenceCategory: 'Pesados Profissional D',
-            licenceNumber: `LD-${crypto.randomInt(100000, 999999)}`,
-            licenceExpiry: '2028-12-31',
-            engagementType: 'employed',
-            verificationStatus: 'verified',
-            availabilityStatus: 'available',
-          })
-          .returning();
-        createdDriverId = dIns[0]?.id ?? null;
+        const requestedDriverId = req.body?.driverId ? Number(req.body.driverId) : null;
+        if (requestedDriverId) {
+          const matchedDriver = await db.select().from(drivers).where(eq(drivers.id, requestedDriverId)).limit(1);
+          if (!matchedDriver[0]) {
+            return res.status(404).json({ error: 'Motorista selecionado não encontrado.' });
+          }
+          createdDriverId = matchedDriver[0].id;
+          resolvedUserSchoolId =
+            matchedDriver[0].employerType === 'school' ? matchedDriver[0].employerSchoolId ?? schoolId : null;
+        } else {
+          const employerType = req.body?.employerType === 'mobuss' ? 'mobuss' : 'school';
+          const employerSchoolId = employerType === 'school' ? schoolId : null;
+          if (employerType === 'school' && !employerSchoolId) {
+            return res.status(400).json({ error: 'Selecione a escola empregadora para o motorista.' });
+          }
+          const dIns = await db
+            .insert(drivers)
+            .values({
+              fullName,
+              phone: phone || '+244 923 000 000',
+              licenceCategory: 'Pesados Profissional D',
+              licenceNumber: `LD-${crypto.randomInt(100000, 999999)}`,
+              licenceExpiry: '2028-12-31',
+              employerType,
+              employerSchoolId,
+              engagementType: 'employed',
+              verificationStatus: 'verified',
+              availabilityStatus: 'available',
+            })
+            .returning();
+          createdDriverId = dIns[0]?.id ?? null;
+          resolvedUserSchoolId = employerSchoolId;
+        }
       }
 
       let createdOwnerId: number | null = null;
@@ -3303,7 +7378,7 @@ async function createApp() {
           passwordHash: pwFields.passwordHash,
           passwordSalt: pwFields.passwordSalt,
           primaryRole,
-          schoolId: primaryRole === 'school_admin' ? schoolId : null,
+          schoolId: resolvedUserSchoolId,
           driverId: createdDriverId,
           ownerId: createdOwnerId,
           active: true,
@@ -3696,53 +7771,59 @@ async function createApp() {
   });
 
   // ==========================================================================
-  // 7B. POSTGRESQL-BACKED LIVE TRIP SIMULATION ENDPOINTS (ADMIN / OPS)
+  // 7B. POSTGRESQL-BACKED LIVE TRIP SIMULATION ENDPOINTS (HUB DEMO BUILD ONLY)
   // ==========================================================================
 
-  app.get('/api/v1/simulation/status', requireAuth, requireRoles(['mobuss_super_admin', 'operations_manager']), (_req: AuthRequest, res: Response) => {
-    res.json({
-      simulation: simulationRunner.getStatus(),
-      connectedClients: telemetryHub.getConnectedCount(),
+  if (isHubTarget && simulationRunner) {
+    app.get('/api/v1/simulation/status', requireAuth, requireRoles(['mobuss_super_admin', 'operations_manager']), (_req: AuthRequest, res: Response) => {
+      res.json({
+        simulation: simulationRunner.getStatus(),
+        connectedClients: telemetryHub.getConnectedCount(),
+      });
     });
-  });
 
-  app.post('/api/v1/simulation/start', requireAuth, requireRoles(['mobuss_super_admin', 'operations_manager']), async (req: AuthRequest, res: Response) => {
-    try {
-      const routeCode = String(req.body?.routeCode ?? 'ROTA-A');
-      const status = await simulationRunner.start(routeCode, req.dbUser);
+    app.post('/api/v1/simulation/start', requireAuth, requireRoles(['mobuss_super_admin', 'operations_manager']), async (req: AuthRequest, res: Response) => {
+      try {
+        const routeCode = String(req.body?.routeCode ?? 'ROTA-A');
+        const status = await simulationRunner.start(routeCode, req.dbUser);
+        res.json({ simulation: status, connectedClients: telemetryHub.getConnectedCount() });
+      } catch (error) {
+        console.error('Simulation start failed:', error);
+        res.status(500).json({ error: 'Falha ao iniciar simulação no PostgreSQL.' });
+      }
+    });
+
+    app.post('/api/v1/simulation/pause', requireAuth, requireRoles(['mobuss_super_admin', 'operations_manager']), (_req: AuthRequest, res: Response) => {
+      const status = simulationRunner.pause();
       res.json({ simulation: status, connectedClients: telemetryHub.getConnectedCount() });
-    } catch (error) {
-      console.error('Simulation start failed:', error);
-      res.status(500).json({ error: 'Falha ao iniciar simulação no PostgreSQL.' });
-    }
-  });
+    });
 
-  app.post('/api/v1/simulation/pause', requireAuth, requireRoles(['mobuss_super_admin', 'operations_manager']), (_req: AuthRequest, res: Response) => {
-    const status = simulationRunner.pause();
-    res.json({ simulation: status, connectedClients: telemetryHub.getConnectedCount() });
-  });
+    app.post('/api/v1/simulation/step', requireAuth, requireRoles(['mobuss_super_admin', 'operations_manager']), async (req: AuthRequest, res: Response) => {
+      try {
+        const delta = Number(req.body?.delta ?? 0.08);
+        const status = await simulationRunner.stepOnce(delta);
+        res.json({ simulation: status, connectedClients: telemetryHub.getConnectedCount() });
+      } catch (error) {
+        console.error('Simulation step failed:', error);
+        res.status(500).json({ error: 'Falha ao avançar passo da simulação.' });
+      }
+    });
 
-  app.post('/api/v1/simulation/step', requireAuth, requireRoles(['mobuss_super_admin', 'operations_manager']), async (req: AuthRequest, res: Response) => {
-    try {
-      const delta = Number(req.body?.delta ?? 0.08);
-      const status = await simulationRunner.stepOnce(delta);
-      res.json({ simulation: status, connectedClients: telemetryHub.getConnectedCount() });
-    } catch (error) {
-      console.error('Simulation step failed:', error);
-      res.status(500).json({ error: 'Falha ao avançar passo da simulação.' });
-    }
-  });
-
-  app.post('/api/v1/simulation/reset', requireAuth, requireRoles(['mobuss_super_admin', 'operations_manager']), async (req: AuthRequest, res: Response) => {
-    try {
-      const routeCode = String(req.body?.routeCode ?? 'ROTA-A');
-      const status = await simulationRunner.reset(routeCode);
-      res.json({ simulation: status, connectedClients: telemetryHub.getConnectedCount() });
-    } catch (error) {
-      console.error('Simulation reset failed:', error);
-      res.status(500).json({ error: 'Falha ao reiniciar simulação.' });
-    }
-  });
+    app.post('/api/v1/simulation/reset', requireAuth, requireRoles(['mobuss_super_admin', 'operations_manager']), async (req: AuthRequest, res: Response) => {
+      try {
+        const routeCode = String(req.body?.routeCode ?? 'ROTA-A');
+        const status = await simulationRunner.reset(routeCode);
+        res.json({ simulation: status, connectedClients: telemetryHub.getConnectedCount() });
+      } catch (error) {
+        console.error('Simulation reset failed:', error);
+        res.status(500).json({ error: 'Falha ao reiniciar simulação.' });
+      }
+    });
+  } else {
+    app.use('/api/v1/simulation', (_req: Request, res: Response) => {
+      res.status(404).json({ error: 'Endpoint de simulação disponível apenas no modo hub.' });
+    });
+  }
 
   // ==========================================================================
   // 8. VITE DEV MIDDLEWARE / PRODUCTION STATIC ASSETS
@@ -3761,9 +7842,6 @@ async function createApp() {
     app.use(vite.middlewares);
   } else {
     const fs = await import('node:fs');
-    const validTargets = new Set(['hub', 'client', 'driver', 'admin', 'school']);
-    const rawTarget = (process.env.MOBUSS_WEB_TARGET || process.env.VITE_APP_TARGET || 'hub').toLowerCase().trim();
-    const activeTarget = validTargets.has(rawTarget) ? rawTarget : 'hub';
     const targetDistDir = path.resolve(__dirname, 'dist', activeTarget);
     const hubDistDir = path.resolve(__dirname, 'dist', 'hub');
     const legacyDistDir = path.resolve(__dirname, 'dist');

@@ -11,6 +11,8 @@ export interface TelemetryEvent {
     | 'attendance:updated'
     | 'pin:validated'
     | 'incident:created'
+    | 'incident:updated'
+    | 'notification:created'
     | 'simulation:status';
   payload: Record<string, unknown>;
   timestamp: string;

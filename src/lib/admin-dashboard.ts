@@ -1,10 +1,34 @@
 import { ROLE_LABELS, type MoBussRole } from "@/contexts/AuthContext";
-import { checkStopGeofences } from "@/lib/luanda-geofence";
-import { LUANDA_ROUTES } from "@/lib/route-luanda";
+import { checkRouteStopGeofences, resolveRouteByCode, type RouteDto } from "@/lib/luanda-geofence";
+import {
+  computeOverviewSummary,
+  formatCountOrNoData,
+  getAdminOverviewVisibility,
+  getLuandaTodayDateString,
+  resolveEffectiveGpsStatus,
+  type ExpiringDocumentItem,
+  type OverviewSummary,
+  type OverviewVisibility,
+  type ServiceStatusSummary,
+  type StatusBreakdownItem,
+} from "@/lib/overview-types";
 
-export interface AdminRolePermissions {
+export {
+  computeOverviewSummary,
+  formatCountOrNoData,
+  getAdminOverviewVisibility,
+  getLuandaTodayDateString,
+  type ExpiringDocumentItem,
+  type OverviewSummary,
+  type OverviewVisibility,
+  type ServiceStatusSummary,
+  type StatusBreakdownItem,
+};
+
+export interface AdminRolePermissions extends OverviewVisibility {
   canManageContracts: boolean;
   canManageVehicles: boolean;
+  canManageRoutes: boolean;
   canManageRouteSchedules: boolean;
   canEditDrivers: boolean;
   canCreateStudents: boolean;
@@ -13,13 +37,17 @@ export interface AdminRolePermissions {
   canCreateUsers: boolean;
   canManageRbac: boolean;
   canManagePricing: boolean;
+  canViewFinance: boolean;
 }
 
 export function getAdminRolePermissions(role?: MoBussRole): AdminRolePermissions {
+  const visibility = getAdminOverviewVisibility(role);
   if (!role) {
     return {
+      ...visibility,
       canManageContracts: false,
       canManageVehicles: false,
+      canManageRoutes: false,
       canManageRouteSchedules: false,
       canEditDrivers: false,
       canCreateStudents: false,
@@ -28,12 +56,15 @@ export function getAdminRolePermissions(role?: MoBussRole): AdminRolePermissions
       canCreateUsers: false,
       canManageRbac: false,
       canManagePricing: false,
+      canViewFinance: false,
     };
   }
 
   return {
+    ...visibility,
     canManageContracts: role === "mobuss_super_admin" || role === "school_account_manager",
     canManageVehicles: role === "mobuss_super_admin" || role === "fleet_manager" || role === "operations_manager",
+    canManageRoutes: role === "mobuss_super_admin" || role === "operations_manager" || role === "fleet_manager",
     canManageRouteSchedules:
       role === "mobuss_super_admin" ||
       role === "operations_manager" ||
@@ -53,6 +84,7 @@ export function getAdminRolePermissions(role?: MoBussRole): AdminRolePermissions
       role === "mobuss_super_admin" || role === "operations_manager" || role === "school_account_manager",
     canManageRbac: role === "mobuss_super_admin",
     canManagePricing: role === "mobuss_super_admin" || role === "finance_officer",
+    canViewFinance: visibility.canViewFinanceKpi,
   };
 }
 
@@ -109,6 +141,11 @@ const AUDIT_ACTION_META: Record<string, { title: string; category: AuditCategory
   },
   "system.role_updated": { title: "Perfil de acesso RBAC alterado", category: "Segurança", severity: "warn" },
   "system.seed_staging": { title: "Base de dados inicializada", category: "Sistema", severity: "info" },
+  "system.backfill_school_ownership_v1": {
+    title: "Migração de vínculo escolar de motoristas e viaturas",
+    category: "Sistema",
+    severity: "info",
+  },
   "contract_request.submitted": {
     title: "Novo pedido público de contrato submetido",
     category: "Contratos",
@@ -132,6 +169,43 @@ const AUDIT_ACTION_META: Record<string, { title: string; category: AuditCategory
     category: "Contratos",
     severity: "info",
   },
+  "school.driver_created": { title: "Motorista registado pela escola", category: "Frota", severity: "success" },
+  "school.driver_updated": { title: "Motorista atualizado pela escola", category: "Frota", severity: "info" },
+  "school.driver_suspended": { title: "Motorista suspenso pela escola", category: "Segurança", severity: "warn" },
+  "school.driver_reactivated": { title: "Motorista reativado pela escola", category: "Frota", severity: "success" },
+  "school.driver_login_created": {
+    title: "Credenciais de motorista criadas pela escola",
+    category: "Segurança",
+    severity: "success",
+  },
+  "school.driver_password_reset": {
+    title: "Palavra-passe de motorista redefinida pela escola",
+    category: "Segurança",
+    severity: "warn",
+  },
+  "school.vehicle_created": { title: "Viatura própria registada pela escola", category: "Frota", severity: "success" },
+  "school.vehicle_updated": { title: "Viatura escolar atualizada pela escola", category: "Frota", severity: "info" },
+  "school.vehicle_suspended": { title: "Viatura escolar suspensa pela escola", category: "Frota", severity: "warn" },
+  "school.vehicle_reactivated": {
+    title: "Viatura escolar reativada pela escola",
+    category: "Frota",
+    severity: "success",
+  },
+  "school.route_assigned": {
+    title: "Viatura e motorista atribuídos à rota da escola",
+    category: "Operações",
+    severity: "info",
+  },
+  "school.route_schedule_created": {
+    title: "Escala recorrente criada pela escola",
+    category: "Operações",
+    severity: "success",
+  },
+  "school.route_schedule_updated": {
+    title: "Escala recorrente atualizada pela escola",
+    category: "Operações",
+    severity: "info",
+  },
   "school_request.approved": { title: "Pedido operacional escolar aprovado", category: "Contratos", severity: "success" },
   "school_request.rejected": { title: "Pedido operacional escolar recusado", category: "Contratos", severity: "warn" },
   "vehicle_owner.created": { title: "Proprietário parceiro registado", category: "Frota", severity: "success" },
@@ -141,6 +215,14 @@ const AUDIT_ACTION_META: Record<string, { title: string; category: AuditCategory
   "route_schedule.created": { title: "Escala de rota recorrente agendada", category: "Operações", severity: "success" },
   "route_schedule.updated": { title: "Escala de rota recorrente atualizada", category: "Operações", severity: "info" },
   "route_schedule.deleted": { title: "Escala de rota recorrente removida", category: "Operações", severity: "warn" },
+  "route.created": { title: "Nova rota escolar criada", category: "Operações", severity: "success" },
+  "route.updated": { title: "Rota escolar atualizada", category: "Operações", severity: "info" },
+  "route.activated": { title: "Rota escolar reativada", category: "Operações", severity: "success" },
+  "route.deactivated": { title: "Rota escolar desativada", category: "Operações", severity: "warn" },
+  "route_stop.added": { title: "Paragem adicionada à rota", category: "Operações", severity: "success" },
+  "route_stop.updated": { title: "Paragem da rota atualizada", category: "Operações", severity: "info" },
+  "route_stop.removed": { title: "Paragem removida da rota", category: "Operações", severity: "warn" },
+  "route_stops.reordered": { title: "Ordem das paragens atualizada", category: "Operações", severity: "info" },
   "driver.updated": { title: "Dados do motorista atualizados", category: "Frota", severity: "info" },
   "student.created_by_admin": { title: "Educando registado pelo Admin", category: "Alunos", severity: "success" },
   "student.updated": { title: "Dados do educando modificados", category: "Alunos", severity: "info" },
@@ -177,6 +259,7 @@ const AUDIT_ACTION_META: Record<string, { title: string; category: AuditCategory
     severity: "info",
   },
   "trip.state_changed": { title: "Estado operacional da viagem atualizado", category: "Operações", severity: "info" },
+  "trip.delay_reported": { title: "Desvio / atraso reportado pelo motorista", category: "Operações", severity: "warn" },
   "trip.empty_bus_sweep": {
     title: "Inspeção anti-esquecimento confirmada",
     category: "Operações",
@@ -197,6 +280,16 @@ const AUDIT_ACTION_META: Record<string, { title: string; category: AuditCategory
   },
   "simulation.started": {
     title: "Simulação de rota iniciada (Teste Hub)",
+    category: "Sistema",
+    severity: "info",
+  },
+  "report.exported": {
+    title: "Relatório CSV exportado pela Administração",
+    category: "Sistema",
+    severity: "info",
+  },
+  "report.school_exported": {
+    title: "Relatório CSV exportado pelo Portal Escolar",
     category: "Sistema",
     severity: "info",
   },
@@ -259,6 +352,7 @@ export interface LiveTripSnapshot {
   lastLocationAt: string | null;
   gpsStatus: string;
   emptyBusSweepVerified: boolean;
+  delayReason?: string | null;
 }
 
 export interface RecurringRouteScheduleItem {
@@ -311,13 +405,6 @@ export interface LiveFleetVehicleItem {
   locationLabel: string;
   dnvtStatus: string;
 }
-
-export const ROUTE_CODE_TO_ID: Record<string, string> = {
-  "ROTA-A": "route_a",
-  "ROTA-B": "route_b",
-  "ROTA-C": "route_c",
-  "ROTA-D": "route_d",
-};
 
 export const WEEKDAY_OPTIONS: Array<{ id: string; short: string; label: string }> = [
   { id: "mon", short: "Seg", label: "Segunda" },
@@ -426,15 +513,17 @@ export function buildLiveFleetVehicles(params: {
   }>;
   trips: LiveTripSnapshot[];
   routeSchedules?: RecurringRouteScheduleItem[];
+  routes?: RouteDto[];
 }): LiveFleetVehicleItem[] {
   const driverMap = new Map(params.drivers.map((d) => [d.id, d]));
   const schoolMap = new Map(params.schools.map((s) => [s.id, s]));
+  const dbRoutes = params.routes ?? [];
 
   return params.vehicles.map((v) => {
     const driver = v.assignedDriverId ? driverMap.get(v.assignedDriverId) : undefined;
     const routeCode = v.routeCode || "—";
-    const routeId = ROUTE_CODE_TO_ID[routeCode] ?? null;
-    const routeCfg = routeId ? LUANDA_ROUTES[routeId] : undefined;
+    const routeCfg = resolveRouteByCode(dbRoutes, routeCode);
+    const routeId = routeCfg ? String(routeCfg.id) : null;
 
     const matchingTrips = params.trips.filter(
       (t) => t.vehicleId === v.id || (t.vehicleId == null && t.routeCode === routeCode)
@@ -485,9 +574,12 @@ export function buildLiveFleetVehicles(params: {
 
     let locationLabel = "Localização indisponível";
     if (hasCoordinates) {
-      const geo = routeCode !== "—" && routeCode !== "RESERVA" ? checkStopGeofences(routeCode, parsedLat, parsedLng) : null;
+      const geo =
+        routeCfg && routeCfg.stops.length > 0
+          ? checkRouteStopGeofences(routeCfg.stops, parsedLat, parsedLng)
+          : null;
       const coordText = `${parsedLat.toFixed(4)}, ${parsedLng.toFixed(4)}`;
-      locationLabel = geo
+      locationLabel = geo?.nearestStop
         ? `${geo.nearestStop.stopName} (${coordText})`
         : coordText;
     }
@@ -547,8 +639,10 @@ export function buildLiveFleetVehicles(params: {
 }
 
 export interface LiveOperationsSummary {
+  tripsTodayCount: number;
   activeTripsCount: number;
   scheduledTripsCount: number;
+  completedTripsCount: number;
   vehiclesMovingCount: number;
   driversOnDutyCount: number;
   totalDriversCount: number;
@@ -556,6 +650,8 @@ export interface LiveOperationsSummary {
   studentsAwaitingPickupCount: number;
   studentsOnBoardCount: number;
   activeAlertsCount: number;
+  liveGpsTripsCount: number;
+  staleGpsTripsCount: number;
   hasAnyActiveOperations: boolean;
 }
 
@@ -565,14 +661,39 @@ export function deriveLiveOperationsSummary(params: {
   drivers: Array<{ id: number; availabilityStatus: string }>;
   students: Array<{ enrollmentStatus: string; currentJourneyState: string }>;
   openIncidentsCount: number;
-  activeHazardsCount: number;
+  activeHazardsCount?: number;
+  now?: Date;
 }): LiveOperationsSummary {
-  const activeTrips = params.trips.filter((t) => ACTIVE_TRIP_STATES.has(t.state));
-  const scheduledTrips = params.trips.filter((t) => t.state === "scheduled");
-  const delayedTrips = params.trips.filter((t) => t.state === "delayed" || t.state === "incident");
+  const now = params.now ?? new Date();
+  const todayLuanda = getLuandaTodayDateString(now);
+  const tripsToday = params.trips.filter((t) => t.serviceDate === todayLuanda);
+  const activeTrips = tripsToday.filter((t) => ACTIVE_TRIP_STATES.has(t.state));
+  const scheduledTrips = tripsToday.filter((t) => t.state === "scheduled");
+  const completedTrips = tripsToday.filter((t) => t.state === "completed");
+
+  const delayedIds = new Set(
+    params.trips
+      .filter(
+        (t) =>
+          (t.serviceDate === todayLuanda && (t.state === "delayed" || Boolean(t.delayReason))) ||
+          t.state === "delayed"
+      )
+      .map((t) => t.id)
+  );
+
+  let liveGpsTripsCount = 0;
+  let staleGpsTripsCount = 0;
+  for (const t of params.trips) {
+    if (!ACTIVE_TRIP_STATES.has(t.state) && t.state !== "delayed" && t.state !== "incident") continue;
+    const eff = resolveEffectiveGpsStatus(t.gpsStatus, t.lastLocationAt, now);
+    if (eff === "live") liveGpsTripsCount += 1;
+    else if (eff === "stale") staleGpsTripsCount += 1;
+  }
 
   const tripVehicleIdsWithLiveGps = new Set(
-    activeTrips.filter((t) => t.gpsStatus === "live" && t.vehicleId != null).map((t) => t.vehicleId!)
+    activeTrips
+      .filter((t) => resolveEffectiveGpsStatus(t.gpsStatus, t.lastLocationAt, now) === "live" && t.vehicleId != null)
+      .map((t) => t.vehicleId!)
   );
   const vehiclesMovingCount = params.vehicles.filter(
     (v) => v.status === "on_trip" || tripVehicleIdsWithLiveGps.has(v.id)
@@ -588,19 +709,24 @@ export function deriveLiveOperationsSummary(params: {
     (s) => s.currentJourneyState === "boarded" || s.currentJourneyState === "in_transit"
   ).length;
 
-  const activeAlertsCount = params.openIncidentsCount + params.activeHazardsCount;
+  const activeAlertsCount = params.openIncidentsCount + (params.activeHazardsCount ?? 0);
 
   return {
+    tripsTodayCount: tripsToday.length,
     activeTripsCount: activeTrips.length,
     scheduledTripsCount: scheduledTrips.length,
+    completedTripsCount: completedTrips.length,
     vehiclesMovingCount,
     driversOnDutyCount,
     totalDriversCount: params.drivers.length,
-    delayedTripsCount: delayedTrips.length,
+    delayedTripsCount: delayedIds.size,
     studentsAwaitingPickupCount,
     studentsOnBoardCount,
     activeAlertsCount,
+    liveGpsTripsCount,
+    staleGpsTripsCount,
     hasAnyActiveOperations:
-      activeTrips.length > 0 || vehiclesMovingCount > 0 || delayedTrips.length > 0 || activeAlertsCount > 0,
+      activeTrips.length > 0 || vehiclesMovingCount > 0 || delayedIds.size > 0 || activeAlertsCount > 0,
   };
 }
+
